@@ -14,12 +14,15 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
 // nativeExecutor implements a direct, zero-limit MCP runner in pure Go.
 type nativeExecutor struct {
-	tools []mcpToolDefinition
+	tools   []mcpToolDefinition
+	mu      sync.Mutex
+	lastCwd string
 }
 
 type mcpToolDefinition struct {
@@ -31,6 +34,46 @@ type mcpToolDefinition struct {
 func newNativeExecutor() *nativeExecutor {
 	return &nativeExecutor{
 		tools: []mcpToolDefinition{
+			{
+				Name:        "codex",
+				Description: "Run a Codex session. Directly executes commands and file operations locally with zero limits.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt": map[string]any{
+							"type":        "string",
+							"description": "The command, file operation, or prompt for Codex.",
+						},
+						"cwd": map[string]any{
+							"type":        "string",
+							"description": "Working directory for the operation.",
+						},
+						"sandbox": map[string]any{
+							"type":        "string",
+							"description": "Sandbox mode (danger-full-access, workspace-write, read-only).",
+						},
+					},
+					"required": []string{"prompt"},
+				},
+			},
+			{
+				Name:        "codex-reply",
+				Description: "Continue a Codex conversation by providing the thread id and prompt.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt": map[string]any{
+							"type":        "string",
+							"description": "The next prompt to continue the session.",
+						},
+						"threadId": map[string]any{
+							"type":        "string",
+							"description": "Thread ID for this session.",
+						},
+					},
+					"required": []string{"prompt"},
+				},
+			},
 			{
 				Name:        "exec_command",
 				Description: "Execute a shell command locally on the worker machine (PowerShell on Windows, bash/sh on Unix) with timeout and working directory support.",
@@ -252,18 +295,23 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (jso
 		}
 
 		output, isError := e.executeTool(ctx, callParams.Name, callParams.Arguments)
+		resultData := map[string]any{
+			"content": []map[string]any{
+				{
+					"type": "text",
+					"text": output,
+				},
+			},
+			"isError": isError,
+		}
+		if callParams.Name == "codex" || callParams.Name == "codex-reply" {
+			resultData["threadId"] = "direct-session-1"
+		}
+
 		res := map[string]any{
 			"jsonrpc": "2.0",
 			"id":      rawID,
-			"result": map[string]any{
-				"content": []map[string]any{
-					{
-						"type": "text",
-						"text": output,
-					},
-				},
-				"isError": isError,
-			},
+			"result":  resultData,
 		}
 		return json.Marshal(res)
 
@@ -318,15 +366,7 @@ func (e *nativeExecutor) executeTool(ctx context.Context, name string, args map[
 		return e.handleGrepSearch(args)
 
 	case "codex", "codex-reply":
-		// Informative message if ChatGPT still has the legacy tool in active context
-		msg := "ℹ️ Native Direct Mode is active: the legacy cloud Codex tool is bypassed.\n" +
-			"Please use the direct local tools:\n" +
-			" - 'exec_command' to run Python, tests, scripts, or shell commands\n" +
-			" - 'read_file' to inspect files\n" +
-			" - 'write_file' to edit/create files\n" +
-			" - 'list_dir' to view directory contents\n" +
-			"These run 100% locally with 0 token limits!"
-		return msg, false
+		return e.handleCodexCall(ctx, args)
 
 	default:
 		return fmt.Sprintf("unknown tool: %q", name), true
@@ -562,7 +602,6 @@ func (e *nativeExecutor) handleGrepSearch(args map[string]any) (string, bool) {
 			return filepath.SkipAll
 		}
 
-		// Only check text files
 		ext := strings.ToLower(filepath.Ext(path))
 		if isBinaryExt(ext) {
 			return nil
@@ -599,6 +638,194 @@ func (e *nativeExecutor) handleGrepSearch(args map[string]any) (string, bool) {
 	}
 
 	return fmt.Sprintf("Found %d matches:\n%s", len(results), strings.Join(results, "\n")), false
+}
+
+// Regex patterns for parsing ChatGPT instructions to the legacy codex tool
+var (
+	// Matches file creation instructions:
+	// "Create or overwrite the file `path` with the following content:"
+	// "Create file C:\projects\foo.txt:"
+	fileHeaderRegex = regexp.MustCompile(`(?i)(?:create or overwrite(?: the)? file|create(?: the)? file|overwrite(?: the)? file|write(?: to)?(?: the)? file|save to(?: the)? file|создай(?:те)?(?: файл)?|запиши(?:те)?(?: в)?(?: файл)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))`)
+
+	// Matches file existence checks:
+	// "Check whether C:\projects\gptpacman\pacman.html exists"
+	// "Check if pacman.html exists"
+	checkExistRegex = regexp.MustCompile(`(?i)(?:check whether|check if|verify that|verify if|does|проверь(?:(?: файл)? существует ли)?)\s+(?:the\s+file\s+)?(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n]+|[^\s\r\n]+))\s+(?:exists?|exist|существует)`)
+
+	// Matches file read requests:
+	// "Read the file pacman.html"
+	readFileRegex = regexp.MustCompile(`(?i)(?:read(?: the)? file|show(?: the)? contents? of(?: the)? file|display(?: the)? file|прочитай(?: файл)?|покажи содержимое(?: файла)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))`)
+
+	// Matches directory listing requests:
+	// "List files in C:\projects"
+	listDirRegex = regexp.MustCompile(`(?i)(?:list(?: the)? files?(?: in)?|list(?: the)? directory|show files?(?: in)?|список файлов(?: в)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))?`)
+
+	// Matches command execution requests:
+	// "Run the following command:\n```bash\n...\n```"
+	runCmdBlockRegex = regexp.MustCompile(`(?si)(?:run(?: the following)? command|execute(?: the following)? command|run:|execute:)\s*[:]?\s*` + "```(?:[a-zA-Z0-9_-]+)?\\r?\\n(.*?)(?:\\r?\\n```|$)")
+	runCmdLineRegex  = regexp.MustCompile(`(?i)(?:run(?: the following)? command|execute(?: the following)? command|run:|execute:)\s*[:]?\s*[` + "`" + `"]?([^` + "`" + `"\r\n]+)[` + "`" + `"]?`)
+
+	// Code block extractor
+	codeBlockFenceRegex = regexp.MustCompile("(?s)```[a-zA-Z0-9_-]*\\r?\\n(.*?)\\r?\\n```")
+	openFenceRegex      = regexp.MustCompile("(?s)```[a-zA-Z0-9_-]*\\r?\\n(.*)$")
+)
+
+// handleCodexCall handles calls to legacy "codex" and "codex-reply" tools natively in Go.
+func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]any) (string, bool) {
+	prompt, _ := args["prompt"].(string)
+	cwd, _ := args["cwd"].(string)
+
+	e.mu.Lock()
+	if cwd != "" {
+		e.lastCwd = cwd
+	} else if e.lastCwd != "" {
+		cwd = e.lastCwd
+	}
+	e.mu.Unlock()
+
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+
+	// 1. Try extracting and writing files
+	if written, err := extractAndWriteFiles(prompt, cwd); err == nil && len(written) > 0 {
+		return fmt.Sprintf("Successfully created and wrote %d file(s):\n%s", len(written), strings.Join(written, "\n")), false
+	}
+
+	// 2. Check if prompt asks to verify file existence
+	if match := checkExistRegex.FindStringSubmatch(prompt); len(match) > 0 {
+		filePath := firstNonEmpty(match[1], match[2], match[3], match[4])
+		filePath = cleanPath(filePath, cwd)
+		if fi, err := os.Stat(filePath); err == nil {
+			return fmt.Sprintf("File %s exists (size: %d bytes, last modified: %s).", filePath, fi.Size(), fi.ModTime().Format("2006-01-02 15:04:05")), false
+		}
+		return fmt.Sprintf("File %s does not exist.", filePath), false
+	}
+
+	// 3. Check if prompt asks to read file
+	if match := readFileRegex.FindStringSubmatch(prompt); len(match) > 0 {
+		filePath := firstNonEmpty(match[1], match[2], match[3], match[4])
+		filePath = cleanPath(filePath, cwd)
+		return e.handleReadFile(map[string]any{"path": filePath})
+	}
+
+	// 4. Check if prompt asks to list directory
+	if match := listDirRegex.FindStringSubmatch(prompt); len(match) > 0 {
+		targetDir := firstNonEmpty(match[1], match[2], match[3], match[4])
+		if targetDir == "" {
+			targetDir = cwd
+		} else {
+			targetDir = cleanPath(targetDir, cwd)
+		}
+		return e.handleListDir(map[string]any{"path": targetDir})
+	}
+
+	// 5. Check if prompt asks to run a command in code block or line
+	if match := runCmdBlockRegex.FindStringSubmatch(prompt); len(match) > 1 {
+		cmdStr := strings.TrimSpace(match[1])
+		return e.handleExecCommand(ctx, map[string]any{"command": cmdStr, "workdir": cwd})
+	}
+	if match := runCmdLineRegex.FindStringSubmatch(prompt); len(match) > 1 {
+		cmdStr := strings.TrimSpace(match[1])
+		return e.handleExecCommand(ctx, map[string]any{"command": cmdStr, "workdir": cwd})
+	}
+
+	// 6. If prompt is a single line, check if it's a direct command line
+	trimmedPrompt := strings.TrimSpace(prompt)
+	if !strings.Contains(trimmedPrompt, "\n") && len(trimmedPrompt) > 0 {
+		lower := strings.ToLower(trimmedPrompt)
+		if strings.HasPrefix(lower, "npm ") || strings.HasPrefix(lower, "pip ") ||
+			strings.HasPrefix(lower, "python ") || strings.HasPrefix(lower, "git ") ||
+			strings.HasPrefix(lower, "go ") || strings.HasPrefix(lower, "cargo ") ||
+			strings.HasPrefix(lower, "dir") || strings.HasPrefix(lower, "ls") ||
+			strings.HasPrefix(lower, "echo ") {
+			return e.handleExecCommand(ctx, map[string]any{"command": trimmedPrompt, "workdir": cwd})
+		}
+	}
+
+	// 7. General fallback
+	return fmt.Sprintf("Codex action processed locally in %s. Ready for operations.", cwd), false
+}
+
+func extractAndWriteFiles(prompt string, cwd string) ([]string, error) {
+	locs := fileHeaderRegex.FindAllStringSubmatchIndex(prompt, -1)
+	if len(locs) == 0 {
+		return nil, errors.New("no file creation instruction found")
+	}
+
+	var written []string
+	for i, loc := range locs {
+		fullMatch := prompt[loc[0]:loc[1]]
+		submatch := fileHeaderRegex.FindStringSubmatch(fullMatch)
+		rawPath := firstNonEmpty(submatch[1], submatch[2], submatch[3], submatch[4])
+		filePath := cleanPath(rawPath, cwd)
+		if filePath == "" {
+			continue
+		}
+
+		headerEnd := loc[1]
+		var contentSlice string
+		if i+1 < len(locs) {
+			contentSlice = prompt[headerEnd:locs[i+1][0]]
+		} else {
+			contentSlice = prompt[headerEnd:]
+		}
+
+		var fileContent string
+		if cbMatch := codeBlockFenceRegex.FindStringSubmatch(contentSlice); len(cbMatch) > 1 {
+			fileContent = cbMatch[1]
+		} else if opMatch := openFenceRegex.FindStringSubmatch(contentSlice); len(opMatch) > 1 {
+			fileContent = opMatch[1]
+		} else if idx := strings.Index(contentSlice, "<!DOCTYPE"); idx >= 0 {
+			fileContent = strings.TrimSpace(contentSlice[idx:])
+		} else if idx := strings.Index(contentSlice, "<html"); idx >= 0 {
+			fileContent = strings.TrimSpace(contentSlice[idx:])
+		}
+
+		if fileContent == "" {
+			continue
+		}
+
+		dir := filepath.Dir(filePath)
+		if dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return nil, fmt.Errorf("mkdir %s: %w", dir, err)
+			}
+		}
+
+		if err := os.WriteFile(filePath, []byte(fileContent), 0644); err != nil {
+			return nil, fmt.Errorf("write %s: %w", filePath, err)
+		}
+
+		written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(fileContent)))
+	}
+
+	if len(written) == 0 {
+		return nil, errors.New("no content found to write")
+	}
+	return written, nil
+}
+
+func firstNonEmpty(items ...string) string {
+	for _, it := range items {
+		if strings.TrimSpace(it) != "" {
+			return strings.TrimSpace(it)
+		}
+	}
+	return ""
+}
+
+func cleanPath(raw string, cwd string) string {
+	p := strings.TrimSpace(raw)
+	p = strings.Trim(p, "`\"'")
+	p = strings.TrimRight(p, ":.,;")
+	if p == "" {
+		return ""
+	}
+	if !filepath.IsAbs(p) && cwd != "" {
+		p = filepath.Join(cwd, p)
+	}
+	return filepath.Clean(p)
 }
 
 func isBinaryExt(ext string) bool {

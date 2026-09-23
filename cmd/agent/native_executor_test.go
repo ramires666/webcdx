@@ -58,7 +58,12 @@ func TestNativeExecutorToolsList(t *testing.T) {
 		toolNames[tool.Name] = true
 	}
 
-	requiredTools := []string{"exec_command", "shell_command", "read_file", "write_file", "list_dir", "apply_patch", "grep_search"}
+	requiredTools := []string{
+		"codex", "codex-reply",
+		"exec_command", "shell_command",
+		"read_file", "write_file",
+		"list_dir", "apply_patch", "grep_search",
+	}
 	for _, reqName := range requiredTools {
 		if !toolNames[reqName] {
 			t.Errorf("expected tool %q not found in tools/list", reqName)
@@ -181,6 +186,124 @@ func TestNativeExecutorFileOperations(t *testing.T) {
 	}
 }
 
+func TestNativeExecutorCodexWriteAndVerify(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := newNativeExecutor()
+
+	// 1. ChatGPT instructs to create pacman.html
+	chatGPTPrompt := `Create or overwrite the file pacman.html with the following content:
+
+` + "```html" + `
+<!DOCTYPE html>
+<html>
+<head><title>Pacman Test</title></head>
+<body><h1>Pacman</h1></body>
+</html>
+` + "```"
+
+	req := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      50,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt":  chatGPTPrompt,
+				"cwd":     tmpDir,
+				"sandbox": "danger-full-access",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(req)
+	resp, err := exec.call(context.Background(), reqBytes)
+	if err != nil {
+		t.Fatalf("codex call failed: %v", err)
+	}
+	if !strings.Contains(string(resp), "Successfully created and wrote") {
+		t.Fatalf("expected success in writing file, got: %s", string(resp))
+	}
+
+	// Verify file was written to disk
+	targetFile := filepath.Join(tmpDir, "pacman.html")
+	data, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("file was not written to disk: %v", err)
+	}
+	if !strings.Contains(string(data), "<title>Pacman Test</title>") {
+		t.Fatalf("file content mismatch: %s", string(data))
+	}
+
+	// 2. ChatGPT checks if file exists
+	checkPrompt := "Check whether " + targetFile + " exists"
+	checkReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      51,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": checkPrompt,
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	checkBytes, _ := json.Marshal(checkReq)
+	resp, err = exec.call(context.Background(), checkBytes)
+	if err != nil {
+		t.Fatalf("check exists failed: %v", err)
+	}
+	if !strings.Contains(string(resp), "exists") || strings.Contains(string(resp), "does not exist") {
+		t.Fatalf("expected file exists confirmation, got: %s", string(resp))
+	}
+
+	// 3. Read file through codex prompt
+	readPrompt := "Read the file pacman.html"
+	readReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      52,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": readPrompt,
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	readBytes, _ := json.Marshal(readReq)
+	resp, err = exec.call(context.Background(), readBytes)
+	if err != nil {
+		t.Fatalf("read file failed: %v", err)
+	}
+	if !strings.Contains(string(resp), "Pacman Test") {
+		t.Fatalf("expected file contents, got: %s", string(resp))
+	}
+}
+
+func TestNativeExecutorCodexRunCommand(t *testing.T) {
+	exec := newNativeExecutor()
+	prompt := "Run the following command:\n```powershell\necho \"pacman_command_success\"\n```"
+	req := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      60,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": prompt,
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(req)
+	resp, err := exec.call(context.Background(), reqBytes)
+	if err != nil {
+		t.Fatalf("codex run command failed: %v", err)
+	}
+	if !strings.Contains(string(resp), "pacman_command_success") {
+		t.Fatalf("expected command output in response, got: %s", string(resp))
+	}
+}
+
 func TestNativeExecutorExecCommand(t *testing.T) {
 	exec := newNativeExecutor()
 	req := map[string]any{
@@ -204,29 +327,6 @@ func TestNativeExecutorExecCommand(t *testing.T) {
 	}
 }
 
-func TestNativeExecutorLegacyCodexNotice(t *testing.T) {
-	exec := newNativeExecutor()
-	req := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      30,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": "do something",
-			},
-		},
-	}
-	reqBytes, _ := json.Marshal(req)
-	resp, err := exec.call(context.Background(), reqBytes)
-	if err != nil {
-		t.Fatalf("legacy codex call failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "Native Direct Mode is active") {
-		t.Fatalf("expected native mode notice in legacy call, got: %s", string(resp))
-	}
-}
-
 func TestNativeExecutorUnknownTool(t *testing.T) {
 	exec := newNativeExecutor()
 	req := map[string]any{
@@ -246,9 +346,4 @@ func TestNativeExecutorUnknownTool(t *testing.T) {
 	if !strings.Contains(string(resp), "unknown tool") {
 		t.Fatalf("expected unknown tool error, got: %s", string(resp))
 	}
-}
-
-func init() {
-	// Silence unused os import in case of platform-specific code
-	_ = os.DevNull
 }
