@@ -334,7 +334,7 @@ func TestNativeExecutorUnknownTool(t *testing.T) {
 		"id":      40,
 		"method":  "tools/call",
 		"params": map[string]any{
-			"name": "non_existent_tool",
+			"name":      "non_existent_tool",
 			"arguments": map[string]any{},
 		},
 	}
@@ -347,3 +347,84 @@ func TestNativeExecutorUnknownTool(t *testing.T) {
 		t.Fatalf("expected unknown tool error, got: %s", string(resp))
 	}
 }
+
+func TestNativeExecutorCodexFolderListing(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := newNativeExecutor()
+
+	// Create test files in tmpDir
+	_ = os.WriteFile(filepath.Join(tmpDir, "strategy_test.py"), []byte("print('hello')"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "config.json"), []byte("{}"), 0644)
+
+	// Test 1: "Re-read the folder" with cwd
+	req1 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      70,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex-reply",
+			"arguments": map[string]any{
+				"prompt": "Re-read the folder",
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	req1Bytes, _ := json.Marshal(req1)
+	resp1, err := exec.call(context.Background(), req1Bytes)
+	if err != nil {
+		t.Fatalf("re-read folder failed: %v", err)
+	}
+	if strings.Contains(string(resp1), "Ready for operations") {
+		t.Fatalf("must never return dummy Ready for operations string!")
+	}
+	if !strings.Contains(string(resp1), "strategy_test.py") || !strings.Contains(string(resp1), "config.json") {
+		t.Fatalf("expected file list in output, got: %s", string(resp1))
+	}
+
+	// Test 2: "Re-read the folder <path>"
+	req2 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      71,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": "Re-read the folder " + tmpDir,
+			},
+		},
+	}
+	req2Bytes, _ := json.Marshal(req2)
+	resp2, err := exec.call(context.Background(), req2Bytes)
+	if err != nil {
+		t.Fatalf("re-read path failed: %v", err)
+	}
+	if !strings.Contains(string(resp2), "strategy_test.py") {
+		t.Fatalf("expected file in path listing, got: %s", string(resp2))
+	}
+
+	// Test 3: Fallback on arbitrary prompt returns directory contents, NEVER "Ready for operations"
+	req3 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      72,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex-reply",
+			"arguments": map[string]any{
+				"prompt": "Tell me what we have here",
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	req3Bytes, _ := json.Marshal(req3)
+	resp3, err := exec.call(context.Background(), req3Bytes)
+	if err != nil {
+		t.Fatalf("arbitrary prompt failed: %v", err)
+	}
+	if strings.Contains(string(resp3), "Ready for operations") {
+		t.Fatalf("must never return dummy Ready for operations string!")
+	}
+	if !strings.Contains(string(resp3), "strategy_test.py") {
+		t.Fatalf("fallback must provide directory listing, got: %s", string(resp3))
+	}
+}
+

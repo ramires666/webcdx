@@ -654,11 +654,7 @@ var (
 
 	// Matches file read requests:
 	// "Read the file pacman.html"
-	readFileRegex = regexp.MustCompile(`(?i)(?:read(?: the)? file|show(?: the)? contents? of(?: the)? file|display(?: the)? file|прочитай(?: файл)?|покажи содержимое(?: файла)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))`)
-
-	// Matches directory listing requests:
-	// "List files in C:\projects"
-	listDirRegex = regexp.MustCompile(`(?i)(?:list(?: the)? files?(?: in)?|list(?: the)? directory|show files?(?: in)?|список файлов(?: в)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))?`)
+	readFileRegex = regexp.MustCompile(`(?i)(?:read(?: the)? file|show(?: the)? contents? of(?: the)? file|display(?: the)? file|inspect(?: the)? file|прочитай(?: файл)?|покажи содержимое(?: файла)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))`)
 
 	// Matches command execution requests:
 	// "Run the following command:\n```bash\n...\n```"
@@ -702,49 +698,190 @@ func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]an
 		return fmt.Sprintf("File %s does not exist.", filePath), false
 	}
 
-	// 3. Check if prompt asks to read file
+	// 3. Check if prompt asks to read/inspect a specific file
 	if match := readFileRegex.FindStringSubmatch(prompt); len(match) > 0 {
 		filePath := firstNonEmpty(match[1], match[2], match[3], match[4])
 		filePath = cleanPath(filePath, cwd)
-		return e.handleReadFile(map[string]any{"path": filePath})
-	}
-
-	// 4. Check if prompt asks to list directory
-	if match := listDirRegex.FindStringSubmatch(prompt); len(match) > 0 {
-		targetDir := firstNonEmpty(match[1], match[2], match[3], match[4])
-		if targetDir == "" {
-			targetDir = cwd
-		} else {
-			targetDir = cleanPath(targetDir, cwd)
+		if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
+			return e.handleReadFile(map[string]any{"path": filePath})
 		}
-		return e.handleListDir(map[string]any{"path": targetDir})
 	}
 
-	// 5. Check if prompt asks to run a command in code block or line
+	// 4. Folder / Directory listing & inspection (re-read, read, list, show, explore, scan, Get-ChildItem, dir, ls)
+	if isFolderListingRequest(prompt) {
+		targetDir := extractDirectoryPath(prompt, cwd)
+		return e.getFolderListing(ctx, targetDir)
+	}
+
+	// 5. Command execution in code blocks (e.g. ```bash, ```powershell) or explicit "Run command:"
+	if cmd, ok := extractCommandFromPrompt(prompt); ok {
+		return e.handleExecCommand(ctx, map[string]any{"command": cmd, "workdir": cwd})
+	}
+
+	// 6. Check if prompt explicitly mentions an existing directory path
+	if targetDir := extractDirectoryPath(prompt, ""); targetDir != "" {
+		if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
+			return e.getFolderListing(ctx, targetDir)
+		}
+	}
+
+	// 7. Check if prompt mentions a path that is an existing file
+	if filePath := extractFilePath(prompt, cwd); filePath != "" {
+		if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
+			return e.handleReadFile(map[string]any{"path": filePath})
+		}
+	}
+
+	// 8. If prompt is a short command or instruction, try executing directly in PowerShell
+	trimmedPrompt := strings.TrimSpace(prompt)
+	if !strings.Contains(trimmedPrompt, "\n") && len(trimmedPrompt) > 0 && len(trimmedPrompt) < 300 {
+		out, isErr := e.handleExecCommand(ctx, map[string]any{"command": trimmedPrompt, "workdir": cwd})
+		if !isErr && strings.TrimSpace(out) != "" {
+			return out, false
+		}
+	}
+
+	// 9. Comprehensive fallback: return current directory contents so ChatGPT always receives genuine actionable state!
+	return e.getFolderListing(ctx, cwd)
+}
+
+func isFolderListingRequest(prompt string) bool {
+	lower := strings.ToLower(prompt)
+	if strings.Contains(lower, "get-childitem") || strings.Contains(lower, "dir ") || strings.HasPrefix(lower, "dir") || strings.Contains(lower, "ls ") || strings.HasPrefix(lower, "ls") {
+		return true
+	}
+
+	actionWords := []string{
+		"re-read", "reread", "read", "list", "show", "display", "get", "scan",
+		"inspect", "check", "explore", "view", "refresh", "see", "tree", "status",
+		"перечитай", "прочитай", "покажи", "список", "проверь", "глянь", "содержимое", "обнови",
+	}
+	targetWords := []string{
+		"folder", "directory", "dir", "files", "contents", "repo", "project", "workspace",
+		"папк", "директор", "файлы", "файлов", "каталог",
+	}
+
+	hasAction := false
+	for _, a := range actionWords {
+		if strings.Contains(lower, a) {
+			hasAction = true
+			break
+		}
+	}
+	if !hasAction {
+		return false
+	}
+
+	for _, t := range targetWords {
+		if strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractDirectoryPath(prompt string, fallback string) string {
+	// 1. Look for Windows absolute paths: C:\something\something
+	winPathRegex := regexp.MustCompile(`([A-Za-z]:\\[^\s` + "`" + `"'<>|?*]+|[A-Za-z]:/[^\s` + "`" + `"'<>|?*]+)`)
+	matches := winPathRegex.FindAllStringSubmatch(prompt, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			p := strings.TrimRight(m[1], ":.,;")
+			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+				return p
+			}
+		}
+	}
+
+	// 2. Look for quoted paths: `path` or "path"
+	quotedRegex := regexp.MustCompile(`[` + "`" + `"]([^` + "`" + `"\r\n]+)[` + "`" + `"]`)
+	qMatches := quotedRegex.FindAllStringSubmatch(prompt, -1)
+	for _, m := range qMatches {
+		if len(m) > 1 {
+			p := strings.TrimRight(m[1], ":.,;")
+			if !filepath.IsAbs(p) && fallback != "" {
+				p = filepath.Join(fallback, p)
+			}
+			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+				return p
+			}
+		}
+	}
+
+	return fallback
+}
+
+func extractFilePath(prompt string, cwd string) string {
+	winPathRegex := regexp.MustCompile(`([A-Za-z]:\\[^\s` + "`" + `"'<>|?*]+|[A-Za-z]:/[^\s` + "`" + `"'<>|?*]+)`)
+	matches := winPathRegex.FindAllStringSubmatch(prompt, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			p := strings.TrimRight(m[1], ":.,;")
+			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+				return p
+			}
+		}
+	}
+
+	quotedRegex := regexp.MustCompile(`[` + "`" + `"]([^` + "`" + `"\r\n]+)[` + "`" + `"]`)
+	qMatches := quotedRegex.FindAllStringSubmatch(prompt, -1)
+	for _, m := range qMatches {
+		if len(m) > 1 {
+			p := strings.TrimRight(m[1], ":.,;")
+			if !filepath.IsAbs(p) && cwd != "" {
+				p = filepath.Join(cwd, p)
+			}
+			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+				return p
+			}
+		}
+	}
+
+	return ""
+}
+
+func extractCommandFromPrompt(prompt string) (string, bool) {
 	if match := runCmdBlockRegex.FindStringSubmatch(prompt); len(match) > 1 {
-		cmdStr := strings.TrimSpace(match[1])
-		return e.handleExecCommand(ctx, map[string]any{"command": cmdStr, "workdir": cwd})
+		return strings.TrimSpace(match[1]), true
 	}
 	if match := runCmdLineRegex.FindStringSubmatch(prompt); len(match) > 1 {
-		cmdStr := strings.TrimSpace(match[1])
-		return e.handleExecCommand(ctx, map[string]any{"command": cmdStr, "workdir": cwd})
+		return strings.TrimSpace(match[1]), true
 	}
 
-	// 6. If prompt is a single line, check if it's a direct command line
-	trimmedPrompt := strings.TrimSpace(prompt)
-	if !strings.Contains(trimmedPrompt, "\n") && len(trimmedPrompt) > 0 {
-		lower := strings.ToLower(trimmedPrompt)
-		if strings.HasPrefix(lower, "npm ") || strings.HasPrefix(lower, "pip ") ||
-			strings.HasPrefix(lower, "python ") || strings.HasPrefix(lower, "git ") ||
-			strings.HasPrefix(lower, "go ") || strings.HasPrefix(lower, "cargo ") ||
-			strings.HasPrefix(lower, "dir") || strings.HasPrefix(lower, "ls") ||
-			strings.HasPrefix(lower, "echo ") {
-			return e.handleExecCommand(ctx, map[string]any{"command": trimmedPrompt, "workdir": cwd})
+	trimmed := strings.TrimSpace(prompt)
+	if !strings.Contains(trimmed, "\n") && len(trimmed) > 0 {
+		lower := strings.ToLower(trimmed)
+		prefixes := []string{
+			"npm ", "pip ", "python ", "python3 ", "git ", "cargo ", "go ",
+			"node ", "dotnet ", "pytest", "cat ", "type ", "echo ", "powershell ",
+			"cmd ", "npx ", "uv ", "poetry ", "make ", "docker ", "curl ",
+		}
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(lower, prefix) {
+				return trimmed, true
+			}
 		}
 	}
+	return "", false
+}
 
-	// 7. General fallback
-	return fmt.Sprintf("Codex action processed locally in %s. Ready for operations.", cwd), false
+func (e *nativeExecutor) getFolderListing(ctx context.Context, dir string) (string, bool) {
+	if dir == "" {
+		dir = "."
+	}
+	if runtime.GOOS == "windows" {
+		cmdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(cmdCtx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Get-ChildItem -Force")
+		cmd.Dir = dir
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err == nil && out.Len() > 0 {
+			return out.String(), false
+		}
+	}
+	return e.handleListDir(map[string]any{"path": dir})
 }
 
 func extractAndWriteFiles(prompt string, cwd string) ([]string, error) {
