@@ -61,22 +61,8 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	duration, err := time.ParseDuration(value)
-	if err != nil {
+	if err != nil || duration <= 0 {
 		return fallback
 	}
 	return duration
-}
-
-func boolEnv(name string, fallback bool) bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
-	switch value {
-	case "":
-		return fallback
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return fallback
-	}
 }

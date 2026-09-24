@@ -40,8 +40,8 @@ func (p toolPolicy) allows(name string) bool {
 	return p.allowed[name]
 }
 
-// filterToolsList applies the configured per-agent policy and optional ChatGPT card metadata.
-func filterToolsList(response json.RawMessage, policy toolPolicy, toolCards bool) (json.RawMessage, error) {
+// filterToolsList applies the configured per-agent policy.
+func filterToolsList(response json.RawMessage, policy toolPolicy) (json.RawMessage, error) {
 	var msg map[string]any
 	if err := json.Unmarshal(response, &msg); err != nil {
 		return nil, fmt.Errorf("parse tools/list response: %w", err)
@@ -64,9 +64,6 @@ func filterToolsList(response json.RawMessage, policy toolPolicy, toolCards bool
 		}
 		name, ok := toolObject["name"].(string)
 		if !ok || policy.allows(name) {
-			if toolCards {
-				decorateToolDescriptor(toolObject, name)
-			}
 			filtered = append(filtered, tool)
 		}
 	}

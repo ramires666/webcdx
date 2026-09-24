@@ -37,7 +37,7 @@ func streamOnce(ctx context.Context, client *http.Client, gateURL, token string,
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -47,6 +47,10 @@ func streamOnce(ctx context.Context, client *http.Client, gateURL, token string,
 		var request protocol.AgentRequest
 		if err := json.Unmarshal(line, &request); err != nil {
 			log.Printf("bad stream json: %v", err)
+			continue
+		}
+		if !request.Deadline.IsZero() && !time.Now().Before(request.Deadline) {
+			log.Printf("rejecting expired request id=%s", request.ID)
 			continue
 		}
 		go handleRequest(ctx, client, gateURL, token, runner, request)
@@ -67,10 +71,18 @@ func handleRequest(
 	request protocol.AgentRequest,
 ) {
 	started := time.Now()
+	if !request.Deadline.IsZero() && !started.Before(request.Deadline) {
+		log.Printf("rejecting expired request id=%s", request.ID)
+		return
+	}
 	actionDesc := formatActionRequest(request.Request)
 	log.Printf("▶ %s (id=%s, bytes=%d)", actionDesc, request.ID, len(request.Request))
 
-	callCtx, cancel := context.WithTimeout(ctx, durationEnv("WEBCODEX_MCP_CALL_TIMEOUT", 20*time.Minute))
+	callCtx := ctx
+	cancel := func() {}
+	if !request.Deadline.IsZero() {
+		callCtx, cancel = context.WithDeadline(ctx, request.Deadline)
+	}
 	defer cancel()
 
 	response, err := runner.call(callCtx, request.Request)

@@ -15,6 +15,8 @@ import (
 
 const mcpProtocolVersion = "2025-06-18"
 
+const maxMCPRequestBytes = 1 << 20
+
 type jsonrpcMessage struct {
 	ID     json.RawMessage `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
@@ -51,7 +53,7 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodDelete {
 		if !authorized {
-			s.writeMCPUnauthorized(w)
+			s.writeMCPUnauthorized(w, r)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -62,13 +64,23 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !authorized {
-		s.writeMCPUnauthorized(w)
+		if !s.allowRequest("mcp-auth:"+remoteHost(r), 60, time.Minute) {
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+		s.writeMCPUnauthorized(w, r)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPRequestBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		writeRPCError(w, nil, -32700, "read request")
 		return
 	}
@@ -88,42 +100,34 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			"result": map[string]any{
 				"protocolVersion": mcpProtocolVersion,
 				"capabilities": map[string]any{
-					"resources": map[string]any{
-						"listChanged": true,
-					},
 					"tools": map[string]any{
-						"listChanged": true,
+						"listChanged": false,
 					},
 				},
 				"serverInfo": map[string]string{
-					"name":    "webcodex",
-					"title":   "WebCodex",
-					"version": "0.1.0",
+					"name":    "local-workspace",
+					"title":   "Local Workspace",
+					"version": "1.0.0",
 				},
+				"instructions": "Use explicit file paths and command working directories. Long commands continue through process sessions and logs.",
 			},
 		})
 		log.Printf("mcp response ok agent=%s method=%q id=%s local=true elapsed=%s", agent.ID, msg.Method, string(msg.ID), time.Since(started))
 		return
 	}
 
-	result, handled, err := localMCPResult(msg.Method, body, s.toolCards)
-	if err != nil {
-		log.Printf("mcp local response error agent=%s method=%q id=%s error=%v", agent.ID, msg.Method, string(msg.ID), err)
-		writeRPCError(w, msg.ID, -32000, err.Error())
-		return
-	}
-	if handled {
+	if msg.Method == "ping" {
 		writeJSON(w, map[string]any{
 			"jsonrpc": "2.0",
 			"id":      msg.ID,
-			"result":  result,
+			"result":  map[string]any{},
 		})
 		log.Printf("mcp response ok agent=%s method=%q id=%s local=true elapsed=%s", agent.ID, msg.Method, string(msg.ID), time.Since(started))
 		return
 	}
 
 	if len(msg.ID) == 0 {
-		if err := rt.enqueue(r.Context(), protocol.AgentRequest{ID: "", Request: body}); err != nil {
+		if err := rt.enqueue(r.Context(), protocol.AgentRequest{ID: "", Request: body, Deadline: time.Now().Add(s.timeout)}); err != nil {
 			log.Printf("mcp notification enqueue error agent=%s method=%q error=%v", agent.ID, msg.Method, err)
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -134,9 +138,6 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	policy := newToolPolicy(agent.AllowedTools, agent.DeniedTools)
-	toolName := ""
-	toolArguments := map[string]any{}
-
 	if msg.Method == "tools/call" {
 		call, err := parseToolCall(body)
 		if err != nil {
@@ -148,8 +149,6 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			writeToolCallError(w, msg.ID, fmt.Sprintf("tool not allowed: %q", call.Name))
 			return
 		}
-		toolName = call.Name
-		toolArguments = call.Arguments
 	}
 
 	resp, err := rt.callAgent(r.Context(), body, s.timeout)
@@ -171,7 +170,7 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if msg.Method == "tools/list" {
-		response, err := filterToolsList(resp.Response, policy, s.toolCards)
+		response, err := filterToolsList(resp.Response, policy)
 		if err != nil {
 			log.Printf(
 				"mcp filter tools error agent=%s method=%q id=%s error=%v elapsed=%s",
@@ -182,23 +181,6 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 				time.Since(started),
 			)
 			writeRPCError(w, msg.ID, -32000, err.Error())
-			return
-		}
-		resp.Response = response
-	}
-
-	if msg.Method == "tools/call" && s.toolCards {
-		response, err := decorateToolCallResponse(resp.Response, toolName, toolArguments)
-		if err != nil {
-			log.Printf(
-				"mcp decorate tool response error agent=%s method=%q id=%s error=%v elapsed=%s",
-				agent.ID,
-				msg.Method,
-				string(msg.ID),
-				err,
-				time.Since(started),
-			)
-			writeToolCallError(w, msg.ID, err.Error())
 			return
 		}
 		resp.Response = response
@@ -225,7 +207,7 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 // handleMCPStream answers the optional MCP GET transport with an SSE stream readiness message.
 func (s *server) handleMCPStream(w http.ResponseWriter, r *http.Request, authorized bool) {
 	if !authorized {
-		s.writeMCPUnauthorized(w)
+		s.writeMCPUnauthorized(w, r)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -235,15 +217,19 @@ func (s *server) handleMCPStream(w http.ResponseWriter, r *http.Request, authori
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	if _, err := fmt.Fprint(w, ": webcodex stream ready\n\n"); err != nil {
+	if _, err := fmt.Fprint(w, ": local workspace stream ready\n\n"); err != nil {
 		log.Printf("write mcp stream: %v", err)
 	}
 }
 
-func (s *server) writeMCPUnauthorized(w http.ResponseWriter) {
+func (s *server) writeMCPUnauthorized(w http.ResponseWriter, r *http.Request) {
+	mcpPath := "/mcp"
+	if r.URL.Path == "/mcp/v2" || r.URL.Path == "/mcp/v3" {
+		mcpPath = r.URL.Path
+	}
 	w.Header().Set(
 		"WWW-Authenticate",
-		fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`, s.publicURL),
+		fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource%s"`, s.publicURL, mcpPath),
 	)
 }
 
@@ -290,7 +276,7 @@ func ensureToolCallResult(response json.RawMessage, id json.RawMessage) json.Raw
 		return out
 	}
 
-	// If the upstream codex response contains a JSON-RPC error, convert it to an MCP tool result with isError: true
+	// Convert a local JSON-RPC error to an MCP tool result with isError: true.
 	if errObj, ok := obj["error"]; ok && errObj != nil {
 		errMsg := "unknown tool error"
 		if errMap, ok := errObj.(map[string]any); ok {

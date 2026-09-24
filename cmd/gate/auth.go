@@ -80,17 +80,10 @@ func (s *server) adminAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // verifyPKCE validates an OAuth PKCE code verifier against the challenge.
 func verifyPKCE(verifier, challenge, method string) bool {
-	if challenge == "" {
-		return true
-	}
-	switch method {
-	case "", "plain":
-		return verifier == challenge
-	case "S256":
-		sum := sha256.Sum256([]byte(verifier))
-		calculated := base64.RawURLEncoding.EncodeToString(sum[:])
-		return calculated == challenge
-	default:
+	if verifier == "" || challenge == "" || method != "S256" {
 		return false
 	}
+	sum := sha256.Sum256([]byte(verifier))
+	calculated := base64.RawURLEncoding.EncodeToString(sum[:])
+	return calculated == challenge
 }

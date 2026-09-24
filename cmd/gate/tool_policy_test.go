@@ -6,20 +6,20 @@ import (
 )
 
 func TestToolPolicyFiltersToolsList(t *testing.T) {
-	policy := newToolPolicy("exec_command,apply_patch", "apply_patch")
+	policy := newToolPolicy("exec_command,write_file", "write_file")
 	response := json.RawMessage(`{
 		"jsonrpc":"2.0",
 		"id":1,
 		"result":{
 			"tools":[
 				{"name":"exec_command"},
-				{"name":"apply_patch"},
+				{"name":"write_file"},
 				{"name":"read_mcp_resource"}
 			]
 		}
 	}`)
 
-	filtered, err := filterToolsList(response, policy, false)
+	filtered, err := filterToolsList(response, policy)
 	if err != nil {
 		t.Fatalf("filter tools list: %v", err)
 	}

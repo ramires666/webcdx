@@ -1,245 +1,85 @@
-# WebCodex Gate: Multi-Agent + Web-Admin + SQLite + Docker
+# WebCodex Local Workspace MCP
 
-WebCodex delivers Codex agent capabilities inside ChatGPT Web with support for **multiple independent worker agents** (Windows / Linux) routed through a single gate server.
+WebCodex exposes explicit file and process operations from local Windows/Linux machines through one public MCP gate. The gate keeps OAuth, SQLite, per-machine routing, and tool policy; each local agent makes only an outbound HTTP connection.
 
-Russian version: [README.ru.md](README.ru.md) | User Guide: [USER_GUIDE.ru.md](USER_GUIDE.ru.md)
-
----
-
-## Multi-Agent Architecture
+Russian documentation: [README.ru.md](README.ru.md) · [User guide](USER_GUIDE.ru.md)
 
 ```text
-                                  INTERNET
-                                     │
-                                 HTTPS 443
-                                     ▼
-                            ┌────────────────┐
-                            │     Nginx      │
-                            │ codex.grom.world
-                            └────────┬───────┘
-                                     │ :8080 (Docker)
-                                     ▼
-                       ┌───────────────────────────┐
-                       │       webcodex-gate       │
-                       │                           │
-                       │  /mcp                     │
-                       │  /oauth/*                 │
-                       │  /agent/stream            │
-                       │  /agent/result            │
-                       │  /admin                   │
-                       │  /healthz                 │
-                       │                           │
-                       │  SQLite (/data/webcodex.db)
-                       │  Runtime Router           │
-                       └───┬──────────┬────────┬───┘
-                           │          │        │
-                     HOME  │    WORK  │   VPS2 │
-                           ▼          ▼        ▼
-                      Agent #1    Agent #2   Agent #3
-                      (Windows)   (Windows)  (Linux)
+MCP client ── HTTPS + OAuth ──> Gate ── outbound NDJSON stream ──> Local agent
+                                │                                  │
+                                └─ SQLite, routing, policy          └─ files, processes, logs
 ```
 
-- **Single Domain**: e.g. `https://codex.grom.world`.
-- **Multi-Agent Routing**: Independent streams and queues for `home`, `work`, `vps` without cross-agent contamination.
-- **SQLite Persistence**: Embedded database using CGO-free `modernc.org/sqlite` with WAL mode and foreign keys.
-- **Security**: Only SHA-256 hashes of agent tokens and OAuth secrets are stored.
-- **Web Admin**: Built-in dark-themed web panel at `/admin` protected by HTTP Basic Auth and CSRF tokens.
+## Tools
 
----
+`tools/list` contains exactly:
 
-## 🚀 Quickstart: Installation, Build & Setup
+| Tool | Operation |
+| --- | --- |
+| `read_file` | Read a UTF-8 file or line range. |
+| `write_file` | Atomically replace a file with exact content. |
+| `list_directory` | List one directory without recursion. |
+| `search_files` | Search text files by substring or optional regular expression. |
+| `exec_command` | Start a non-interactive shell command and stream output to a bounded log. |
+| `poll_command` | Read new log bytes and process status. |
+| `cancel_command` | Terminate the process tree. |
 
-Everything is designed to be as automated as possible.
+File paths and command working directories must be absolute. There is no natural-language task parser, conversation state, interactive terminal, or tool alias.
 
-### Step 1. Install Go (Golang)
+## Build and test
 
-You need Go (version 1.22+) to compile the agent or gate.
+Go 1.25 or newer is required.
 
-#### Windows (one command via winget)
-Open **PowerShell** and run:
 ```powershell
-winget install GoLang.Go
-```
-*(Or via Chocolatey: `choco install golang`, or download installer from [go.dev/dl](https://go.dev/dl/)).*
-
-> 💡 **Tip**: Reopen your terminal after installation so that `PATH` takes effect. Verify with `go version`.
-
-#### Linux (Ubuntu / Debian)
-```bash
-sudo apt update && sudo apt install -y golang
+go test -count=1 ./...
+go vet ./...
+go build -o webcodex-agent.exe ./cmd/agent
+go build -o bin/webcodex-gate.exe ./cmd/gate
 ```
 
-#### macOS
-```bash
-brew install go
-```
+`build.bat` and `build.sh` build both binaries.
 
----
+## Gate
 
-### Step 2. Install Codex CLI
-
-The agent delegates execution safely to the official OpenAI Codex CLI on your machine:
-```bash
-npm install -g @openai/codex
-```
-Verify with:
-```bash
-codex --version
-```
-
----
-
-### Step 3. Compile the Programs (One-Click Build)
-
-Ready-to-use automated build scripts are included:
-
-#### Windows:
-Double-click **`build.bat`** (or execute in terminal):
-```cmd
-build.bat
-```
-This script automatically:
-- Detects Go (even before PATH refresh).
-- Compiles `webcodex-agent.exe` (client worker).
-- Compiles `bin\webcodex-gate.exe` (gate server).
-
-Or build manually via PowerShell:
-```powershell
-go build -ldflags="-s -w" -o webcodex-agent.exe ./cmd/agent
-```
-
-#### Linux / macOS:
-```bash
-chmod +x build.sh
-./build.sh
-```
-
----
-
-### Step 4. Run the WebCodex Agent
-
-The easiest automated way is using the Web Admin panel:
-
-1. Open the Web Admin in your browser: **`https://codex.grom.world/admin`**.
-2. Under **"Add New Agent"**:
-   - Provide an **Agent ID** (e.g. `home`, `work` — lowercase letters, digits, dashes).
-   - Enter a human-readable title.
-   - Click **"Create Agent"**.
-3. On the credentials page, click the green button:
-   👉 **`📥 Download start-agent-<id>.bat`**
-4. Place the downloaded `.bat` file in the same folder as `webcodex-agent.exe`.
-5. **Double-click the `.bat` file**.
-
-> 🎉 The worker agent will connect to the gate, and the admin panel status will turn to **`🟢 ONLINE`**.
-
-#### Manual Run (PowerShell):
-```powershell
-$env:WEBCODEX_GATE_URL = "https://codex.grom.world"
-$env:WEBCODEX_AGENT_TOKEN = "wc_agent_TOKEN_FROM_ADMIN"
-
-.\webcodex-agent.exe
-```
-
----
-
-### Step 5. Connect to ChatGPT Web / Plugins / Actions
-### Step 5. Connect to ChatGPT Web (Connected Apps / MCP)
-
-Connect ChatGPT once per agent:
-> ⚠️ **Note**: WebCodex implements the **MCP (Model Context Protocol)** standard over HTTP, **not** a REST OpenAPI schema!
-> **Do NOT paste the URL into the "Schema" box of Custom GPT Actions.** The Schema box expects an OpenAPI YAML/JSON document, and pasting a plain URL will cause `Could not find a valid URL in 'servers'`.
-> With MCP, no manual schema is required — ChatGPT dynamically queries all available tools directly from the server.
-
-#### Method 1: Via Connected Apps / Chat MCP Tools (Recommended)
-#### Connecting via Connected Apps / Developer Mode:
-1. Open [chatgpt.com](https://chatgpt.com).
-2. Go to **Settings ➔ Connected Apps** (or Developer Mode / Add MCP server in chat).
-3. Click **Connect new app / Add MCP Server**.
-4. Paste the credentials from the admin panel (or from the downloaded `chatgpt-oauth-<id>.txt`):
-2. Click your user profile in the bottom-left corner ➔ **Settings**.
-3. Select **Connected Apps** (or **Developer**).
-4. Click **Connect new app** or **Add MCP Server**.
-5. Fill in the parameters from your Web Admin (`/admin`):
-
-| Parameter | Value |
-| :--- | :--- |
-| **Server URL** | `https://codex.grom.world/mcp` |
-| **Authorization URL** | `https://codex.grom.world/oauth/authorize` |
-| **Token URL** | `https://codex.grom.world/oauth/token` |
-| **Client ID** | `wc_client_...` (from /admin for selected agent) |
-| **Client Secret** | `wc_oauth_...` (from /admin for selected agent) |
-| **Auth type** | `OAuth 2.0` (Authorization Code + PKCE) |
-
-5. Click **Connect**. ChatGPT will authenticate with your gate server and activate the connection.
-6. Now you can instruct ChatGPT in chat to inspect code, run terminal commands, and perform development work directly on your machine through your local Codex instance!
-6. Click **Connect**. Authorize the gate server, and ChatGPT will immediately activate the connection.
-7. Now in any ChatGPT conversation, you can ask ChatGPT to inspect projects, run scripts, and execute commands on your computer through your local worker agent!
-
-#### Method 2: Via Custom GPT (Actions)
-1. Go to **Explore GPTs** ➔ **+ Create**.
-2. Switch to the **Configure** tab.
-3. Under **Actions**, click **Create new action**.
-4. Set the Schema URL to your gate server MCP endpoint (`https://codex.grom.world/mcp`).
-5. In **Authentication**, select **OAuth** with Authorization URL, Token URL, Client ID, and Client Secret from your admin panel.
-6. Save and start chatting!
-
----
-
-## Server Deployment: Docker Compose & Nginx
-
-### 1. Configure Environment
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-```env
-MCP_DOMAIN=codex.grom.world
-WEBCODEX_ADMIN_USER=admin
-WEBCODEX_ADMIN_PASSWORD=YOUR_STRONG_RANDOM_PASSWORD
-```
-
-### 2. Start the Gate Container
+Copy `.env.example` to `.env`, set a strong admin password, then start the public gate:
 
 ```bash
 docker compose up -d --build
 ```
 
-### 3. Nginx Reverse Proxy Setup
+The important endpoints are `/mcp`, `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, and `/healthz`. Put the gate behind HTTPS. OAuth requires PKCE S256 and a recognized ChatGPT callback URI. Access tokens expire after `WEBCODEX_ACCESS_TOKEN_TTL` (24 hours by default).
 
-Use `deploy/nginx-codex.grom.world.conf` to proxy traffic to `127.0.0.1:8080` with buffering disabled for streaming:
+Create an agent in `/admin`; copy its one-time agent token and OAuth client secret immediately. Only their SHA-256 hashes are persisted.
 
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
+## Local agent
 
-    proxy_buffering off;
-    proxy_cache off;
-    chunked_transfer_encoding on;
-
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-}
-```
-
----
-
-## Local Development & Tests
+Windows PowerShell example:
 
 ```powershell
-# Run tests
-go test -v ./cmd/gate/...
-go test -v ./cmd/agent/...
-
-# Manual compilation
-go build -o bin/webcodex-gate.exe ./cmd/gate
-go build -o webcodex-agent.exe ./cmd/agent
+$env:WEBCODEX_GATE_URL = "https://example.com"
+$env:WEBCODEX_AGENT_TOKEN = "<agent token from /admin>"
+$env:WEBCODEX_ALLOWED_ROOTS = "C:\projects;D:\work"
+$env:WEBCODEX_LOG_DIR = "$PSScriptRoot\logs"
+./webcodex-agent.exe
 ```
+
+Linux environment file example:
+
+```env
+WEBCODEX_GATE_URL=https://example.com
+WEBCODEX_AGENT_TOKEN=<agent token from /admin>
+WEBCODEX_ALLOWED_ROOTS=/srv/projects:/opt/work
+WEBCODEX_LOG_DIR=/var/log/webcodex-agent
+WEBCODEX_PROCESS_TTL=24h
+WEBCODEX_MAX_LOG_BYTES=52428800
+```
+
+By default only the agent's startup directory is allowed. `WEBCODEX_ALLOWED_ROOTS=*` deliberately permits all local paths. Symlinks are resolved before access checks.
+
+Command output is written from process start to `<UTC timestamp>-<session_id>.log`; a call returns only a bounded tail. Finished sessions and logs expire after 24 hours by default. The agent cancels active process trees during shutdown.
+
+## Security
+
+`exec_command` is remote code execution with the operating-system rights of the local agent. Deny it per agent unless it is needed, and do not run the agent as Administrator/root. File root restrictions do not constrain shell commands.
+
+Back up the SQLite database before deployment. Gate and agent binaries can be rolled back independently because this release does not change the database schema. After changing the tool schema, reconnect the MCP integration or use `/mcp/v3` and start a new conversation to avoid a cached tool list.

@@ -28,7 +28,7 @@ func TestStoreCRUDAndRelations(t *testing.T) {
 		OAuthClientID:         "client_home",
 		OAuthClientSecretHash: hashSecret("secret_home"),
 		AllowedTools:          "exec_command,read_file",
-		DeniedTools:           "apply_patch",
+		DeniedTools:           "exec_command",
 	}
 
 	if err := s.CreateAgent(ctx, agent); err != nil {

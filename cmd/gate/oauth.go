@@ -16,8 +16,14 @@ func (s *server) handleProtectedResource(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	mcpPath := "/mcp"
+	if strings.HasSuffix(r.URL.Path, "/mcp/v2") {
+		mcpPath = "/mcp/v2"
+	} else if strings.HasSuffix(r.URL.Path, "/mcp/v3") {
+		mcpPath = "/mcp/v3"
+	}
 	writeJSON(w, map[string]any{
-		"resource":              s.publicURL + "/mcp",
+		"resource":              s.publicURL + mcpPath,
 		"authorization_servers": []string{s.publicURL},
 	})
 }
@@ -34,7 +40,7 @@ func (s *server) handleOAuthServer(w http.ResponseWriter, r *http.Request) {
 		"token_endpoint":                        s.publicURL + "/oauth/token",
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code"},
-		"code_challenge_methods_supported":      []string{"S256", "plain"},
+		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "client_secret_basic"},
 		"scopes_supported":                      []string{"mcp"},
 	})
@@ -42,6 +48,10 @@ func (s *server) handleOAuthServer(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthorize validates the client ID, produces a single-use authorization code, and redirects.
 func (s *server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRequest("authorize:"+remoteHost(r), 30, time.Minute) {
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
 	clientID := r.URL.Query().Get("client_id")
 	redirectURI := r.URL.Query().Get("redirect_uri")
 
@@ -72,6 +82,15 @@ func (s *server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing redirect_uri", http.StatusBadRequest)
 		return
 	}
+	if !allowedOAuthRedirect(redirectURI) {
+		http.Error(w, "redirect_uri is not allowed", http.StatusBadRequest)
+		return
+	}
+	challenge := r.URL.Query().Get("code_challenge")
+	if challenge == "" || r.URL.Query().Get("code_challenge_method") != "S256" {
+		http.Error(w, "PKCE S256 is required", http.StatusBadRequest)
+		return
+	}
 
 	target, err := url.Parse(redirectURI)
 	if err != nil {
@@ -89,8 +108,8 @@ func (s *server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		AgentID:             agent.ID,
 		ClientID:            clientID,
 		RedirectURI:         redirectURI,
-		CodeChallenge:       r.URL.Query().Get("code_challenge"),
-		CodeChallengeMethod: r.URL.Query().Get("code_challenge_method"),
+		CodeChallenge:       challenge,
+		CodeChallengeMethod: "S256",
 		ExpiresAt:           time.Now().Add(5 * time.Minute),
 	}
 
@@ -110,11 +129,16 @@ func (s *server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 // handleToken exchanges an authorization code for a long-lived MCP Bearer token.
 func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRequest("token:"+remoteHost(r), 30, time.Minute) {
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
 	log.Printf("oauth token %s content_type=%q ua=%q", r.Method, r.Header.Get("Content-Type"), r.UserAgent())
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 
 	params, err := tokenParams(r)
 	if err != nil {
@@ -165,12 +189,9 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if entry.RedirectURI != "" {
-		reqRedirectURI := params["redirect_uri"]
-		if reqRedirectURI != "" && reqRedirectURI != entry.RedirectURI {
-			http.Error(w, "redirect_uri mismatch", http.StatusBadRequest)
-			return
-		}
+	if params["redirect_uri"] == "" || params["redirect_uri"] != entry.RedirectURI {
+		http.Error(w, "redirect_uri mismatch", http.StatusBadRequest)
+		return
 	}
 
 	verifier := params["code_verifier"]
@@ -186,7 +207,8 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tokenHash := hashSecret(rawToken)
-	expiresAt := time.Now().Add(365 * 24 * time.Hour)
+	tokenTTL := durationEnv("WEBCODEX_ACCESS_TOKEN_TTL", 24*time.Hour)
+	expiresAt := time.Now().Add(tokenTTL)
 
 	if err := s.store.CreateAccessToken(r.Context(), AccessToken{
 		TokenHash: tokenHash,
@@ -202,9 +224,18 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"access_token": rawToken,
 		"token_type":   "Bearer",
-		"expires_in":   31536000,
+		"expires_in":   int(tokenTTL.Seconds()),
 		"scope":        "mcp",
 	})
+}
+
+func allowedOAuthRedirect(value string) bool {
+	switch value {
+	case "https://chatgpt.com/oauth/callback", "https://chatgpt.com/connector_platform_oauth_redirect":
+		return true
+	default:
+		return false
+	}
 }
 
 func tokenParams(r *http.Request) (map[string]string, error) {

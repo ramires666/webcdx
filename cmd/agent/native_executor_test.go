@@ -5,807 +5,281 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
-func TestNativeExecutorInitialize(t *testing.T) {
-	exec := newNativeExecutor()
-	req := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	resp, err := exec.call(context.Background(), req)
+func testExecutor(t *testing.T) (*nativeExecutor, string) {
+	t.Helper()
+	root := t.TempDir()
+	executor, err := newNativeExecutorWithConfig(executorConfig{
+		AllowedRoots: []string{root}, LogDir: filepath.Join(root, "logs"), ProcessTTL: time.Hour,
+		MaxLogBytes: 1 << 20, MaxResponseBytes: 1 << 20,
+	})
 	if err != nil {
-		t.Fatalf("call initialize failed: %v", err)
+		t.Fatal(err)
 	}
-
-	var res struct {
-		JSONRPC string `json:"jsonrpc"`
-		ID      int    `json:"id"`
-		Result  struct {
-			ServerInfo struct {
-				Name string `json:"name"`
-			} `json:"serverInfo"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(resp, &res); err != nil {
-		t.Fatalf("unmarshal initialize resp: %v", err)
-	}
-	if res.Result.ServerInfo.Name != "webcodex-direct" {
-		t.Errorf("got server name %q, want 'webcodex-direct'", res.Result.ServerInfo.Name)
-	}
+	t.Cleanup(executor.Close)
+	return executor, root
 }
 
-func TestNativeExecutorToolsList(t *testing.T) {
-	exec := newNativeExecutor()
-	req := json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
-	resp, err := exec.call(context.Background(), req)
+func callTool(t *testing.T, executor *nativeExecutor, name string, arguments map[string]any) map[string]any {
+	t.Helper()
+	request, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": name, "arguments": arguments},
+	})
+	response, err := executor.call(context.Background(), request)
 	if err != nil {
-		t.Fatalf("call tools/list failed: %v", err)
+		t.Fatal(err)
 	}
-
-	var res struct {
+	var decoded struct {
 		Result struct {
-			Tools []struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-			} `json:"tools"`
+			IsError    bool           `json:"isError"`
+			Structured map[string]any `json:"structuredContent"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal(resp, &res); err != nil {
-		t.Fatalf("unmarshal tools/list resp: %v", err)
+	if err := json.Unmarshal(response, &decoded); err != nil {
+		t.Fatalf("decode response: %v: %s", err, response)
 	}
+	if decoded.Result.IsError {
+		t.Fatalf("tool %s failed: %v", name, decoded.Result.Structured)
+	}
+	return decoded.Result.Structured
+}
 
-	toolNames := map[string]bool{}
-	for _, tool := range res.Result.Tools {
-		toolNames[tool.Name] = true
-		lowerDesc := strings.ToLower(tool.Description)
-		if strings.Contains(lowerDesc, "codex") || strings.Contains(lowerDesc, "кодекс") {
-			t.Errorf("tool %q description must not contain 'codex' or 'кодекс', got: %q", tool.Name, tool.Description)
+func TestToolContractAndForbiddenTerms(t *testing.T) {
+	executor, _ := testExecutor(t)
+	requests := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+	}
+	var toolsResponse []byte
+	for _, request := range requests {
+		response, err := executor.call(context.Background(), json.RawMessage(request))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-
-	requiredTools := []string{
-		"codex", "codex-reply",
-		"exec_command", "shell_command",
-		"read_file", "write_file",
-		"list_dir", "apply_patch", "grep_search",
-	}
-	for _, reqName := range requiredTools {
-		if !toolNames[reqName] {
-			t.Errorf("expected tool %q not found in tools/list", reqName)
-		}
-	}
-}
-
-func TestNativeExecutorFileOperations(t *testing.T) {
-	tmpDir := t.TempDir()
-	exec := newNativeExecutor()
-	testFile := filepath.Join(tmpDir, "sub", "test.txt")
-
-	// 1. Write file
-	writeReq := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      10,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "write_file",
-			"arguments": map[string]any{
-				"path":    testFile,
-				"content": "Line 1\nLine 2\nLine 3\nHello WebCodex Direct!",
-			},
-		},
-	}
-	writeBytes, _ := json.Marshal(writeReq)
-	resp, err := exec.call(context.Background(), writeBytes)
-	if err != nil {
-		t.Fatalf("write_file call failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "Successfully wrote") {
-		t.Fatalf("unexpected write_file output: %s", string(resp))
-	}
-
-	// 2. Read full file
-	readReq := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      11,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "read_file",
-			"arguments": map[string]any{
-				"path": testFile,
-			},
-		},
-	}
-	readBytes, _ := json.Marshal(readReq)
-	resp, err = exec.call(context.Background(), readBytes)
-	if err != nil {
-		t.Fatalf("read_file call failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "Hello WebCodex Direct!") {
-		t.Fatalf("unexpected read_file output: %s", string(resp))
-	}
-
-	// 3. Read slice (offset=2, limit=2)
-	readSliceReq := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      12,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "read_file",
-			"arguments": map[string]any{
-				"path":   testFile,
-				"offset": 2,
-				"limit":  2,
-			},
-		},
-	}
-	readSliceBytes, _ := json.Marshal(readSliceReq)
-	resp, err = exec.call(context.Background(), readSliceBytes)
-	if err != nil {
-		t.Fatalf("read_file slice call failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "Line 2") || !strings.Contains(string(resp), "Line 3") {
-		t.Fatalf("unexpected read_file slice output: %s", string(resp))
-	}
-
-	// 4. List dir
-	listReq := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      13,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "list_dir",
-			"arguments": map[string]any{
-				"path": filepath.Dir(testFile),
-			},
-		},
-	}
-	listBytes, _ := json.Marshal(listReq)
-	resp, err = exec.call(context.Background(), listBytes)
-	if err != nil {
-		t.Fatalf("list_dir call failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "test.txt") {
-		t.Fatalf("unexpected list_dir output: %s", string(resp))
-	}
-
-	// 5. Grep search
-	grepReq := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      14,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "grep_search",
-			"arguments": map[string]any{
-				"path":  tmpDir,
-				"query": "WebCodex",
-			},
-		},
-	}
-	grepBytes, _ := json.Marshal(grepReq)
-	resp, err = exec.call(context.Background(), grepBytes)
-	if err != nil {
-		t.Fatalf("grep_search call failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "Hello WebCodex Direct!") {
-		t.Fatalf("unexpected grep_search output: %s", string(resp))
-	}
-}
-
-func TestNativeExecutorCodexWriteAndVerify(t *testing.T) {
-	tmpDir := t.TempDir()
-	exec := newNativeExecutor()
-
-	// 1. ChatGPT instructs to create pacman.html
-	chatGPTPrompt := `Create or overwrite the file pacman.html with the following content:
-
-` + "```html" + `
-<!DOCTYPE html>
-<html>
-<head><title>Pacman Test</title></head>
-<body><h1>Pacman</h1></body>
-</html>
-` + "```"
-
-	req := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      50,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt":  chatGPTPrompt,
-				"cwd":     tmpDir,
-				"sandbox": "danger-full-access",
-			},
-		},
-	}
-	reqBytes, _ := json.Marshal(req)
-	resp, err := exec.call(context.Background(), reqBytes)
-	if err != nil {
-		t.Fatalf("codex call failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "Successfully created and wrote") {
-		t.Fatalf("expected success in writing file, got: %s", string(resp))
-	}
-
-	// Verify file was written to disk
-	targetFile := filepath.Join(tmpDir, "pacman.html")
-	data, err := os.ReadFile(targetFile)
-	if err != nil {
-		t.Fatalf("file was not written to disk: %v", err)
-	}
-	if !strings.Contains(string(data), "<title>Pacman Test</title>") {
-		t.Fatalf("file content mismatch: %s", string(data))
-	}
-
-	// 2. ChatGPT checks if file exists
-	checkPrompt := "Check whether " + targetFile + " exists"
-	checkReq := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      51,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": checkPrompt,
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	checkBytes, _ := json.Marshal(checkReq)
-	resp, err = exec.call(context.Background(), checkBytes)
-	if err != nil {
-		t.Fatalf("check exists failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "exists") || strings.Contains(string(resp), "does not exist") {
-		t.Fatalf("expected file exists confirmation, got: %s", string(resp))
-	}
-
-	// 3. Read file through codex prompt
-	readPrompt := "Read the file pacman.html"
-	readReq := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      52,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": readPrompt,
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	readBytes, _ := json.Marshal(readReq)
-	resp, err = exec.call(context.Background(), readBytes)
-	if err != nil {
-		t.Fatalf("read file failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "Pacman Test") {
-		t.Fatalf("expected file contents, got: %s", string(resp))
-	}
-}
-
-func TestNativeExecutorCodexRunCommand(t *testing.T) {
-	exec := newNativeExecutor()
-	prompt := "Run the following command:\n```powershell\necho \"pacman_command_success\"\n```"
-	req := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      60,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": prompt,
-			},
-		},
-	}
-	reqBytes, _ := json.Marshal(req)
-	resp, err := exec.call(context.Background(), reqBytes)
-	if err != nil {
-		t.Fatalf("codex run command failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "pacman_command_success") {
-		t.Fatalf("expected command output in response, got: %s", string(resp))
-	}
-}
-
-func TestNativeExecutorExecCommand(t *testing.T) {
-	exec := newNativeExecutor()
-	req := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      20,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "exec_command",
-			"arguments": map[string]any{
-				"command": "echo test_output_123",
-			},
-		},
-	}
-	reqBytes, _ := json.Marshal(req)
-	resp, err := exec.call(context.Background(), reqBytes)
-	if err != nil {
-		t.Fatalf("exec_command call failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "test_output_123") {
-		t.Fatalf("expected output 'test_output_123' in response, got: %s", string(resp))
-	}
-}
-
-func TestNativeExecutorUnknownTool(t *testing.T) {
-	exec := newNativeExecutor()
-	req := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      40,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name":      "non_existent_tool",
-			"arguments": map[string]any{},
-		},
-	}
-	reqBytes, _ := json.Marshal(req)
-	resp, err := exec.call(context.Background(), reqBytes)
-	if err != nil {
-		t.Fatalf("unknown tool call failed: %v", err)
-	}
-	if !strings.Contains(string(resp), "unknown tool") {
-		t.Fatalf("expected unknown tool error, got: %s", string(resp))
-	}
-}
-
-func TestNativeExecutorCodexFolderListing(t *testing.T) {
-	tmpDir := t.TempDir()
-	exec := newNativeExecutor()
-
-	// Create test files in tmpDir
-	_ = os.WriteFile(filepath.Join(tmpDir, "strategy_test.py"), []byte("print('hello')"), 0644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "config.json"), []byte("{}"), 0644)
-
-	// Test 1: "Re-read the folder" with cwd
-	req1 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      70,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex-reply",
-			"arguments": map[string]any{
-				"prompt": "Re-read the folder",
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	req1Bytes, _ := json.Marshal(req1)
-	resp1, err := exec.call(context.Background(), req1Bytes)
-	if err != nil {
-		t.Fatalf("re-read folder failed: %v", err)
-	}
-	if strings.Contains(string(resp1), "Ready for operations") {
-		t.Fatalf("must never return dummy Ready for operations string!")
-	}
-	if !strings.Contains(string(resp1), "strategy_test.py") || !strings.Contains(string(resp1), "config.json") {
-		t.Fatalf("expected file list in output, got: %s", string(resp1))
-	}
-
-	// Test 2: "Re-read the folder <path>"
-	req2 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      71,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": "Re-read the folder " + tmpDir,
-			},
-		},
-	}
-	req2Bytes, _ := json.Marshal(req2)
-	resp2, err := exec.call(context.Background(), req2Bytes)
-	if err != nil {
-		t.Fatalf("re-read path failed: %v", err)
-	}
-	if !strings.Contains(string(resp2), "strategy_test.py") {
-		t.Fatalf("expected file in path listing, got: %s", string(resp2))
-	}
-
-	// Test 3: Fallback on arbitrary prompt returns directory contents, NEVER "Ready for operations"
-	req3 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      72,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex-reply",
-			"arguments": map[string]any{
-				"prompt": "Tell me what we have here",
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	req3Bytes, _ := json.Marshal(req3)
-	resp3, err := exec.call(context.Background(), req3Bytes)
-	if err != nil {
-		t.Fatalf("arbitrary prompt failed: %v", err)
-	}
-	if strings.Contains(string(resp3), "Ready for operations") {
-		t.Fatalf("must never return dummy Ready for operations string!")
-	}
-	if !strings.Contains(string(resp3), "strategy_test.py") {
-		t.Fatalf("fallback must provide directory listing, got: %s", string(resp3))
-	}
-}
-
-func TestNativeExecutorSnakeHtmlAndVariations(t *testing.T) {
-	tmpDir := t.TempDir()
-	exec := newNativeExecutor()
-
-	// 1. Exact real-world ChatGPT prompt with "Use the filesystem only..." and 18KB content
-	largeContent := "<!DOCTYPE html>\n<html><head><title>Snake Game</title></head>\n<body>\n" +
-		strings.Repeat("<div>Snake Game Canvas Logic and Data</div>\n", 400) +
-		"</body></html>"
-
-	realWorldPrompt := "Use the filesystem only to inspect or create files in " + tmpDir + ".\n\n" +
-		"Create or overwrite the file `snake.html` with the following content:\n\n```html\n" +
-		largeContent + "\n```"
-
-	req1 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      101,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": realWorldPrompt,
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	req1Bytes, _ := json.Marshal(req1)
-	resp1, err := exec.call(context.Background(), req1Bytes)
-	if err != nil {
-		t.Fatalf("real-world snake.html write failed: %v", err)
-	}
-	if !strings.Contains(string(resp1), "Successfully created and wrote") {
-		t.Fatalf("expected write success, got: %s", string(resp1))
-	}
-
-	snakePath := filepath.Join(tmpDir, "snake.html")
-	data, err := os.ReadFile(snakePath)
-	if err != nil {
-		t.Fatalf("snake.html not found on disk: %v", err)
-	}
-	if len(data) != len(largeContent) {
-		t.Fatalf("expected %d bytes, got %d bytes", len(largeContent), len(data))
-	}
-
-	// 2. Prompt variation: "Target file: snake2.html\n```html\n..."
-	promptVar2 := "Target file: snake2.html\n```html\n<h1>Snake 2</h1>\n```"
-	req2 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      102,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": promptVar2,
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	req2Bytes, _ := json.Marshal(req2)
-	resp2, err := exec.call(context.Background(), req2Bytes)
-	if err != nil {
-		t.Fatalf("prompt variation 2 failed: %v", err)
-	}
-	if !strings.Contains(string(resp2), "Successfully created and wrote") {
-		t.Fatalf("expected success for target file variation, got: %s", string(resp2))
-	}
-	if _, err := os.Stat(filepath.Join(tmpDir, "snake2.html")); err != nil {
-		t.Fatalf("snake2.html was not written to disk: %v", err)
-	}
-
-	// 3. Prompt variation: "Here is `game.js`:\n```javascript\nconsole.log('game');\n```"
-	promptVar3 := "Here is `game.js`:\n```javascript\nconsole.log('game');\n```"
-	req3 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      103,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": promptVar3,
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	req3Bytes, _ := json.Marshal(req3)
-	resp3, err := exec.call(context.Background(), req3Bytes)
-	if err != nil {
-		t.Fatalf("prompt variation 3 failed: %v", err)
-	}
-	if !strings.Contains(string(resp3), "Successfully created and wrote") {
-		t.Fatalf("expected success for 'Here is' variation, got: %s", string(resp3))
-	}
-	if _, err := os.Stat(filepath.Join(tmpDir, "game.js")); err != nil {
-		t.Fatalf("game.js was not written to disk: %v", err)
-	}
-
-	// 4. Prompt variation: Russian instruction "Запиши в файл script.py:\n```python\nprint(42)\n```"
-	promptVar4 := "Запиши в файл script.py:\n```python\nprint(42)\n```"
-	req4 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      104,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": promptVar4,
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	req4Bytes, _ := json.Marshal(req4)
-	resp4, err := exec.call(context.Background(), req4Bytes)
-	if err != nil {
-		t.Fatalf("prompt variation 4 failed: %v", err)
-	}
-	if !strings.Contains(string(resp4), "Successfully created and wrote") {
-		t.Fatalf("expected success for Russian variation, got: %s", string(resp4))
-	}
-	if _, err := os.Stat(filepath.Join(tmpDir, "script.py")); err != nil {
-		t.Fatalf("script.py was not written to disk: %v", err)
-	}
-
-	// 5. Multiple files in single prompt
-	promptVar5 := "Create or overwrite `style.css`:\n```css\nbody { margin: 0; }\n```\n\nCreate or overwrite `app.js`:\n```js\nalert(1);\n```"
-	req5 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      105,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": promptVar5,
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	req5Bytes, _ := json.Marshal(req5)
-	resp5, err := exec.call(context.Background(), req5Bytes)
-	if err != nil {
-		t.Fatalf("prompt variation 5 failed: %v", err)
-	}
-	if !strings.Contains(string(resp5), "Successfully created and wrote 2 file(s)") {
-		t.Fatalf("expected 2 files written, got: %s", string(resp5))
-	}
-
-	// 6. Raw HTML without fences
-	promptVar6 := "Save the file raw.html with:\n<!DOCTYPE html><html><body>Raw HTML</body></html>"
-	req6 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      106,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": promptVar6,
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	req6Bytes, _ := json.Marshal(req6)
-	resp6, err := exec.call(context.Background(), req6Bytes)
-	if err != nil {
-		t.Fatalf("prompt variation 6 failed: %v", err)
-	}
-	if !strings.Contains(string(resp6), "Successfully created and wrote") {
-		t.Fatalf("expected success for raw HTML variation, got: %s", string(resp6))
-	}
-}
-
-func TestNativeExecutorCwdPreservationAndAliases(t *testing.T) {
-	tmpDir := t.TempDir()
-	exec := newNativeExecutor()
-
-	// Step 1: Call codex with cwd set
-	req1 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      201,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "codex",
-			"arguments": map[string]any{
-				"prompt": "list the files in the directory",
-				"cwd":    tmpDir,
-			},
-		},
-	}
-	req1Bytes, _ := json.Marshal(req1)
-	_, _ = exec.call(context.Background(), req1Bytes)
-
-	// Step 2: Call write_file without cwd, using alias 'filePath' and 'code'
-	req2 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      202,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "write_file",
-			"arguments": map[string]any{
-				"filePath": "alias_test.txt",
-				"code":     "content from alias",
-			},
-		},
-	}
-	req2Bytes, _ := json.Marshal(req2)
-	resp2, err := exec.call(context.Background(), req2Bytes)
-	if err != nil {
-		t.Fatalf("write_file with aliases failed: %v", err)
-	}
-	if !strings.Contains(string(resp2), "Successfully wrote") {
-		t.Fatalf("expected success in write_file, got: %s", string(resp2))
-	}
-
-	// Verify it wrote into tmpDir because cwd was preserved
-	expectedFile := filepath.Join(tmpDir, "alias_test.txt")
-	content, err := os.ReadFile(expectedFile)
-	if err != nil {
-		t.Fatalf("file was not written in preserved cwd (%s): %v", tmpDir, err)
-	}
-	if string(content) != "content from alias" {
-		t.Fatalf("unexpected content: %s", string(content))
-	}
-
-	// Step 3: Call read_file using alias 'file' without cwd
-	req3 := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      203,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "read_file",
-			"arguments": map[string]any{
-				"file": "alias_test.txt",
-			},
-		},
-	}
-	req3Bytes, _ := json.Marshal(req3)
-	resp3, err := exec.call(context.Background(), req3Bytes)
-	if err != nil {
-		t.Fatalf("read_file failed: %v", err)
-	}
-	if !strings.Contains(string(resp3), "content from alias") {
-		t.Fatalf("expected content from alias in read_file, got: %s", string(resp3))
-	}
-}
-
-func TestNativeExecutorFolderListingSafetyWithCodeBlocks(t *testing.T) {
-	// Ensure that prompts containing code blocks are NEVER treated as folder listings,
-	// even if they mention words like "project", "files", "tree", "list".
-	promptWithCode := "Here is the project tree viewer script for our files:\n```html\n<div>Tree</div>\n```"
-	if isFolderListingRequest(promptWithCode) {
-		t.Errorf("prompt containing code block must never return true for isFolderListingRequest!")
-	}
-
-	promptWithWrite := "Write the file project_files_list.txt with content: hello"
-	if isFolderListingRequest(promptWithWrite) {
-		t.Errorf("prompt containing 'write' must never return true for isFolderListingRequest!")
-	}
-}
-
-func TestDebugPrompt(t *testing.T) {
-	prompts := []string{
-		"Write EXACTLY the following content to snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
-		"Write EXACTLY the following code to `snake.html`:\n```html\n<!DOCTYPE html><html></html>\n```",
-		"Write EXACTLY the following content to C:\\projects\\gptpacman\\snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
-		"Write EXACTLY the following code to C:\\projects\\gptpacman\\snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
-		"Write EXACTLY the following code into snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
-		"Write EXACTLY the following to snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
-		"Write EXACTLY the following content to snake.html:\n<!DOCTYPE html><html><body>test</body></html>",
-		"Write EXACTLY the following content:\nFile: snake.html\n```html\n<!DOCTYPE html><html></html>\n```",
-	}
-	tmp := t.TempDir()
-	for i, p := range prompts {
-		written, err := extractAndWriteFiles(p, tmp, nil)
-		if err != nil || len(written) == 0 {
-			t.Fatalf("Prompt %d failed: %v", i, err)
-		}
-		t.Logf("Prompt %d: written=%v", i, written)
-	}
-}
-
-func TestCodexCallNeverReturnsListingOnWrite(t *testing.T) {
-	tmpDir := t.TempDir()
-	exec := newNativeExecutor()
-
-	htmlCode := "<!DOCTYPE html>\n<html><head><title>Snake Game</title></head>\n<body>\n" +
-		strings.Repeat("<div>Canvas Game Loop Logic 12345</div>\n", 300) +
-		"</body></html>"
-
-	testPrompts := []struct {
-		name   string
-		prompt string
-		args   map[string]any
-	}{
-		{
-			name:   "Write EXACTLY to snake.html with backticks",
-			prompt: "Write EXACTLY the following content to snake.html:\n```html\n" + htmlCode + "\n```",
-			args:   map[string]any{"cwd": tmpDir},
-		},
-		{
-			name:   "Write EXACTLY to full path with backticks",
-			prompt: "Write EXACTLY the following content to " + filepath.Join(tmpDir, "snake.html") + ":\n```html\n" + htmlCode + "\n```",
-			args:   map[string]any{"cwd": tmpDir},
-		},
-		{
-			name:   "Write EXACTLY raw HTML without backticks",
-			prompt: "Write EXACTLY the following content to snake.html:\n" + htmlCode,
-			args:   map[string]any{"cwd": tmpDir},
-		},
-		{
-			name:   "Write EXACTLY unclosed backtick fence",
-			prompt: "Write EXACTLY the following content to snake.html:\n```html\n" + htmlCode,
-			args:   map[string]any{"cwd": tmpDir},
-		},
-		{
-			name:   "Args with base-instructions and prompt",
-			prompt: "Write EXACTLY the following content to snake.html:\n```html\n" + htmlCode + "\n```",
-			args: map[string]any{
-				"base-instructions": "You are a shell execution agent",
-				"cwd":               tmpDir,
-				"sandbox":           "danger-full-access",
-				"approval-policy":   "never",
-			},
-		},
-		{
-			name:   "Path in args and code in prompt",
-			prompt: "Here is the complete source:\n```html\n" + htmlCode + "\n```",
-			args: map[string]any{
-				"path": "snake.html",
-				"cwd":  tmpDir,
-			},
-		},
-	}
-
-	for _, tc := range testPrompts {
-		t.Run(tc.name, func(t *testing.T) {
-			_ = os.Remove(filepath.Join(tmpDir, "snake.html"))
-
-			callArgs := map[string]any{
-				"prompt": tc.prompt,
+		lower := strings.ToLower(string(response))
+		for _, forbidden := range []string{"codex", "model", "reasoning", "thinking", "threadid", `"prompt"`} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("response contains %q: %s", forbidden, response)
 			}
-			for k, v := range tc.args {
-				callArgs[k] = v
-			}
+		}
+		toolsResponse = response
+	}
+	var listed struct {
+		Result struct {
+			Tools []mcpToolDefinition `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(toolsResponse, &listed); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"read_file", "write_file", "list_directory", "search_files", "exec_command", "poll_command", "cancel_command"}
+	if len(listed.Result.Tools) != len(want) {
+		t.Fatalf("tool count = %d, want %d", len(listed.Result.Tools), len(want))
+	}
+	for index, tool := range listed.Result.Tools {
+		if tool.Name != want[index] || tool.OutputSchema == nil || tool.Annotations == nil {
+			t.Fatalf("tool %d = %#v", index, tool)
+		}
+	}
+}
 
-			reqBytes, _ := json.Marshal(map[string]any{
-				"jsonrpc": "2.0",
-				"id":      999,
-				"method":  "tools/call",
-				"params": map[string]any{
-					"name":      "codex",
-					"arguments": callArgs,
-				},
+func TestUnknownLegacyToolHasNoSideEffects(t *testing.T) {
+	executor, root := testExecutor(t)
+	request, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": "codex", "arguments": map[string]any{"prompt": "write a file", "cwd": root}},
+	})
+	response, err := executor.call(context.Background(), request)
+	if err != nil || !strings.Contains(string(response), "unknown tool") {
+		t.Fatalf("response = %s, err = %v", response, err)
+	}
+	entries, _ := os.ReadDir(root)
+	if len(entries) != 1 || entries[0].Name() != "logs" {
+		t.Fatalf("unexpected side effects: %v", entries)
+	}
+}
+
+func TestFileTools(t *testing.T) {
+	executor, root := testExecutor(t)
+	emptyDir := filepath.Join(root, "empty")
+	_ = os.Mkdir(emptyDir, 0o700)
+	emptyListing := callTool(t, executor, "list_directory", map[string]any{"path": emptyDir})
+	if len(emptyListing["entries"].([]any)) != 0 {
+		t.Fatalf("empty listing: %v", emptyListing)
+	}
+	path := filepath.Join(root, "юникод", "file.txt")
+	written := callTool(t, executor, "write_file", map[string]any{"path": path, "content": "one\nдва\nthree\n"})
+	if written["bytes_written"].(float64) != float64(len([]byte("one\nдва\nthree\n"))) {
+		t.Fatalf("write result: %v", written)
+	}
+	read := callTool(t, executor, "read_file", map[string]any{"path": path, "offset": 2, "limit": 1})
+	if read["content"] != "два\n" {
+		t.Fatalf("range content = %q", read["content"])
+	}
+	callTool(t, executor, "write_file", map[string]any{"path": path, "content": ""})
+	read = callTool(t, executor, "read_file", map[string]any{"path": path})
+	if read["content"] != "" {
+		t.Fatalf("empty content = %q", read["content"])
+	}
+	_ = os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(root, "binary.txt"), []byte{'a', 0, 'b'}, 0o600)
+	_ = os.Mkdir(filepath.Join(root, "folder"), 0o700)
+	listing := callTool(t, executor, "list_directory", map[string]any{"path": root, "max_entries": 2})
+	if listing["truncated"] != true {
+		t.Fatalf("listing should be truncated: %v", listing)
+	}
+	search := callTool(t, executor, "search_files", map[string]any{"path": root, "pattern": "needle", "glob": "*.txt", "max_results": 1})
+	if len(search["matches"].([]any)) != 1 {
+		t.Fatalf("search result: %v", search)
+	}
+}
+
+func TestBinaryAndAllowedRoots(t *testing.T) {
+	executor, root := testExecutor(t)
+	binary := filepath.Join(root, "binary.bin")
+	_ = os.WriteFile(binary, []byte{0, 1, 2}, 0o600)
+	if _, err := executor.readFile(map[string]any{"path": binary}); err == nil || !strings.Contains(err.Error(), "binary") {
+		t.Fatalf("binary error = %v", err)
+	}
+	outside := filepath.Join(filepath.Dir(root), "outside.txt")
+	if _, err := executor.writeFile(map[string]any{"path": outside, "content": "no"}); err == nil {
+		t.Fatal("outside path was accepted")
+	}
+	if _, err := executor.readFile(map[string]any{"path": "relative.txt"}); err == nil {
+		t.Fatal("relative path was accepted")
+	}
+}
+
+func TestCommandsExitTimeoutPollAndCancel(t *testing.T) {
+	executor, root := testExecutor(t)
+	success := callTool(t, executor, "exec_command", map[string]any{
+		"command": outputCommand("TEST"), "cwd": root, "timeout_seconds": 5, "yield_time_ms": 3000,
+	})
+	if success["status"] != "exited" || success["exit_code"].(float64) != 0 || !strings.Contains(success["output"].(string), "TEST") {
+		t.Fatalf("success result: %v", success)
+	}
+	failure := callTool(t, executor, "exec_command", map[string]any{
+		"command": exitCommand(7), "cwd": root, "timeout_seconds": 5, "yield_time_ms": 3000,
+	})
+	if failure["exit_code"].(float64) != 7 {
+		t.Fatalf("failure result: %v", failure)
+	}
+	timed := callTool(t, executor, "exec_command", map[string]any{
+		"command": outputThenSleepCommand("PARTIAL", 5), "cwd": root, "timeout_seconds": 1, "yield_time_ms": 2500,
+	})
+	if timed["status"] != "timed_out" || !strings.Contains(timed["output"].(string), "PARTIAL") {
+		t.Fatalf("timeout result: %v", timed)
+	}
+	if _, err := os.Stat(timed["log_path"].(string)); err != nil {
+		t.Fatalf("timeout log missing: %v", err)
+	}
+	running := callTool(t, executor, "exec_command", map[string]any{
+		"command": outputThenSleepCommand("FIRST", 10), "cwd": root, "timeout_seconds": 30, "yield_time_ms": 100,
+	})
+	if running["status"] != "running" {
+		t.Fatalf("long command result: %v", running)
+	}
+	id := running["session_id"].(string)
+	var poll map[string]any
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		poll = callTool(t, executor, "poll_command", map[string]any{"session_id": id, "offset": 0, "max_bytes": 1024})
+		if strings.Contains(poll["output"].(string), "FIRST") {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !strings.Contains(poll["output"].(string), "FIRST") || poll["next_offset"].(float64) == 0 {
+		t.Fatalf("poll result: %v", poll)
+	}
+	cancelled := callTool(t, executor, "cancel_command", map[string]any{"session_id": id})
+	if cancelled["status"] != "cancelled" {
+		t.Fatalf("cancel result: %v", cancelled)
+	}
+	secondCancel := callTool(t, executor, "cancel_command", map[string]any{"session_id": id})
+	if secondCancel["status"] != "cancelled" {
+		t.Fatalf("second cancel result: %v", secondCancel)
+	}
+}
+
+func TestParallelCommandDirectoriesAreIndependent(t *testing.T) {
+	executor, root := testExecutor(t)
+	dirs := []string{filepath.Join(root, "one"), filepath.Join(root, "two")}
+	for _, dir := range dirs {
+		_ = os.Mkdir(dir, 0o700)
+	}
+	results := make([]map[string]any, len(dirs))
+	var wait sync.WaitGroup
+	for index, dir := range dirs {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			results[index] = callTool(t, executor, "exec_command", map[string]any{
+				"command": workingDirectoryCommand(), "cwd": dir, "timeout_seconds": 5, "yield_time_ms": 3000,
 			})
-
-			resp, err := exec.call(context.Background(), reqBytes)
-			if err != nil {
-				t.Fatalf("call failed: %v", err)
-			}
-
-			respStr := string(resp)
-			if strings.Contains(respStr, "Directory listing of") {
-				t.Fatalf("CRITICAL ERROR: Got directory listing instead of file creation! Response: %s", respStr)
-			}
-			if !strings.Contains(respStr, "Successfully created and wrote") {
-				t.Fatalf("expected write confirmation, got: %s", respStr)
-			}
-
-			// Verify file on disk
-			data, err := os.ReadFile(filepath.Join(tmpDir, "snake.html"))
-			if err != nil {
-				t.Fatalf("file was not written on disk: %v", err)
-			}
-			if !strings.Contains(string(data), "Canvas Game Loop Logic") {
-				t.Fatalf("file content on disk is invalid, got %d bytes", len(data))
-			}
-		})
+		}()
+	}
+	wait.Wait()
+	for index, result := range results {
+		if !strings.Contains(strings.ToLower(result["output"].(string)), strings.ToLower(dirs[index])) {
+			t.Fatalf("cwd %s result: %v", dirs[index], result)
+		}
 	}
 }
 
+func TestCancelTerminatesChildProcess(t *testing.T) {
+	executor, root := testExecutor(t)
+	marker := filepath.Join(root, "child-must-not-write.txt")
+	running := callTool(t, executor, "exec_command", map[string]any{
+		"command": childWriteCommand(marker), "cwd": root, "timeout_seconds": 30, "yield_time_ms": 300,
+	})
+	if running["status"] != "running" {
+		t.Fatalf("child command result: %v", running)
+	}
+	callTool(t, executor, "cancel_command", map[string]any{"session_id": running["session_id"]})
+	time.Sleep(2500 * time.Millisecond)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("child process survived cancellation: %v", err)
+	}
+}
+
+func outputCommand(text string) string {
+	if runtime.GOOS == "windows" {
+		return "Write-Output '" + text + "'"
+	}
+	return "printf '%s\\n' '" + text + "'"
+}
+
+func exitCommand(code int) string {
+	return "exit " + strconv.Itoa(code)
+}
+
+func outputThenSleepCommand(text string, seconds int) string {
+	if runtime.GOOS == "windows" {
+		return "Write-Output '" + text + "'; Start-Sleep -Seconds " + strconv.Itoa(seconds)
+	}
+	return "printf '%s\\n' '" + text + "'; sleep " + strconv.Itoa(seconds)
+}
+
+func workingDirectoryCommand() string {
+	if runtime.GOOS == "windows" {
+		return "(Get-Location).Path"
+	}
+	return "pwd"
+}
+
+func childWriteCommand(path string) string {
+	if runtime.GOOS == "windows" {
+		escaped := strings.ReplaceAll(path, "'", "''")
+		return "Start-Job { Start-Sleep -Seconds 2; Set-Content -LiteralPath '" + escaped + "' -Value child }; Start-Sleep -Seconds 30"
+	}
+	return "(sleep 2; printf child > '" + strings.ReplaceAll(path, "'", "'\\''") + "') & sleep 30"
+}

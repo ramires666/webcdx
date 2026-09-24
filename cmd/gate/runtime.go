@@ -102,6 +102,9 @@ func (rt *agentRuntime) touch() {
 
 // enqueue places a request into the agent's work queue.
 func (rt *agentRuntime) enqueue(ctx context.Context, request protocol.AgentRequest) error {
+	if !request.Deadline.IsZero() && !time.Now().Before(request.Deadline) {
+		return errors.New("request deadline expired")
+	}
 	rt.mu.Lock()
 	online := rt.stream != nil
 	rt.mu.Unlock()
@@ -135,7 +138,11 @@ func (rt *agentRuntime) callAgent(ctx context.Context, request json.RawMessage, 
 
 	defer rt.forget(id)
 
-	if err := rt.enqueue(ctx, protocol.AgentRequest{ID: id, Request: request}); err != nil {
+	deadline := time.Now().Add(timeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := rt.enqueue(ctx, protocol.AgentRequest{ID: id, Request: request, Deadline: deadline}); err != nil {
 		return protocol.AgentResponse{}, err
 	}
 

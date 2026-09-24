@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,7 +15,6 @@ import (
 type server struct {
 	publicURL string
 	timeout   time.Duration
-	toolCards bool
 
 	store *store
 
@@ -27,6 +27,13 @@ type server struct {
 
 	oauthMu    sync.Mutex
 	oauthCodes map[string]oauthCode
+	rateMu     sync.Mutex
+	rateLimits map[string]rateWindow
+}
+
+type rateWindow struct {
+	started time.Time
+	count   int
 }
 
 // newServer builds the gate server from environment variables and initializes SQLite store.
@@ -57,14 +64,14 @@ func newServer() (*server, error) {
 
 	srv := &server{
 		publicURL:     publicURL,
-		timeout:       durationEnv("WEBCODEX_CALL_TIMEOUT", 20*time.Minute),
-		toolCards:     boolEnv("WEBCODEX_TOOL_CARDS", false),
+		timeout:       durationEnv("WEBCODEX_CALL_TIMEOUT", 60*time.Second),
 		store:         db,
 		runtimes:      make(map[string]*agentRuntime),
 		adminUser:     adminUser,
 		adminPassword: adminPass,
 		adminCSRF:     csrf,
 		oauthCodes:    make(map[string]oauthCode),
+		rateLimits:    make(map[string]rateWindow),
 	}
 
 	// Clean up expired tokens on startup
@@ -73,6 +80,34 @@ func newServer() (*server, error) {
 	}()
 
 	return srv, nil
+}
+
+func (s *server) allowRequest(key string, limit int, window time.Duration) bool {
+	now := time.Now()
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	if s.rateLimits == nil {
+		s.rateLimits = make(map[string]rateWindow)
+	}
+	entry := s.rateLimits[key]
+	if entry.started.IsZero() || now.Sub(entry.started) >= window {
+		s.rateLimits[key] = rateWindow{started: now, count: 1}
+		return true
+	}
+	if entry.count >= limit {
+		return false
+	}
+	entry.count++
+	s.rateLimits[key] = entry
+	return true
+}
+
+func remoteHost(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func (s *server) runtimeFor(agentID string) *agentRuntime {
@@ -141,14 +176,20 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /mcp/v2", s.handleMCP)
 	mux.HandleFunc("DELETE /mcp/v2", s.handleMCP)
 	mux.HandleFunc("HEAD /mcp/v2", s.handleMCP)
+	mux.HandleFunc("GET /mcp/v3", s.handleMCP)
+	mux.HandleFunc("POST /mcp/v3", s.handleMCP)
+	mux.HandleFunc("DELETE /mcp/v3", s.handleMCP)
+	mux.HandleFunc("HEAD /mcp/v3", s.handleMCP)
 
 	// OAuth discovery & metadata
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleProtectedResource)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleProtectedResource)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/v2", s.handleProtectedResource)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/v3", s.handleProtectedResource)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleOAuthServer)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp", s.handleOAuthServer)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp/v2", s.handleOAuthServer)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp/v3", s.handleOAuthServer)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOAuthServer)
 
 	// OAuth authorization & token exchange

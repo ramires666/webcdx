@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 
 	"webcodex/internal/protocol"
 )
+
+const maxAgentResultBytes = 2 << 20
 
 // handleAgentStream manages the long-lived outbound NDJSON stream for a connected agent worker.
 func (s *server) handleAgentStream(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +61,10 @@ func (s *server) handleAgentStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case request := <-rt.queue:
+			if !request.Deadline.IsZero() && !time.Now().Before(request.Deadline) {
+				log.Printf("agent stream rejected expired request agent=%s id=%s", agent.ID, request.ID)
+				continue
+			}
 			log.Printf("agent stream dispatch agent=%s id=%s bytes=%d", agent.ID, request.ID, len(request.Request))
 			if err := enc.Encode(request); err != nil {
 				return
@@ -88,8 +95,14 @@ func (s *server) handleAgentResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxAgentResultBytes)
 	var result protocol.AgentResponse
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}

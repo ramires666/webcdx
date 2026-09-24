@@ -4,1282 +4,1017 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
-// nativeExecutor implements a direct, zero-limit MCP runner in pure Go.
-type nativeExecutor struct {
-	tools   []mcpToolDefinition
-	mu      sync.Mutex
-	lastCwd string
-}
+const (
+	maxReadBytes       = 10 << 20
+	maxSearchFileBytes = 10 << 20
+	defaultResponseMax = 256 << 10
+	defaultLogMax      = 50 << 20
+)
 
 type mcpToolDefinition struct {
-	Name        string         `json:"name"`
-	Title       string         `json:"title,omitempty"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"inputSchema"`
+	OutputSchema map[string]any `json:"outputSchema"`
+	Annotations  map[string]any `json:"annotations"`
 }
 
-func newNativeExecutor() *nativeExecutor {
-	return &nativeExecutor{
-		tools: []mcpToolDefinition{
-			{
-				Name:        "codex",
-				Title:       "Работа с файлами и консолью",
-				Description: "Работа с файлами и выполнение команд в рабочей директории проекта. Поддерживает длительные операции и сложные вычисления (таймаут до 20 минут / 1200 сек). Всегда используется модель по умолчанию (gpt-5.6-sol) с глубокими рассуждениями (thinking: high). Выбор модели автоматический.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"prompt": map[string]any{
-							"type":        "string",
-							"description": "Инструкция или задача: работа с файлами (создание, чтение, запись) или запуск команды в папке проекта. Для тяжелых расчетов и скриптов таймаут составляет до 20 минут.",
-						},
-						"cwd": map[string]any{
-							"type":        "string",
-							"description": "Рабочая папка проекта для выполнения операций с файлами и командами.",
-						},
-						"sandbox": map[string]any{
-							"type":        "string",
-							"description": "Режим доступа (danger-full-access, workspace-write, read-only).",
-						},
-					},
-					"required": []string{"prompt"},
-				},
-			},
-			{
-				Name:        "codex-reply",
-				Title:       "Продолжение работы с файлами и консолью",
-				Description: "Продолжение работы с файлами и выполнения команд в рабочей директории проекта (таймаут до 20 минут, модель gpt-5.6-sol thinking: high).",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"prompt": map[string]any{
-							"type":        "string",
-							"description": "Следующая инструкция или задача по работе с файлами или командами.",
-						},
-						"threadId": map[string]any{
-							"type":        "string",
-							"description": "ID сессии.",
-						},
-					},
-					"required": []string{"prompt"},
-				},
-			},
-			{
-				Name:        "exec_command",
-				Title:       "Выполнение команды терминала",
-				Description: "Execute a shell command locally on the worker machine (PowerShell on Windows, bash/sh on Unix) with timeout up to 20 minutes and working directory support.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"command": map[string]any{
-							"type":        "string",
-							"description": "Shell command line to execute (e.g. 'python run_backtest.py', 'git status', 'npm test').",
-						},
-						"cmd": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for command.",
-						},
-						"workdir": map[string]any{
-							"type":        "string",
-							"description": "Optional working directory path where the command should be run.",
-						},
-						"timeout_sec": map[string]any{
-							"type":        "integer",
-							"description": "Optional execution timeout in seconds (default: 1200 / 20 minutes).",
-						},
-					},
-					"required": []string{"command"},
-				},
-			},
-			{
-				Name:        "shell_command",
-				Title:       "Выполнение команды терминала",
-				Description: "Alias for exec_command. Execute a command in the local shell.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"command": map[string]any{
-							"type":        "string",
-							"description": "Command line to execute.",
-						},
-						"workdir": map[string]any{
-							"type":        "string",
-							"description": "Optional working directory.",
-						},
-					},
-					"required": []string{"command"},
-				},
-			},
-			{
-				Name:        "read_file",
-				Title:       "Чтение файла",
-				Description: "Read file contents from the local filesystem with optional line offset and limit.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "Absolute or relative path to the file to read.",
-						},
-						"file_path": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"filePath": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"file": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"filename": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"offset": map[string]any{
-							"type":        "integer",
-							"description": "1-based starting line number to read from (optional).",
-						},
-						"limit": map[string]any{
-							"type":        "integer",
-							"description": "Maximum number of lines to read (optional).",
-						},
-					},
-					"required": []string{"path"},
-				},
-			},
-			{
-				Name:        "write_file",
-				Title:       "Запись файла",
-				Description: "Write text content directly to a file on the local filesystem. Automatically creates parent directories if needed.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "Path to the file to create or overwrite.",
-						},
-						"file_path": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"filePath": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"file": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"filename": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"target_file": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"targetFile": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"content": map[string]any{
-							"type":        "string",
-							"description": "Full text content to write into the file.",
-						},
-						"text": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for content.",
-						},
-						"code": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for content.",
-						},
-					},
-					"required": []string{"path", "content"},
-				},
-			},
-			{
-				Name:        "list_dir",
-				Title:       "Список файлов папки",
-				Description: "List files and subdirectories in a local directory with file sizes and modification dates.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"path": map[string]any{
-							"type":        "string",
-							"description": "Directory path to inspect (default: current working directory).",
-						},
-						"dir": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-						"directory": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for path.",
-						},
-					},
-				},
-			},
-			{
-				Name:        "apply_patch",
-				Title:       "Применение git patch",
-				Description: "Apply a unified diff patch to files in the repository using git apply.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"patch": map[string]any{
-							"type":        "string",
-							"description": "Unified diff patch content to apply.",
-						},
-						"input": map[string]any{
-							"type":        "string",
-							"description": "Alternative alias for patch.",
-						},
-						"workdir": map[string]any{
-							"type":        "string",
-							"description": "Optional working directory where patch should be applied.",
-						},
-					},
-					"required": []string{"patch"},
-				},
-			},
-			{
-				Name:        "grep_search",
-				Title:       "Поиск по содержимому файлов",
-				Description: "Search for text or regular expression across files in a directory.",
-				InputSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"query": map[string]any{
-							"type":        "string",
-							"description": "Text substring or regular expression to search for.",
-						},
-						"path": map[string]any{
-							"type":        "string",
-							"description": "Directory or file path to search in (default: current directory).",
-						},
-						"max_results": map[string]any{
-							"type":        "integer",
-							"description": "Maximum number of matching lines to return (default: 100).",
-						},
-					},
-					"required": []string{"query"},
-				},
-			},
-		},
+type executorConfig struct {
+	AllowedRoots     []string
+	LogDir           string
+	ProcessTTL       time.Duration
+	MaxLogBytes      int64
+	MaxResponseBytes int
+}
+
+type nativeExecutor struct {
+	tools        []mcpToolDefinition
+	allowedRoots []string
+	allowAll     bool
+	logDir       string
+	processTTL   time.Duration
+	maxLogBytes  int64
+	maxResponse  int
+
+	mu       sync.Mutex
+	sessions map[string]*processSession
+	stop     chan struct{}
+	closed   sync.Once
+}
+
+type processSession struct {
+	id         string
+	command    string
+	cwd        string
+	status     string
+	startedAt  time.Time
+	finishedAt time.Time
+	exitCode   *int
+	logPath    string
+	cmd        *exec.Cmd
+	log        *cappedLogWriter
+	done       chan struct{}
+}
+
+type cappedLogWriter struct {
+	mu      sync.Mutex
+	file    *os.File
+	max     int64
+	written int64
+}
+
+func (w *cappedLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if remaining := w.max - w.written; remaining > 0 {
+		part := p
+		if int64(len(part)) > remaining {
+			part = part[:remaining]
+		}
+		n, err := w.file.Write(part)
+		w.written += int64(n)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+func (w *cappedLogWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.file.Close()
+}
+
+func newNativeExecutor() (*nativeExecutor, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("get startup directory: %w", err)
+	}
+	logDir := env("WEBCODEX_LOG_DIR", "")
+	if logDir == "" {
+		if executable, executableErr := os.Executable(); executableErr == nil {
+			logDir = filepath.Join(filepath.Dir(executable), "logs")
+		} else {
+			logDir = filepath.Join(cwd, "logs")
+		}
+	}
+	return newNativeExecutorWithConfig(executorConfig{
+		AllowedRoots:     splitPathList(env("WEBCODEX_ALLOWED_ROOTS", cwd)),
+		LogDir:           logDir,
+		ProcessTTL:       durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour),
+		MaxLogBytes:      int64Env("WEBCODEX_MAX_LOG_BYTES", defaultLogMax),
+		MaxResponseBytes: intEnv("WEBCODEX_MAX_RESPONSE_BYTES", defaultResponseMax),
+	})
+}
+
+func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error) {
+	if len(config.AllowedRoots) == 0 {
+		return nil, errors.New("at least one allowed root is required")
+	}
+	if config.ProcessTTL <= 0 {
+		config.ProcessTTL = 24 * time.Hour
+	}
+	if config.MaxLogBytes <= 0 {
+		config.MaxLogBytes = defaultLogMax
+	}
+	if config.MaxResponseBytes <= 0 {
+		config.MaxResponseBytes = defaultResponseMax
+	}
+	if config.LogDir == "" {
+		return nil, errors.New("log directory is required")
+	}
+	logDir, err := filepath.Abs(config.LogDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve log directory: %w", err)
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create log directory: %w", err)
+	}
+	e := &nativeExecutor{
+		tools: localTools(), logDir: filepath.Clean(logDir), processTTL: config.ProcessTTL,
+		maxLogBytes: config.MaxLogBytes, maxResponse: config.MaxResponseBytes,
+		sessions: make(map[string]*processSession), stop: make(chan struct{}),
+	}
+	for _, root := range config.AllowedRoots {
+		root = strings.TrimSpace(root)
+		if root == "*" {
+			e.allowAll = true
+			continue
+		}
+		if !filepath.IsAbs(root) {
+			return nil, fmt.Errorf("allowed root must be absolute: %q", root)
+		}
+		resolved, err := filepath.EvalSymlinks(filepath.Clean(root))
+		if err != nil {
+			return nil, fmt.Errorf("resolve allowed root %q: %w", root, err)
+		}
+		e.allowedRoots = append(e.allowedRoots, resolved)
+	}
+	go e.cleanupLoop()
+	return e, nil
+}
+
+func localTools() []mcpToolDefinition {
+	objectOutput := map[string]any{"type": "object", "additionalProperties": true}
+	tool := func(name, description string, properties map[string]any, required []string, readOnly, destructive, openWorld bool) mcpToolDefinition {
+		return mcpToolDefinition{
+			Name: name, Description: description,
+			InputSchema:  map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required},
+			OutputSchema: objectOutput,
+			Annotations:  map[string]any{"readOnlyHint": readOnly, "destructiveHint": destructive, "openWorldHint": openWorld},
+		}
+	}
+	str := func(description string) map[string]any {
+		return map[string]any{"type": "string", "description": description}
+	}
+	integer := func(description string, minimum int) map[string]any {
+		return map[string]any{"type": "integer", "minimum": minimum, "description": description}
+	}
+	return []mcpToolDefinition{
+		tool("read_file", "Read a UTF-8 text file or a line range from an absolute local path.", map[string]any{
+			"path": str("Absolute file path."), "offset": integer("First line, starting at 1.", 1), "limit": integer("Maximum number of lines.", 1),
+		}, []string{"path"}, true, false, false),
+		tool("write_file", "Atomically replace a local file with exact text content.", map[string]any{
+			"path": str("Absolute file path."), "content": str("Exact text content; an empty string is valid."),
+		}, []string{"path", "content"}, false, true, false),
+		tool("list_directory", "List one local directory without recursion.", map[string]any{
+			"path": str("Absolute directory path."), "max_entries": integer("Maximum entries to return.", 1),
+		}, []string{"path"}, true, false, false),
+		tool("search_files", "Search text files below an absolute local path for a substring or regular expression.", map[string]any{
+			"path": str("Absolute directory path."), "pattern": str("Text or regular expression to find."), "glob": str("Optional file-name glob, for example *.go."),
+			"regex":       map[string]any{"type": "boolean", "description": "Treat pattern as a Go regular expression."},
+			"max_results": integer("Maximum matching lines to return.", 1),
+		}, []string{"path", "pattern"}, true, false, false),
+		tool("exec_command", "Start a non-interactive shell command in an explicit local working directory and stream output to a log.", map[string]any{
+			"command": str("Shell command."), "cwd": str("Absolute working directory."),
+			"timeout_seconds": integer("Maximum process lifetime in seconds.", 1), "yield_time_ms": integer("Wait up to 30000 ms before returning a running session.", 0),
+		}, []string{"command", "cwd"}, false, true, true),
+		tool("poll_command", "Read new output and status from a command session.", map[string]any{
+			"session_id": str("Process session ID."), "offset": integer("Log byte offset.", 0), "max_bytes": integer("Maximum log bytes to return.", 1),
+		}, []string{"session_id"}, true, false, false),
+		tool("cancel_command", "Terminate a command session and its process tree.", map[string]any{
+			"session_id": str("Process session ID."),
+		}, []string{"session_id"}, false, true, false),
 	}
 }
 
-func (e *nativeExecutor) resolveCwd(args map[string]any) string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	cwd, _ := args["cwd"].(string)
-	if cwd == "" {
-		cwd, _ = args["workdir"].(string)
-	}
-	if cwd != "" {
-		e.lastCwd = cwd
-		return cwd
-	}
-	if e.lastCwd != "" {
-		return e.lastCwd
-	}
-	wd, err := os.Getwd()
-	if err == nil && wd != "" {
-		e.lastCwd = wd
-		return wd
-	}
-	return "."
-}
-
-// call handles MCP JSON-RPC requests directly in Go.
 func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (json.RawMessage, error) {
-	var msg struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Method  string          `json:"method"`
-		Params  json.RawMessage `json:"params"`
+	var message struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
 	}
-	if err := json.Unmarshal(request, &msg); err != nil {
-		return nil, fmt.Errorf("parse jsonrpc: %w", err)
+	if err := json.Unmarshal(request, &message); err != nil {
+		return rpcError(nil, -32700, "invalid JSON"), nil
 	}
-
-	rawID := msg.ID
-	if len(rawID) == 0 {
-		rawID = json.RawMessage("null")
-	}
-
-	switch msg.Method {
+	switch message.Method {
 	case "initialize":
-		res := map[string]any{
-			"jsonrpc": "2.0",
-			"id":      rawID,
-			"result": map[string]any{
-				"protocolVersion": "2025-06-18",
-				"capabilities": map[string]any{
-					"tools": map[string]any{
-						"listChanged": true,
-					},
-				},
-				"serverInfo": map[string]string{
-					"name":    "webcodex-direct",
-					"title":   "WebCodex Native Direct Agent",
-					"version": "1.0.0",
-				},
-			},
-		}
-		return json.Marshal(res)
-
-	case "notifications/initialized":
-		return nil, nil
-
-	case "ping":
-		return json.Marshal(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      rawID,
-			"result":  map[string]any{},
-		})
-
+		return rpcResult(message.ID, map[string]any{
+			"protocolVersion": "2025-06-18",
+			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+			"serverInfo":      map[string]any{"name": "local-workspace", "title": "Local Workspace", "version": "1.0.0"},
+			"instructions":    "Use explicit file paths and command working directories. Long commands continue through process sessions and logs.",
+		}), nil
+	case "ping", "notifications/initialized":
+		return rpcResult(message.ID, map[string]any{}), nil
 	case "tools/list":
-		res := map[string]any{
-			"jsonrpc": "2.0",
-			"id":      rawID,
-			"result": map[string]any{
-				"tools": e.tools,
-			},
-		}
-		return json.Marshal(res)
-
+		return rpcResult(message.ID, map[string]any{"tools": e.tools}), nil
 	case "tools/call":
-		var callParams struct {
+		var call struct {
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
 		}
-		if err := json.Unmarshal(msg.Params, &callParams); err != nil {
-			return makeErrorResult(rawID, fmt.Sprintf("invalid tools/call params: %v", err)), nil
+		if err := json.Unmarshal(message.Params, &call); err != nil || call.Name == "" {
+			return toolResult(message.ID, nil, errors.New("invalid tool call")), nil
 		}
-
-		output, isError := e.executeTool(ctx, callParams.Name, callParams.Arguments)
-		resultData := map[string]any{
-			"content": []map[string]any{
-				{
-					"type": "text",
-					"text": output,
-				},
-			},
-			"isError": isError,
+		if call.Arguments == nil {
+			call.Arguments = map[string]any{}
 		}
-		if callParams.Name == "codex" || callParams.Name == "codex-reply" {
-			resultData["threadId"] = "direct-session-1"
-		}
-
-		res := map[string]any{
-			"jsonrpc": "2.0",
-			"id":      rawID,
-			"result":  resultData,
-		}
-		return json.Marshal(res)
-
+		result, err := e.executeTool(ctx, call.Name, call.Arguments)
+		return toolResult(message.ID, result, err), nil
 	default:
-		return json.Marshal(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      rawID,
-			"error": map[string]any{
-				"code":    -32601,
-				"message": fmt.Sprintf("method not found: %s", msg.Method),
-			},
-		})
+		return rpcError(message.ID, -32601, "method not found"), nil
 	}
 }
 
-func makeErrorResult(id json.RawMessage, message string) json.RawMessage {
-	out, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"result": map[string]any{
-			"content": []map[string]any{
-				{"type": "text", "text": message},
-			},
-			"isError": true,
-		},
-	})
+func (e *nativeExecutor) executeTool(ctx context.Context, name string, args map[string]any) (any, error) {
+	switch name {
+	case "read_file":
+		return e.readFile(args)
+	case "write_file":
+		return e.writeFile(args)
+	case "list_directory":
+		return e.listDirectory(args)
+	case "search_files":
+		return e.searchFiles(ctx, args)
+	case "exec_command":
+		return e.execCommand(ctx, args)
+	case "poll_command":
+		return e.pollCommand(args)
+	case "cancel_command":
+		return e.cancelCommand(args)
+	default:
+		return nil, errors.New("unknown tool")
+	}
+}
+
+func rpcResult(id json.RawMessage, result any) json.RawMessage {
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	out, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 	return out
 }
 
-func (e *nativeExecutor) executeTool(ctx context.Context, name string, args map[string]any) (string, bool) {
-	if args == nil {
-		args = map[string]any{}
+func rpcError(id json.RawMessage, code int, message string) json.RawMessage {
+	if len(id) == 0 {
+		id = json.RawMessage("null")
 	}
-
-	switch name {
-	case "exec_command", "shell_command", "bash":
-		return e.handleExecCommand(ctx, args)
-
-	case "read_file", "view_file":
-		return e.handleReadFile(args)
-
-	case "write_file":
-		return e.handleWriteFile(args)
-
-	case "list_dir", "directory_list":
-		return e.handleListDir(args)
-
-	case "apply_patch":
-		return e.handleApplyPatch(ctx, args)
-
-	case "grep_search", "file_search":
-		return e.handleGrepSearch(args)
-
-	case "codex", "codex-reply":
-		return e.handleCodexCall(ctx, args)
-
-	default:
-		return fmt.Sprintf("unknown tool: %q", name), true
-	}
+	out, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
+	return out
 }
 
-func (e *nativeExecutor) handleExecCommand(ctx context.Context, args map[string]any) (string, bool) {
-	cmdStr, _ := args["command"].(string)
-	if cmdStr == "" {
-		cmdStr, _ = args["cmd"].(string)
+func toolResult(id json.RawMessage, value any, callErr error) json.RawMessage {
+	if callErr != nil {
+		value = map[string]any{"error": callErr.Error()}
 	}
-	if strings.TrimSpace(cmdStr) == "" {
-		return "error: missing required argument 'command'", true
-	}
-
-	workdir := e.resolveCwd(args)
-
-	timeoutSec := 1200
-	if t, ok := args["timeout_sec"].(float64); ok && t > 0 {
-		timeoutSec = int(t)
-	}
-
-	cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-	defer cancel()
-
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(cmdCtx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmdStr)
-	} else {
-		cmd = exec.CommandContext(cmdCtx, "bash", "-c", cmdStr)
-	}
-
-	if workdir != "" && workdir != "." {
-		cmd.Dir = workdir
-	}
-
-	var combined bytes.Buffer
-	cmd.Stdout = &combined
-	cmd.Stderr = &combined
-
-	err := cmd.Run()
-	output := combined.String()
-
-	const maxOutput = 512 * 1024 // 512 KB
-	if len(output) > maxOutput {
-		output = output[:maxOutput] + "\n... [output truncated, exceeded 512KB]"
-	}
-
-	if cmdCtx.Err() == context.DeadlineExceeded {
-		return fmt.Sprintf("Command timed out after %d seconds.\nOutput so far:\n%s", timeoutSec, output), true
-	}
-
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Sprintf("Command finished with exit code %d.\n%s", exitErr.ExitCode(), output), true
-		}
-		return fmt.Sprintf("Execution error: %v\nOutput:\n%s", err, output), true
-	}
-
-	if strings.TrimSpace(output) == "" {
-		return "Command executed successfully (no output).", false
-	}
-	return output, false
+	encoded, _ := json.Marshal(value)
+	return rpcResult(id, map[string]any{
+		"isError": callErr != nil, "content": []map[string]any{{"type": "text", "text": string(encoded)}}, "structuredContent": value,
+	})
 }
 
-func (e *nativeExecutor) handleReadFile(args map[string]any) (string, bool) {
-	path := getPathArg(args)
-	if path == "" {
-		return "error: missing required argument 'path'", true
+func (e *nativeExecutor) readFile(args map[string]any) (any, error) {
+	if err := onlyArgs(args, "path", "offset", "limit"); err != nil {
+		return nil, err
 	}
-
-	cwd := e.resolveCwd(args)
-	path = cleanPath(path, cwd)
-
-	data, err := os.ReadFile(path)
+	path, err := e.resolvePath(requiredString(args, "path"))
 	if err != nil {
-		return fmt.Sprintf("failed to read file %q: %v", path, err), true
+		return nil, err
 	}
-
-	offset := 0
-	if off, ok := args["offset"].(float64); ok && off > 0 {
-		offset = int(off) - 1
+	data, err := readLimitedFile(path, maxReadBytes)
+	if err != nil {
+		return nil, err
 	}
-
-	limit := -1
-	if lim, ok := args["limit"].(float64); ok && lim > 0 {
-		limit = int(lim)
+	if isBinary(data) {
+		return nil, errors.New("binary files are not supported")
 	}
-
-	if offset > 0 || limit > 0 {
-		scanner := bufio.NewScanner(bytes.NewReader(data))
-		var lines []string
-		currentLine := 0
-		for scanner.Scan() {
-			if currentLine >= offset {
-				if limit > 0 && len(lines) >= limit {
-					break
-				}
-				lines = append(lines, scanner.Text())
+	offset, err := optionalInt(args, "offset", 1, 1, int(^uint(0)>>1))
+	if err != nil {
+		return nil, err
+	}
+	limit, err := optionalInt(args, "limit", int(^uint(0)>>1), 1, int(^uint(0)>>1))
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.SplitAfter(string(data), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		lines = nil
+	} else if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	start := min(offset-1, len(lines))
+	requestedEnd := min(start+limit, len(lines))
+	end := start
+	var content strings.Builder
+	byteTruncated := false
+	for end < requestedEnd {
+		line := lines[end]
+		if content.Len()+len(line) > e.maxResponse {
+			if content.Len() == 0 {
+				line, _ = truncateUTF8(line, e.maxResponse)
+				content.WriteString(line)
+				end++
 			}
-			currentLine++
+			byteTruncated = true
+			break
 		}
-		return strings.Join(lines, "\n"), false
+		content.WriteString(line)
+		end++
 	}
-
-	return string(data), false
+	return map[string]any{
+		"path": path, "content": content.String(), "offset": offset, "line_count": end - start,
+		"next_offset": end + 1, "truncated": end < len(lines) || byteTruncated,
+	}, nil
 }
 
-func (e *nativeExecutor) handleWriteFile(args map[string]any) (string, bool) {
-	path := getPathArg(args)
-	if path == "" {
-		return "error: missing required argument 'path'", true
+func (e *nativeExecutor) writeFile(args map[string]any) (any, error) {
+	if err := onlyArgs(args, "path", "content"); err != nil {
+		return nil, err
 	}
-
+	path, err := e.resolvePath(requiredString(args, "path"))
+	if err != nil {
+		return nil, err
+	}
 	content, ok := args["content"].(string)
 	if !ok {
-		content, _ = args["text"].(string)
+		return nil, errors.New("content must be a string")
 	}
-	if content == "" {
-		content, _ = args["code"].(string)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create parent directory: %w", err)
 	}
-	if content == "" {
-		content, _ = args["data"].(string)
+	if _, err := e.resolvePath(path); err != nil {
+		return nil, err
 	}
-	if content == "" {
-		content, _ = args["body"].(string)
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".webcodex-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary file: %w", err)
 	}
-
-	cwd := e.resolveCwd(args)
-	path = cleanPath(path, cwd)
-
-	dir := filepath.Dir(path)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Sprintf("failed to create directory %q: %v", dir, err), true
-		}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if _, err = io.WriteString(temporary, content); err == nil {
+		err = temporary.Sync()
 	}
-
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		return fmt.Sprintf("failed to write file %q: %v", path, err), true
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
 	}
-
-	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path), false
+	if err != nil {
+		return nil, fmt.Errorf("write temporary file: %w", err)
+	}
+	if err := os.Rename(temporaryName, path); err != nil {
+		return nil, fmt.Errorf("replace file: %w", err)
+	}
+	return map[string]any{"path": path, "bytes_written": len([]byte(content))}, nil
 }
 
-func (e *nativeExecutor) handleListDir(args map[string]any) (string, bool) {
-	path := getPathArg(args)
-	if path == "" {
-		path = "."
+func (e *nativeExecutor) listDirectory(args map[string]any) (any, error) {
+	if err := onlyArgs(args, "path", "max_entries"); err != nil {
+		return nil, err
 	}
-
-	cwd := e.resolveCwd(args)
-	path = cleanPath(path, cwd)
-
+	path, err := e.resolvePath(requiredString(args, "path"))
+	if err != nil {
+		return nil, err
+	}
+	maxEntries, err := optionalInt(args, "max_entries", 1000, 1, 10000)
+	if err != nil {
+		return nil, err
+	}
+	maxEntries = min(maxEntries, max(1, e.maxResponse/256))
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		return fmt.Sprintf("failed to list directory %q: %v", path, err), true
+		return nil, fmt.Errorf("list directory: %w", err)
 	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Directory listing of %s (%d entries):\n", path, len(entries)))
-
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].IsDir() != entries[j].IsDir() {
+			return entries[i].IsDir()
+		}
+		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
+	})
+	total := len(entries)
+	if len(entries) > maxEntries {
+		entries = entries[:maxEntries]
+	}
+	items := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			items = append(items, map[string]any{"name": entry.Name(), "type": "unknown", "error": infoErr.Error()})
 			continue
 		}
-		if entry.IsDir() {
-			sb.WriteString(fmt.Sprintf("  [DIR]  %-30s  %s\n", entry.Name()+"/", info.ModTime().Format("2006-01-02 15:04")))
-		} else {
-			sb.WriteString(fmt.Sprintf("  [FILE] %-30s  %8d bytes  %s\n", entry.Name(), info.Size(), info.ModTime().Format("2006-01-02 15:04")))
+		kind := "file"
+		if info.IsDir() {
+			kind = "directory"
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			kind = "symlink"
+		}
+		items = append(items, map[string]any{"name": entry.Name(), "type": kind, "size": info.Size(), "modified_at": info.ModTime().UTC()})
+	}
+	return map[string]any{"path": path, "entries": items, "truncated": total > len(entries), "total_entries": total}, nil
+}
+
+type searchMatch struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+func (e *nativeExecutor) searchFiles(ctx context.Context, args map[string]any) (any, error) {
+	if err := onlyArgs(args, "path", "pattern", "glob", "regex", "max_results"); err != nil {
+		return nil, err
+	}
+	root, err := e.resolvePath(requiredString(args, "path"))
+	if err != nil {
+		return nil, err
+	}
+	pattern, ok := args["pattern"].(string)
+	if !ok || pattern == "" {
+		return nil, errors.New("pattern is required")
+	}
+	glob, err := optionalString(args, "glob")
+	if err != nil {
+		return nil, err
+	}
+	if glob != "" {
+		if _, err := filepath.Match(glob, "probe"); err != nil {
+			return nil, fmt.Errorf("invalid glob: %w", err)
 		}
 	}
-
-	return sb.String(), false
-}
-
-func (e *nativeExecutor) handleApplyPatch(ctx context.Context, args map[string]any) (string, bool) {
-	patch, _ := args["patch"].(string)
-	if patch == "" {
-		patch, _ = args["input"].(string)
-	}
-	if strings.TrimSpace(patch) == "" {
-		return "error: missing required argument 'patch'", true
-	}
-
-	workdir := e.resolveCwd(args)
-
-	cmd := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", "-")
-	if workdir != "" && workdir != "." {
-		cmd.Dir = workdir
-	}
-	cmd.Stdin = strings.NewReader(patch)
-	out, err := cmd.CombinedOutput()
+	maxResults, err := optionalInt(args, "max_results", 200, 1, 5000)
 	if err != nil {
-		return fmt.Sprintf("git apply failed: %v\n%s", err, string(out)), true
+		return nil, err
 	}
-
-	return "Patch applied successfully.", false
-}
-
-func (e *nativeExecutor) handleGrepSearch(args map[string]any) (string, bool) {
-	query, _ := args["query"].(string)
-	if query == "" {
-		query, _ = args["pattern"].(string)
-	}
-	if query == "" {
-		return "error: missing required argument 'query'", true
-	}
-
-	rootPath, _ := args["path"].(string)
-	if rootPath == "" {
-		rootPath = "."
-	}
-	cwd := e.resolveCwd(args)
-	rootPath = cleanPath(rootPath, cwd)
-
-	maxResults := 100
-	if m, ok := args["max_results"].(float64); ok && m > 0 {
-		maxResults = int(m)
-	}
-
-	regex, err := regexp.Compile("(?i)" + query)
+	useRegex, err := optionalBool(args, "regex")
 	if err != nil {
-		return fmt.Sprintf("invalid search pattern: %v", err), true
+		return nil, err
 	}
-
-	var results []string
-	ignoreDirs := map[string]bool{
-		".git": true, "node_modules": true, "target": true, "bin": true,
-		".venv": true, "venv": true, "__pycache__": true, ".idea": true,
-	}
-
-	err = filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+	var expression *regexp.Regexp
+	if useRegex {
+		expression, err = regexp.Compile(pattern)
 		if err != nil {
+			return nil, fmt.Errorf("invalid regular expression: %w", err)
+		}
+	}
+	matches := make([]searchMatch, 0, min(maxResults, 200))
+	accessErrors := []string{}
+	truncated := false
+	responseBytes := 0
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			if len(accessErrors) < 100 {
+				accessErrors = append(accessErrors, fmt.Sprintf("%s: %v", path, walkErr))
+			}
 			return nil
 		}
-		if d.IsDir() {
-			if ignoreDirs[d.Name()] {
+		if entry.IsDir() {
+			if path != root && skippedDirectory(entry.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-
-		if len(results) >= maxResults {
-			return filepath.SkipAll
+		if len(matches) >= maxResults {
+			truncated = true
+			return fs.SkipAll
 		}
-
-		ext := strings.ToLower(filepath.Ext(path))
-		if isBinaryExt(ext) {
+		if glob != "" {
+			matched, _ := filepath.Match(glob, entry.Name())
+			if !matched {
+				return nil
+			}
+		}
+		safePath, resolveErr := e.resolvePath(path)
+		if resolveErr != nil {
+			if len(accessErrors) < 100 {
+				accessErrors = append(accessErrors, fmt.Sprintf("%s: %v", path, resolveErr))
+			}
 			return nil
 		}
-
-		f, err := os.Open(path)
-		if err != nil {
-			return nil
-		}
-		defer f.Close()
-
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		lineNum := 1
-		for scanner.Scan() {
-			line := scanner.Text()
-			if regex.MatchString(line) {
-				results = append(results, fmt.Sprintf("%s:%d: %s", path, lineNum, strings.TrimSpace(line)))
-				if len(results) >= maxResults {
-					return filepath.SkipAll
+		path = safePath
+		data, readErr := readLimitedFile(path, maxSearchFileBytes)
+		if readErr != nil {
+			if !errors.Is(readErr, errFileTooLarge) {
+				if len(accessErrors) < 100 {
+					accessErrors = append(accessErrors, fmt.Sprintf("%s: %v", path, readErr))
 				}
 			}
-			lineNum++
+			return nil
+		}
+		if isBinary(data) {
+			return nil
+		}
+		scanner := bufio.NewScanner(bytes.NewReader(data))
+		scanner.Buffer(make([]byte, 64*1024), 1<<20)
+		for lineNumber := 1; scanner.Scan(); lineNumber++ {
+			line := scanner.Text()
+			found := strings.Contains(line, pattern)
+			if expression != nil {
+				found = expression.MatchString(line)
+			}
+			if found {
+				remaining := e.maxResponse - responseBytes
+				if remaining <= 0 {
+					truncated = true
+					return fs.SkipAll
+				}
+				line, _ = truncateUTF8(line, min(4096, remaining))
+				matches = append(matches, searchMatch{Path: path, Line: lineNumber, Text: line})
+				responseBytes += len(path) + len(line) + 64
+				if len(matches) >= maxResults {
+					truncated = true
+					return fs.SkipAll
+				}
+			}
+		}
+		if scanErr := scanner.Err(); scanErr != nil {
+			if len(accessErrors) < 100 {
+				accessErrors = append(accessErrors, fmt.Sprintf("%s: %v", path, scanErr))
+			}
 		}
 		return nil
 	})
-
-	if err != nil && err != filepath.SkipAll {
-		return fmt.Sprintf("search error: %v", err), true
+	if err != nil && !errors.Is(err, fs.SkipAll) {
+		return nil, fmt.Errorf("search files: %w", err)
 	}
-
-	if len(results) == 0 {
-		return fmt.Sprintf("No matches found for %q in %s", query, rootPath), false
-	}
-
-	return fmt.Sprintf("Found %d matches:\n%s", len(results), strings.Join(results, "\n")), false
+	return map[string]any{"path": root, "matches": matches, "errors": accessErrors, "truncated": truncated}, nil
 }
 
-// Regex patterns for parsing ChatGPT instructions
-var (
-	// Matches file creation instructions:
-	fileHeaderRegex = regexp.MustCompile(`(?i)(?:create or overwrite|create|overwrite|write(?: to| into)?|save(?: to| into)?|update|put(?: into)?|dump(?: into)?|target[ _-]?file:|file:|filename:|path:|target[ _-]?path:|code for|script for|here is(?: the)?(?: updated)?(?: file)?|создай(?:те)?(?: файл)?|запиши(?:те)?(?: в)?(?: файл)?|сохрани(?:те)?(?: в)?(?: файл)?|обнови(?:те)?(?: файл)?|файл:)\s*(?:the\s+file\s+|file\s+|файл\s+)?[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+))`)
-
-	// Matches "content to <file>" or "code to <file>"
-	toFileRegex = regexp.MustCompile(`(?i)(?:content to|code to|text to|save to|write to|to|into|в файл|в)\s+[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+))`)
-
-	// Matches file existence checks:
-	checkExistRegex = regexp.MustCompile(`(?i)(?:check whether|check if|verify that|verify if|does|проверь(?:(?: файл)? существует ли)?)\s+(?:the\s+file\s+)?(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n]+|[^\s\r\n]+))\s+(?:exists?|exist|существует)`)
-
-	// Matches file read requests:
-	readFileRegex = regexp.MustCompile(`(?i)(?:read(?: the)? file|show(?: the)? contents? of(?: the)? file|display(?: the)? file|inspect(?: the)? file|прочитай(?: файл)?|покажи содержимое(?: файла)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))`)
-
-	// Matches command execution requests:
-	runCmdBlockRegex = regexp.MustCompile(`(?si)(?:run(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|execute(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|run:|execute:|выполни(?:те)?(?: следующую)? команду|запусти(?:те)?(?: следующую)? команду|выполни(?:те)?:|запусти(?:те)?:|команда:)\s*[:]?\s*` + "```(?:[a-zA-Z0-9_-]+)?\\r?\\n(.*?)(?:\\r?\\n```|$)")
-	runCmdLineRegex  = regexp.MustCompile(`(?i)(?:run(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|execute(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|run:|execute:|выполни(?:те)?(?: следующую)? команду|запусти(?:те)?(?: следующую)? команду|выполни(?:те)?:|запусти(?:те)?:|команда:)\s*[:]?\s*[` + "`" + `"]?([^` + "`" + `"\r\n]+)[` + "`" + `"]?`)
-	shellBlockRegex  = regexp.MustCompile("(?si)```(?:powershell|pwsh|bash|sh|cmd|shell|terminal)[^\r\n]*\\r?\\n(.*?)(?:\\r?\\n```|$)")
-
-	// Code block extractors: match code fence even without closing backticks
-	codeBlockFenceRegex = regexp.MustCompile("(?si)```[a-zA-Z0-9_-]*[^\r\n]*\\r?\\n(.*?)(?:\\r?\\n?```|$)")
-
-	// Filename mention regex: matches filenames with typical extensions or Windows paths
-	filenameMentionRegex = regexp.MustCompile(`(?i)(?:` + "`" + `([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)` + "`" + `|"([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)"|'([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)'|([A-Za-z]:[\\/][a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)|\b([a-zA-Z0-9_.-]+\.(?:html?|js|mjs|cjs|ts|tsx|jsx|css|json|py|go|rs|java|cpp|c|h|cs|sh|bat|cmd|ps1|txt|md|yaml|yml|toml|sql|xml|svg))\b)`)
-)
-
-func extractPromptString(args map[string]any) string {
-	keys := []string{
-		"prompt", "instruction", "instructions", "command", "cmd",
-		"content", "code", "text", "input", "script", "query",
-		"base-instructions", "custom-instructions",
+func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any) (any, error) {
+	if err := onlyArgs(args, "command", "cwd", "timeout_seconds", "yield_time_ms"); err != nil {
+		return nil, err
 	}
-	for _, k := range keys {
-		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
-			return v
+	command := requiredString(args, "command")
+	if command == "" {
+		return nil, errors.New("command is required")
+	}
+	cwd, err := e.resolvePath(requiredString(args, "cwd"))
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(cwd)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("cwd is not a directory: %s", cwd)
+	}
+	timeoutSeconds, err := optionalInt(args, "timeout_seconds", 1200, 1, 86400)
+	if err != nil {
+		return nil, err
+	}
+	yieldMS, err := optionalInt(args, "yield_time_ms", 10000, 0, 30000)
+	if err != nil {
+		return nil, err
+	}
+	id, err := randomSessionID()
+	if err != nil {
+		return nil, err
+	}
+	logPath := filepath.Join(e.logDir, time.Now().UTC().Format("20060102T150405.000000000Z")+"-"+id+".log")
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create command log: %w", err)
+	}
+	logWriter := &cappedLogWriter{file: file, max: e.maxLogBytes}
+	cmd := localShellCommand(command)
+	cmd.Dir = cwd
+	cmd.Stdout = logWriter
+	cmd.Stderr = logWriter
+	configureProcess(cmd)
+	session := &processSession{
+		id: id, command: command, cwd: cwd, status: "running", startedAt: time.Now().UTC(), logPath: logPath,
+		cmd: cmd, log: logWriter, done: make(chan struct{}),
+	}
+	e.mu.Lock()
+	e.sessions[id] = session
+	e.mu.Unlock()
+	if err := cmd.Start(); err != nil {
+		_, _ = fmt.Fprintf(logWriter, "start command: %v\n", err)
+		_ = logWriter.Close()
+		e.mu.Lock()
+		session.status = "failed"
+		session.finishedAt = time.Now().UTC()
+		close(session.done)
+		e.mu.Unlock()
+		return e.sessionResult(id, nil, 64<<10)
+	}
+	go e.waitProcess(id)
+	go func() {
+		timer := time.NewTimer(time.Duration(timeoutSeconds) * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			e.stopSession(id, "timed_out")
+		case <-session.done:
+		case <-e.stop:
+		}
+	}()
+	if yieldMS > 0 {
+		timer := time.NewTimer(time.Duration(yieldMS) * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-session.done:
+		case <-timer.C:
+		case <-ctx.Done():
 		}
 	}
-	// Fallback: look for the longest string value in args
-	longest := ""
-	for k, v := range args {
-		if k == "sandbox" || k == "approval-policy" || k == "approval_policy" || k == "model" || k == "cwd" || k == "workdir" {
-			continue
-		}
-		if s, ok := v.(string); ok && len(s) > len(longest) {
-			longest = s
-		}
-	}
-	return longest
+	return e.sessionResult(id, nil, 64<<10)
 }
 
-// handleCodexCall handles calls to legacy "codex" and "codex-reply" tools natively in Go.
-func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]any) (string, bool) {
-	prompt := extractPromptString(args)
-	cwd := e.resolveCwd(args)
-
-	// 1. If explicit command was passed in args
-	if cmd, ok := args["command"].(string); ok && strings.TrimSpace(cmd) != "" {
-		return e.handleExecCommand(ctx, args)
-	}
-	if cmd, ok := args["cmd"].(string); ok && strings.TrimSpace(cmd) != "" {
-		return e.handleExecCommand(ctx, args)
-	}
-
-	// 2. Check if prompt is an explicit command execution (e.g. "Run the following command:\n```powershell...")
-	if isExplicitCommandPrompt(prompt) {
-		if cmd, ok := extractCommandFromPrompt(prompt); ok {
-			return e.handleExecCommand(ctx, map[string]any{"command": cmd, "workdir": cwd})
-		}
-	}
-
-	// 3. Try extracting and writing files
-	if written, err := extractAndWriteFiles(prompt, cwd, args); err == nil && len(written) > 0 {
-		return fmt.Sprintf("Successfully created and wrote %d file(s):\n%s", len(written), strings.Join(written, "\n")), false
-	}
-
-	// 3. Check if prompt asks to verify file existence
-	if match := checkExistRegex.FindStringSubmatch(prompt); len(match) > 0 {
-		filePath := firstNonEmpty(match[1], match[2], match[3], match[4])
-		filePath = cleanPath(filePath, cwd)
-		if fi, err := os.Stat(filePath); err == nil {
-			return fmt.Sprintf("File %s exists (size: %d bytes, last modified: %s).", filePath, fi.Size(), fi.ModTime().Format("2006-01-02 15:04:05")), false
-		}
-		return fmt.Sprintf("File %s does not exist.", filePath), false
-	}
-
-	// 4. Check if prompt asks to read/inspect a specific file
-	if match := readFileRegex.FindStringSubmatch(prompt); len(match) > 0 {
-		filePath := firstNonEmpty(match[1], match[2], match[3], match[4])
-		filePath = cleanPath(filePath, cwd)
-		if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
-			return e.handleReadFile(map[string]any{"path": filePath})
-		}
-	}
-
-	// 5. Command execution in code blocks (e.g. ```powershell, ```bash) or explicit "Run command:"
-	if cmd, ok := extractCommandFromPrompt(prompt); ok {
-		return e.handleExecCommand(ctx, map[string]any{"command": cmd, "workdir": cwd})
-	}
-
-	// 6. Folder / Directory listing & inspection (ONLY for genuinely short listing prompts)
-	if isFolderListingRequest(prompt) {
-		targetDir := extractDirectoryPath(prompt, cwd)
-		return e.getFolderListing(ctx, targetDir)
-	}
-
-	// 7. Check if prompt explicitly mentions an existing directory path
-	if len(prompt) < 300 {
-		if targetDir := extractDirectoryPath(prompt, ""); targetDir != "" {
-			if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
-				return e.getFolderListing(ctx, targetDir)
-			}
-		}
-	}
-
-	// 8. Check if prompt mentions a path that is an existing file
-	if filePath := extractFilePath(prompt, cwd); filePath != "" {
-		if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
-			return e.handleReadFile(map[string]any{"path": filePath})
-		}
-	}
-
-	// 9. If prompt is a short command or instruction, try executing directly in PowerShell
-	trimmedPrompt := strings.TrimSpace(prompt)
-	if !strings.Contains(trimmedPrompt, "\n") && len(trimmedPrompt) > 0 && len(trimmedPrompt) < 300 {
-		out, isErr := e.handleExecCommand(ctx, map[string]any{"command": trimmedPrompt, "workdir": cwd})
-		if !isErr && strings.TrimSpace(out) != "" {
-			return out, false
-		}
-	}
-
-	// 10. SAFE FALLBACK:
-	// If the prompt is long or contains HTML/code, NEVER return an empty directory listing!
-	// Instead, extract any code/HTML and write to snake.html or index.html!
-	if len(prompt) > 300 || strings.Contains(strings.ToLower(prompt), "<html") || strings.Contains(strings.ToLower(prompt), "<!doctype") || strings.Contains(prompt, "```") {
-		content := extractContentFromPayload(prompt)
-		if len(content) > 0 {
-			target := "snake.html"
-			if !strings.Contains(strings.ToLower(prompt), "snake") && !strings.Contains(strings.ToLower(cwd), "snake") && !strings.Contains(strings.ToLower(cwd), "pacman") {
-				target = "index.html"
-			}
-			outPath := cleanPath(target, cwd)
-			_ = os.MkdirAll(filepath.Dir(outPath), 0755)
-			if err := os.WriteFile(outPath, []byte(content), 0644); err == nil {
-				return fmt.Sprintf("Successfully created and wrote %s (%d bytes)", outPath, len(content)), false
-			}
-		}
-	}
-
-	// 11. Final fallback for simple short prompts: return current directory contents
-	return e.getFolderListing(ctx, cwd)
-}
-
-func isFolderListingRequest(prompt string) bool {
-	// If prompt is large or contains code/HTML/write instructions, it is NEVER a listing!
-	if len(prompt) > 500 || strings.Contains(prompt, "```") || strings.Contains(strings.ToLower(prompt), "<!doctype") || strings.Contains(strings.ToLower(prompt), "<html") {
-		return false
-	}
-
-	lower := strings.ToLower(prompt)
-	writeWords := []string{
-		"create", "write", "overwrite", "save", "update", "script",
-		"создай", "запиши", "сохрани", "обнови", "код", "file:", "path:",
-	}
-	for _, w := range writeWords {
-		if strings.Contains(lower, w) {
-			return false
-		}
-	}
-
-	if strings.Contains(lower, "get-childitem") || strings.Contains(lower, "dir ") || strings.HasPrefix(lower, "dir") || strings.Contains(lower, "ls ") || strings.HasPrefix(lower, "ls") {
-		return true
-	}
-
-	actionWords := []string{
-		"re-read", "reread", "read", "list", "show", "display", "get", "scan",
-		"inspect", "check", "explore", "view", "refresh", "see", "tree", "status",
-		"перечитай", "прочитай", "покажи", "список", "проверь", "глянь", "содержимое", "обнови",
-	}
-	targetWords := []string{
-		"folder", "directory", "dir", "files", "contents", "repo", "project", "workspace",
-		"папк", "директор", "файлы", "файлов", "каталог",
-	}
-
-	hasAction := false
-	for _, a := range actionWords {
-		if strings.Contains(lower, a) {
-			hasAction = true
-			break
-		}
-	}
-	if !hasAction {
-		return false
-	}
-
-	for _, t := range targetWords {
-		if strings.Contains(lower, t) {
-			return true
-		}
-	}
-	return false
-}
-
-func extractDirectoryPath(prompt string, fallback string) string {
-	winPathRegex := regexp.MustCompile(`([A-Za-z]:\\[^\s` + "`" + `"'<>|?*]+|[A-Za-z]:/[^\s` + "`" + `"'<>|?*]+)`)
-	matches := winPathRegex.FindAllStringSubmatch(prompt, -1)
-	for _, m := range matches {
-		if len(m) > 1 {
-			p := strings.TrimRight(m[1], ":.,;")
-			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-				return p
-			}
-		}
-	}
-
-	quotedRegex := regexp.MustCompile(`[` + "`" + `"]([^` + "`" + `"\r\n]+)[` + "`" + `"]`)
-	qMatches := quotedRegex.FindAllStringSubmatch(prompt, -1)
-	for _, m := range qMatches {
-		if len(m) > 1 {
-			p := strings.TrimRight(m[1], ":.,;")
-			if !filepath.IsAbs(p) && fallback != "" {
-				p = filepath.Join(fallback, p)
-			}
-			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-				return p
-			}
-		}
-	}
-
-	return fallback
-}
-
-func extractFilePath(prompt string, cwd string) string {
-	winPathRegex := regexp.MustCompile(`([A-Za-z]:\\[^\s` + "`" + `"'<>|?*]+|[A-Za-z]:/[^\s` + "`" + `"'<>|?*]+)`)
-	matches := winPathRegex.FindAllStringSubmatch(prompt, -1)
-	for _, m := range matches {
-		if len(m) > 1 {
-			p := strings.TrimRight(m[1], ":.,;")
-			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-				return p
-			}
-		}
-	}
-
-	quotedRegex := regexp.MustCompile(`[` + "`" + `"]([^` + "`" + `"\r\n]+)[` + "`" + `"]`)
-	qMatches := quotedRegex.FindAllStringSubmatch(prompt, -1)
-	for _, m := range qMatches {
-		if len(m) > 1 {
-			p := strings.TrimRight(m[1], ":.,;")
-			if !filepath.IsAbs(p) && cwd != "" {
-				p = filepath.Join(cwd, p)
-			}
-			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-				return p
-			}
-		}
-	}
-
-	return ""
-}
-
-func extractCommandFromPrompt(prompt string) (string, bool) {
-	if match := runCmdBlockRegex.FindStringSubmatch(prompt); len(match) > 1 {
-		return strings.TrimSpace(match[1]), true
-	}
-	if match := runCmdLineRegex.FindStringSubmatch(prompt); len(match) > 1 {
-		return strings.TrimSpace(match[1]), true
-	}
-	if match := shellBlockRegex.FindStringSubmatch(prompt); len(match) > 1 {
-		return strings.TrimSpace(match[1]), true
-	}
-
-	trimmed := strings.TrimSpace(prompt)
-	if !strings.Contains(trimmed, "\n") && len(trimmed) > 0 {
-		lower := strings.ToLower(trimmed)
-		prefixes := []string{
-			"npm ", "pip ", "python ", "python3 ", "git ", "cargo ", "go ",
-			"node ", "dotnet ", "pytest", "cat ", "type ", "echo ", "powershell ",
-			"cmd ", "npx ", "uv ", "poetry ", "make ", "docker ", "curl ",
-		}
-		for _, prefix := range prefixes {
-			if strings.HasPrefix(lower, prefix) {
-				return trimmed, true
-			}
-		}
-	}
-	return "", false
-}
-
-func (e *nativeExecutor) getFolderListing(ctx context.Context, dir string) (string, bool) {
-	if dir == "" {
-		dir = "."
-	}
+func localShellCommand(command string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
-		cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(cmdCtx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Get-ChildItem -Force")
-		cmd.Dir = dir
-		var out bytes.Buffer
-		cmd.Stdout = &out
-		cmd.Stderr = &out
-		if err := cmd.Run(); err == nil && out.Len() > 0 {
-			return out.String(), false
-		}
+		return exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command)
 	}
-	return e.handleListDir(map[string]any{"path": dir})
+	return exec.Command("/bin/sh", "-c", command)
 }
 
-// extractAndWriteFiles extracts files and writes them directly to disk.
-func extractAndWriteFiles(prompt string, cwd string, args map[string]any) ([]string, error) {
-	if strings.TrimSpace(prompt) == "" {
-		return nil, errors.New("empty prompt")
+func (e *nativeExecutor) waitProcess(id string) {
+	e.mu.Lock()
+	session := e.sessions[id]
+	e.mu.Unlock()
+	if session == nil {
+		return
 	}
-
-	var written []string
-
-	// Case 0: Explicit path in args map (e.g. args["path"], args["file"], args["filePath"])
-	argPath := getPathArg(args)
-	if argPath != "" {
-		content := extractContentFromPayload(prompt)
-		if len(content) > 0 {
-			filePath := cleanPath(argPath, cwd)
-			dir := filepath.Dir(filePath)
-			if dir != "" && dir != "." {
-				_ = os.MkdirAll(dir, 0755)
-			}
-			if err := os.WriteFile(filePath, []byte(content), 0644); err == nil {
-				return []string{fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(content))}, nil
-			}
-		}
+	err := session.cmd.Wait()
+	_ = session.log.Close()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if session.status == "running" {
+		session.status = "exited"
 	}
-
-	// Case 1: Multiple code blocks or headers
-	locs := fileHeaderRegex.FindAllStringSubmatchIndex(prompt, -1)
-	if len(locs) > 0 {
-		for i, loc := range locs {
-			fullMatch := prompt[loc[0]:loc[1]]
-			submatch := fileHeaderRegex.FindStringSubmatch(fullMatch)
-			rawPath := firstNonEmpty(submatch[1], submatch[2], submatch[3], submatch[4])
-			filePath := cleanPath(rawPath, cwd)
-			if filePath == "" {
-				continue
-			}
-
-			headerEnd := loc[1]
-			var contentSlice string
-			if i+1 < len(locs) {
-				contentSlice = prompt[headerEnd:locs[i+1][0]]
-			} else {
-				contentSlice = prompt[headerEnd:]
-			}
-
-			fileContent := extractContentFromPayload(contentSlice)
-			if fileContent == "" {
-				continue
-			}
-
-			dir := filepath.Dir(filePath)
-			if dir != "" && dir != "." {
-				_ = os.MkdirAll(dir, 0755)
-			}
-
-			if err := os.WriteFile(filePath, []byte(fileContent), 0644); err == nil {
-				written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(fileContent)))
-			}
-		}
-		if len(written) > 0 {
-			return written, nil
-		}
+	if session.cmd.ProcessState != nil {
+		exitCode := session.cmd.ProcessState.ExitCode()
+		session.exitCode = &exitCode
 	}
+	if err != nil && session.cmd.ProcessState == nil && session.status == "running" {
+		session.status = "failed"
+	}
+	session.finishedAt = time.Now().UTC()
+	close(session.done)
+}
 
-	// Case 2: Target file specified via "to <file>" or "into <file>"
-	toMatches := toFileRegex.FindAllStringSubmatch(prompt, -1)
-	if len(toMatches) > 0 {
-		for _, tm := range toMatches {
-			rawPath := firstNonEmpty(tm[1], tm[2], tm[3], tm[4])
-			if rawPath != "" {
-				content := extractContentFromPayload(prompt)
-				if len(content) > 0 {
-					filePath := cleanPath(rawPath, cwd)
-					dir := filepath.Dir(filePath)
-					if dir != "" && dir != "." {
-						_ = os.MkdirAll(dir, 0755)
-					}
-					if err := os.WriteFile(filePath, []byte(content), 0644); err == nil {
-						return []string{fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(content))}, nil
-					}
+func (e *nativeExecutor) pollCommand(args map[string]any) (any, error) {
+	if err := onlyArgs(args, "session_id", "offset", "max_bytes"); err != nil {
+		return nil, err
+	}
+	offset, err := optionalInt(args, "offset", 0, 0, int(^uint(0)>>1))
+	if err != nil {
+		return nil, err
+	}
+	maxBytes, err := optionalInt(args, "max_bytes", 64<<10, 1, 1<<20)
+	if err != nil {
+		return nil, err
+	}
+	maxBytes = min(maxBytes, e.maxResponse)
+	return e.sessionResult(requiredString(args, "session_id"), &offset, maxBytes)
+}
+
+func (e *nativeExecutor) cancelCommand(args map[string]any) (any, error) {
+	if err := onlyArgs(args, "session_id"); err != nil {
+		return nil, err
+	}
+	id := requiredString(args, "session_id")
+	e.mu.Lock()
+	session := e.sessions[id]
+	e.mu.Unlock()
+	if session == nil {
+		return nil, errors.New("unknown session_id")
+	}
+	e.stopSession(id, "cancelled")
+	select {
+	case <-session.done:
+	case <-time.After(10 * time.Second):
+		return nil, errors.New("process tree did not stop within 10 seconds")
+	}
+	return e.sessionResult(id, nil, 64<<10)
+}
+
+func (e *nativeExecutor) stopSession(id, status string) {
+	e.mu.Lock()
+	session := e.sessions[id]
+	if session == nil || session.status != "running" || session.cmd.Process == nil {
+		e.mu.Unlock()
+		return
+	}
+	session.status = status
+	cmd := session.cmd
+	e.mu.Unlock()
+	_ = terminateProcessTree(cmd)
+}
+
+func (e *nativeExecutor) sessionResult(id string, offset *int, maxBytes int) (any, error) {
+	e.mu.Lock()
+	session := e.sessions[id]
+	if session == nil {
+		e.mu.Unlock()
+		return nil, errors.New("unknown session_id")
+	}
+	status, startedAt, finishedAt, exitCode := session.status, session.startedAt, session.finishedAt, session.exitCode
+	logPath, command, cwd := session.logPath, session.command, session.cwd
+	e.mu.Unlock()
+	start := int64(0)
+	if offset != nil {
+		start = int64(*offset)
+	} else if info, err := os.Stat(logPath); err == nil && info.Size() > int64(maxBytes) {
+		start = info.Size() - int64(maxBytes)
+	}
+	output, nextOffset, more, err := readLog(logPath, start, maxBytes)
+	if err != nil {
+		return nil, fmt.Errorf("read command log: %w", err)
+	}
+	durationEnd := time.Now().UTC()
+	if !finishedAt.IsZero() {
+		durationEnd = finishedAt
+	}
+	result := map[string]any{
+		"session_id": id, "command": command, "cwd": cwd, "status": status, "started_at": startedAt,
+		"duration_ms": durationEnd.Sub(startedAt).Milliseconds(), "log_path": logPath, "output": output,
+		"next_offset": nextOffset, "truncated": more || start > 0,
+	}
+	if !finishedAt.IsZero() {
+		result["finished_at"] = finishedAt
+	}
+	if exitCode != nil {
+		result["exit_code"] = *exitCode
+	}
+	return result, nil
+}
+
+func readLog(path string, offset int64, maxBytes int) (string, int64, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", offset, false, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", offset, false, err
+	}
+	if offset > info.Size() {
+		offset = info.Size()
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return "", offset, false, err
+	}
+	buffer := make([]byte, min(maxBytes, int(info.Size()-offset)))
+	n, err := io.ReadFull(file, buffer)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", offset, false, err
+	}
+	buffer = buffer[:n]
+	leading := 0
+	for leading < len(buffer) && buffer[leading]&0xc0 == 0x80 {
+		leading++
+	}
+	buffer = buffer[leading:]
+	validLength := len(buffer)
+	for validLength > 0 && !utf8.Valid(buffer[:validLength]) {
+		validLength--
+	}
+	next := offset + int64(leading+validLength)
+	return string(buffer[:validLength]), next, next < info.Size(), nil
+}
+
+func (e *nativeExecutor) cleanupLoop() {
+	interval := min(e.processTTL, time.Hour)
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			cutoff := time.Now().UTC().Add(-e.processTTL)
+			e.mu.Lock()
+			for id, session := range e.sessions {
+				if !session.finishedAt.IsZero() && session.finishedAt.Before(cutoff) {
+					delete(e.sessions, id)
+					_ = os.Remove(session.logPath)
 				}
 			}
+			e.mu.Unlock()
+		case <-e.stop:
+			return
 		}
 	}
-
-	// Case 3: Code blocks matched with filename mentions
-	fenceMatches := codeBlockFenceRegex.FindAllStringSubmatchIndex(prompt, -1)
-	if len(fenceMatches) > 0 {
-		for i, fl := range fenceMatches {
-			codeContent := strings.TrimSpace(prompt[fl[2]:fl[3]])
-			precedingText := prompt[:fl[0]]
-			if i > 0 {
-				precedingText = prompt[fenceMatches[i-1][1]:fl[0]]
-			}
-
-			mentions := filenameMentionRegex.FindAllStringSubmatch(precedingText, -1)
-			var targetFilename string
-			if len(mentions) > 0 {
-				lastMention := mentions[len(mentions)-1]
-				targetFilename = firstNonEmpty(lastMention[1], lastMention[2], lastMention[3], lastMention[4], lastMention[5])
-			} else if len(fenceMatches) == 1 {
-				// Search anywhere in prompt for filename
-				allMentions := filenameMentionRegex.FindAllStringSubmatch(prompt, -1)
-				if len(allMentions) > 0 {
-					targetFilename = firstNonEmpty(allMentions[0][1], allMentions[0][2], allMentions[0][3], allMentions[0][4], allMentions[0][5])
-				}
-			}
-
-			if targetFilename != "" && len(codeContent) > 0 {
-				filePath := cleanPath(targetFilename, cwd)
-				dir := filepath.Dir(filePath)
-				if dir != "" && dir != "." {
-					_ = os.MkdirAll(dir, 0755)
-				}
-				if err := os.WriteFile(filePath, []byte(codeContent), 0644); err == nil {
-					written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(codeContent)))
-				}
-			}
-		}
-		if len(written) > 0 {
-			return written, nil
-		}
-	}
-
-	// Case 4: Any HTML content with filename mention anywhere
-	content := extractContentFromPayload(prompt)
-	if len(content) > 0 {
-		allMentions := filenameMentionRegex.FindAllStringSubmatch(prompt, -1)
-		var targetFilename string
-		if len(allMentions) > 0 {
-			targetFilename = firstNonEmpty(allMentions[0][1], allMentions[0][2], allMentions[0][3], allMentions[0][4], allMentions[0][5])
-		}
-		if targetFilename == "" {
-			if strings.Contains(strings.ToLower(prompt), "snake") || strings.Contains(strings.ToLower(cwd), "snake") || strings.Contains(strings.ToLower(cwd), "pacman") {
-				targetFilename = "snake.html"
-			} else {
-				targetFilename = "index.html"
-			}
-		}
-
-		filePath := cleanPath(targetFilename, cwd)
-		dir := filepath.Dir(filePath)
-		if dir != "" && dir != "." {
-			_ = os.MkdirAll(dir, 0755)
-		}
-		if err := os.WriteFile(filePath, []byte(content), 0644); err == nil {
-			return []string{fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(content))}, nil
-		}
-	}
-
-	return nil, errors.New("no files could be extracted")
 }
 
-func isExplicitCommandPrompt(prompt string) bool {
-	lower := strings.ToLower(prompt)
-	if strings.Contains(lower, "write") || strings.Contains(lower, "create") || strings.Contains(lower, "save") || strings.Contains(lower, "создай") || strings.Contains(lower, "запиши") || strings.Contains(lower, "сохрани") {
-		return false
-	}
-	return runCmdBlockRegex.MatchString(prompt) || runCmdLineRegex.MatchString(prompt) || strings.Contains(lower, "run the following") || strings.Contains(lower, "execute the following") || strings.Contains(lower, "выполни команду") || strings.Contains(lower, "запусти команду")
-}
-
-// extractContentFromPayload extracts the code or HTML content from any string payload.
-func extractContentFromPayload(s string) string {
-	// 1. Try code block fence
-	if match := codeBlockFenceRegex.FindStringSubmatch(s); len(match) > 1 {
-		// If fence starts with shell language and prompt has no file keywords, do not treat as file content
-		langMatch := regexp.MustCompile("(?i)```([a-zA-Z0-9_-]+)").FindStringSubmatch(s)
-		isShell := false
-		if len(langMatch) > 1 {
-			l := strings.ToLower(langMatch[1])
-			if l == "powershell" || l == "pwsh" || l == "bash" || l == "sh" || l == "cmd" || l == "terminal" {
-				isShell = true
+func (e *nativeExecutor) Close() {
+	e.closed.Do(func() {
+		close(e.stop)
+		e.mu.Lock()
+		sessions := make([]*processSession, 0, len(e.sessions))
+		for _, session := range e.sessions {
+			if session.status == "running" {
+				sessions = append(sessions, session)
 			}
 		}
-		hasFileKeyword := strings.Contains(strings.ToLower(s), "write") || strings.Contains(strings.ToLower(s), "save") || strings.Contains(strings.ToLower(s), "create") || strings.Contains(strings.ToLower(s), "файл") || strings.Contains(strings.ToLower(s), ".ps1") || strings.Contains(strings.ToLower(s), ".sh") || strings.Contains(strings.ToLower(s), ".bat")
-		if !isShell || hasFileKeyword {
-			res := strings.TrimSpace(match[1])
-			if len(res) > 0 {
-				return res
+		e.mu.Unlock()
+		for _, session := range sessions {
+			e.stopSession(session.id, "cancelled")
+		}
+		deadline := time.After(10 * time.Second)
+		for _, session := range sessions {
+			select {
+			case <-session.done:
+			case <-deadline:
+				return
 			}
 		}
-	}
-
-	// 2. Try HTML extraction (case-insensitive <!doctype or <html)
-	lower := strings.ToLower(s)
-	docIdx := strings.Index(lower, "<!doctype")
-	if docIdx == -1 {
-		docIdx = strings.Index(lower, "<html")
-	}
-	if docIdx >= 0 {
-		htmlSlice := s[docIdx:]
-		lowerSlice := strings.ToLower(htmlSlice)
-		if endIdx := strings.LastIndex(lowerSlice, "</html>"); endIdx >= 0 {
-			return strings.TrimSpace(htmlSlice[:endIdx+7])
-		}
-		// If unclosed, strip any trailing code fence
-		cleaned := strings.TrimRight(htmlSlice, "`" + " \r\n\t")
-		return strings.TrimSpace(cleaned)
-	}
-
-	// 3. Try content after colon
-	if colonIdx := strings.Index(s, ":\n"); colonIdx >= 0 {
-		after := strings.TrimSpace(s[colonIdx+2:])
-		after = strings.Trim(after, "`")
-		if len(after) > 20 {
-			return strings.TrimSpace(after)
-		}
-	}
-
-	return ""
+	})
 }
 
-func firstNonEmpty(items ...string) string {
-	for _, it := range items {
-		if strings.TrimSpace(it) != "" {
-			return strings.TrimSpace(it)
+func (e *nativeExecutor) resolvePath(raw string) (string, error) {
+	if raw == "" {
+		return "", errors.New("absolute path is required")
+	}
+	if !filepath.IsAbs(raw) {
+		return "", fmt.Errorf("path must be absolute: %q", raw)
+	}
+	path := filepath.Clean(raw)
+	resolved, err := resolveExistingPrefix(path)
+	if err != nil {
+		return "", err
+	}
+	if e.allowAll {
+		return resolved, nil
+	}
+	for _, root := range e.allowedRoots {
+		relative, relErr := filepath.Rel(root, resolved)
+		if relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
+			return resolved, nil
 		}
 	}
-	return ""
+	return "", fmt.Errorf("path is outside WEBCODEX_ALLOWED_ROOTS: %s", path)
 }
 
-func cleanPath(raw string, cwd string) string {
-	p := strings.TrimSpace(raw)
-	p = strings.Trim(p, "`\"'")
-	p = strings.TrimRight(p, ":.,;")
-	if p == "" {
-		return ""
+func resolveExistingPrefix(path string) (string, error) {
+	current := path
+	var suffix []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("resolve path: %w", err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("resolve path: %w", err)
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
 	}
-	if !filepath.IsAbs(p) && cwd != "" {
-		p = filepath.Join(cwd, p)
-	}
-	return filepath.Clean(p)
 }
 
-func isBinaryExt(ext string) bool {
-	switch ext {
-	case ".exe", ".dll", ".so", ".dylib", ".bin", ".iso", ".zip", ".tar", ".gz", ".7z", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".db", ".sqlite":
+var errFileTooLarge = errors.New("file exceeds size limit")
+
+func readLimitedFile(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read file: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read file: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errFileTooLarge
+	}
+	return data, nil
+}
+
+func isBinary(data []byte) bool {
+	sample := data
+	if len(sample) > 8192 {
+		sample = sample[:8192]
+	}
+	return bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample)
+}
+
+func skippedDirectory(name string) bool {
+	switch strings.ToLower(name) {
+	case ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build", ".idea", ".vscode":
 		return true
 	default:
 		return false
 	}
+}
+
+func onlyArgs(args map[string]any, allowed ...string) error {
+	set := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		set[name] = true
+	}
+	for name := range args {
+		if !set[name] {
+			return errors.New("unknown argument")
+		}
+	}
+	return nil
+}
+
+func requiredString(args map[string]any, name string) string {
+	value, _ := args[name].(string)
+	return value
+}
+
+func optionalInt(args map[string]any, name string, fallback, minimum, maximum int) (int, error) {
+	value, exists := args[name]
+	if !exists {
+		return fallback, nil
+	}
+	number, ok := value.(float64)
+	if !ok || number != float64(int(number)) || int(number) < minimum || int(number) > maximum {
+		return 0, fmt.Errorf("%s must be an integer from %d to %d", name, minimum, maximum)
+	}
+	return int(number), nil
+}
+
+func optionalString(args map[string]any, name string) (string, error) {
+	value, exists := args[name]
+	if !exists {
+		return "", nil
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", name)
+	}
+	return text, nil
+}
+
+func optionalBool(args map[string]any, name string) (bool, error) {
+	value, exists := args[name]
+	if !exists {
+		return false, nil
+	}
+	flag, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", name)
+	}
+	return flag, nil
+}
+
+func splitPathList(value string) []string {
+	parts := strings.Split(value, string(os.PathListSeparator))
+	result := parts[:0]
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+func truncateUTF8(value string, maxBytes int) (string, bool) {
+	if len(value) <= maxBytes {
+		return value, false
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.ValidString(value[:cut]) {
+		cut--
+	}
+	return value[:cut], true
+}
+
+func randomSessionID() (string, error) {
+	data := make([]byte, 12)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("create session id: %w", err)
+	}
+	return "proc_" + hex.EncodeToString(data), nil
 }

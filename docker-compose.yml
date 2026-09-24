@@ -11,8 +11,8 @@ services:
       WEBCODEX_DB_PATH: "/data/webcodex.db"
       WEBCODEX_ADMIN_USER: "${WEBCODEX_ADMIN_USER:-admin}"
       WEBCODEX_ADMIN_PASSWORD: "${WEBCODEX_ADMIN_PASSWORD}"
-      WEBCODEX_CALL_TIMEOUT: "2m"
-      WEBCODEX_TOOL_CARDS: "false"
+      WEBCODEX_CALL_TIMEOUT: "60s"
+      WEBCODEX_ACCESS_TOKEN_TTL: "24h"
     volumes:
       - webcodex_data:/data
     ports:

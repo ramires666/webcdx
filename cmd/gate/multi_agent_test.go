@@ -30,7 +30,6 @@ func setupTestServer(t *testing.T) (*server, func()) {
 	srv := &server{
 		publicURL:     "https://codex.grom.world",
 		timeout:       2 * time.Second,
-		toolCards:     false,
 		store:         store,
 		runtimes:      make(map[string]*agentRuntime),
 		adminUser:     "admin",
@@ -374,7 +373,7 @@ func TestToolCallErrorsAreAlwaysEncapsulatedAsMCPResults(t *testing.T) {
 	})
 
 	// When calling a tool with no agent connected (which causes an agent call error/timeout)
-	callBody := `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"shell_command","arguments":{"command":"dir"}}}`
+	callBody := `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"exec_command","arguments":{"command":"dir","cwd":"C:/"}}}`
 	req := httptest.NewRequest("POST", "/mcp", strings.NewReader(callBody))
 	req.Header.Set("Authorization", "Bearer "+rawToken)
 	rec := httptest.NewRecorder()
