@@ -1,53 +1,28 @@
-# Как обновить сервер
+# Чистый запуск сервера
 
-Старая версия содержала другой исходник, поэтому на сервере проще сделать чистый clone. База Docker и `.env` при этом сохраняются.
+Эти команды удалят старый контейнер и его базу с учётками:
 
-1. Узнайте настоящий каталог старой установки:
+```bash
+OLD_VOLUME=$(docker inspect webcodex-gate --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null)
+docker rm -f webcodex-gate 2>/dev/null || true
+[ -z "$OLD_VOLUME" ] || docker volume rm "$OLD_VOLUME"
 
-   ```bash
-   docker inspect webcodex-gate --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}'
-   ```
+git clone https://github.com/ramires666/webcdx.git /opt/webcdx
+cd /opt/webcdx
+cp .env.example .env
 
-   Скопируйте выведенный путь в следующую команду вместо `/путь/из/команды`:
+ADMIN_PASSWORD=$(openssl rand -hex 24)
+sed -i "s/CHANGE_ME_TO_A_VERY_LONG_RANDOM_PASSWORD/$ADMIN_PASSWORD/" .env
 
-   ```bash
-   OLD_DIR="/путь/из/команды"
-   BACKUP="${OLD_DIR}.old-$(date +%Y%m%d-%H%M%S)"
-   ```
+docker compose up -d --build gate
+docker compose ps
+echo "Пароль admin: $ADMIN_PASSWORD"
+```
 
-2. Сохраните базу и остановите старый Gate:
+Проверьте MCP v4:
 
-   ```bash
-   cd "$OLD_DIR"
-   docker compose exec -T gate cp /data/webcodex.db /data/webcodex.db.bak
-   docker compose down
-   ```
+```bash
+curl -fsS https://codex.grom.world/.well-known/oauth-protected-resource/mcp/v4
+```
 
-   Не добавляйте `-v`: без него Docker оставит volume с базой.
-
-3. Уберите старую папку в резерв и клонируйте свежий проект на её место:
-
-   ```bash
-   mv "$OLD_DIR" "$BACKUP"
-   git clone https://github.com/ramires666/webcdx.git "$OLD_DIR"
-   cp "$BACKUP/.env" "$OLD_DIR/.env"
-   ```
-
-4. Запустите новый Gate:
-
-   ```bash
-   cd "$OLD_DIR"
-   docker compose up -d --build gate
-   docker compose ps
-   curl -fsS https://codex.grom.world/.well-known/oauth-protected-resource/mcp/v4
-   ```
-
-   Последняя команда должна вернуть JSON с адресом, который заканчивается на `/mcp/v4`. При ошибке покажите журнал:
-
-   ```bash
-   docker compose logs --tail=50 gate
-   ```
-
-5. На рабочем компьютере перезапустите `start-agent-thunderfull.bat`. В ChatGPT удалите старый connector, создайте новый с адресом `https://codex.grom.world/mcp/v4` и начните новый чат.
-
-После проверки новую папку можно оставить, а `$BACKUP` удалить. Также замените ранее показанный agent token: создайте новый token в `/admin`, внесите его в локальный BAT-файл и удалите старый.
+Затем откройте `https://codex.grom.world/admin`, войдите как `admin` с показанным паролем и создайте нового agent. Внесите его token в `start-agent-thunderfull.bat`, перезапустите agent и создайте в ChatGPT connector с адресом `https://codex.grom.world/mcp/v4`.
