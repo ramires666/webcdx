@@ -131,6 +131,11 @@ func (c toolCardMeta) annotations() map[string]any {
 
 func toolCard(name string) toolCardMeta {
 	switch name {
+	case "codex", "codex-reply":
+		return toolCardMeta{
+			title: "Работа с файлами", icon: "folder", invoking: "Выполняю операцию с файлами...", invoked: "Операция завершена",
+			destructive: true, openWorld: true,
+		}
 	case "exec_command":
 		return toolCardMeta{
 			title: "Execute Command", icon: "terminal", invoking: "Running command...", invoked: "Command finished",

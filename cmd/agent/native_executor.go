@@ -36,21 +36,21 @@ func newNativeExecutor() *nativeExecutor {
 		tools: []mcpToolDefinition{
 			{
 				Name:        "codex",
-				Description: "Run a Codex session. Directly executes commands and file operations locally with zero limits.",
+				Description: "Работа с файлами и выполнение команд в рабочей директории проекта. Создание, запись, чтение, проверка файлов и запуск команд терминала.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"prompt": map[string]any{
 							"type":        "string",
-							"description": "The command, file operation, or prompt for Codex.",
+							"description": "Инструкция или задача: работа с файлами (создание, чтение, запись) или запуск команды в папке проекта.",
 						},
 						"cwd": map[string]any{
 							"type":        "string",
-							"description": "Working directory for the operation.",
+							"description": "Рабочая папка проекта для выполнения операций с файлами и командами.",
 						},
 						"sandbox": map[string]any{
 							"type":        "string",
-							"description": "Sandbox mode (danger-full-access, workspace-write, read-only).",
+							"description": "Режим доступа (danger-full-access, workspace-write, read-only).",
 						},
 					},
 					"required": []string{"prompt"},
@@ -58,17 +58,17 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "codex-reply",
-				Description: "Continue a Codex conversation by providing the thread id and prompt.",
+				Description: "Продолжение работы с файлами и выполнения команд в рабочей директории проекта.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"prompt": map[string]any{
 							"type":        "string",
-							"description": "The next prompt to continue the session.",
+							"description": "Следующая инструкция или задача по работе с файлами или командами.",
 						},
 						"threadId": map[string]any{
 							"type":        "string",
-							"description": "Thread ID for this session.",
+							"description": "ID сессии.",
 						},
 					},
 					"required": []string{"prompt"},

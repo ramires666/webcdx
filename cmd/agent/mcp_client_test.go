@@ -76,5 +76,80 @@ func TestRealCodexMCPCall(t *testing.T) {
 	if !strings.Contains(string(data), "TEST_WRITE_OK") {
 		t.Fatalf("File content does not contain TEST_WRITE_OK: %s", string(data))
 	}
+	// Clean up after test
+	_ = os.Remove(`C:\projects\algo\NQ2-9\PROJECT_TREE.txt`)
 	fmt.Println("SUCCESSFULLY VERIFIED FULL CODEX MCP EXECUTION!")
 }
+
+func TestSanitizeToolsListDescriptions(t *testing.T) {
+	req := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	rawResp := json.RawMessage(`{
+		"jsonrpc":"2.0",
+		"id":1,
+		"result":{
+			"tools":[
+				{
+					"name":"codex",
+					"title":"Codex",
+					"description":"Run a Codex session. Accepts configuration parameters matching the Codex Config struct.",
+					"inputSchema":{
+						"type":"object",
+						"properties":{
+							"prompt":{"type":"string","description":"The initial user prompt to start the Codex conversation."}
+						}
+					}
+				},
+				{
+					"name":"codex-reply",
+					"title":"Codex Reply",
+					"description":"Continue a Codex conversation by providing the thread id and prompt.",
+					"inputSchema":{
+						"type":"object",
+						"properties":{
+							"prompt":{"type":"string","description":"The next user prompt to continue the Codex conversation."}
+						}
+					}
+				}
+			]
+		}
+	}`)
+
+	sanitized := sanitizeToolsListDescriptions(req, rawResp)
+
+	var msg struct {
+		Result struct {
+			Tools []struct {
+				Name        string `json:"name"`
+				Title       string `json:"title"`
+				Description string `json:"description"`
+				InputSchema struct {
+					Properties map[string]struct {
+						Description string `json:"description"`
+					} `json:"properties"`
+				} `json:"inputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(sanitized, &msg); err != nil {
+		t.Fatalf("unmarshal sanitized response: %v", err)
+	}
+
+	for _, tool := range msg.Result.Tools {
+		lowerDesc := strings.ToLower(tool.Description)
+		lowerTitle := strings.ToLower(tool.Title)
+		if strings.Contains(lowerDesc, "codex") || strings.Contains(lowerDesc, "кодекс") {
+			t.Errorf("tool %q description must not contain 'codex' or 'кодекс', got: %q", tool.Name, tool.Description)
+		}
+		if strings.Contains(lowerTitle, "codex") || strings.Contains(lowerTitle, "кодекс") {
+			t.Errorf("tool %q title must not contain 'codex' or 'кодекс', got: %q", tool.Name, tool.Title)
+		}
+		if !strings.Contains(tool.Description, "файлами") {
+			t.Errorf("tool %q description should mention 'файлами', got: %q", tool.Name, tool.Description)
+		}
+		promptDesc := tool.InputSchema.Properties["prompt"].Description
+		if strings.Contains(strings.ToLower(promptDesc), "codex") {
+			t.Errorf("prompt parameter description must not contain 'codex', got: %q", promptDesc)
+		}
+	}
+}
+

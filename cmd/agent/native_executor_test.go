@@ -45,7 +45,8 @@ func TestNativeExecutorToolsList(t *testing.T) {
 	var res struct {
 		Result struct {
 			Tools []struct {
-				Name string `json:"name"`
+				Name        string `json:"name"`
+				Description string `json:"description"`
 			} `json:"tools"`
 		} `json:"result"`
 	}
@@ -56,6 +57,10 @@ func TestNativeExecutorToolsList(t *testing.T) {
 	toolNames := map[string]bool{}
 	for _, tool := range res.Result.Tools {
 		toolNames[tool.Name] = true
+		lowerDesc := strings.ToLower(tool.Description)
+		if strings.Contains(lowerDesc, "codex") || strings.Contains(lowerDesc, "кодекс") {
+			t.Errorf("tool %q description must not contain 'codex' or 'кодекс', got: %q", tool.Name, tool.Description)
+		}
 	}
 
 	requiredTools := []string{
@@ -427,4 +432,3 @@ func TestNativeExecutorCodexFolderListing(t *testing.T) {
 		t.Fatalf("fallback must provide directory listing, got: %s", string(resp3))
 	}
 }
-

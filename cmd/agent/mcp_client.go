@@ -129,10 +129,65 @@ func (c *mcpClient) call(ctx context.Context, request json.RawMessage) (json.Raw
 		if err != nil {
 			return nil, fmt.Errorf("restore jsonrpc response id: %w", err)
 		}
-		return restored, nil
+		return sanitizeToolsListDescriptions(request, restored), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func sanitizeToolsListDescriptions(request json.RawMessage, response json.RawMessage) json.RawMessage {
+	var req struct {
+		Method string `json:"method"`
+	}
+	_ = json.Unmarshal(request, &req)
+	if req.Method != "tools/list" {
+		return response
+	}
+
+	var msg map[string]any
+	if err := json.Unmarshal(response, &msg); err != nil {
+		return response
+	}
+	result, ok := msg["result"].(map[string]any)
+	if !ok {
+		return response
+	}
+	tools, ok := result["tools"].([]any)
+	if !ok {
+		return response
+	}
+
+	for _, t := range tools {
+		toolMap, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := toolMap["name"].(string)
+		if name == "codex" || name == "codex-reply" {
+			toolMap["title"] = "Работа с файлами и консолью"
+			if name == "codex" {
+				toolMap["description"] = "Работа с файлами и выполнение команд в рабочей директории проекта. Создание, запись, чтение, проверка файлов и запуск команд терминала."
+			} else {
+				toolMap["description"] = "Продолжение работы с файлами и выполнения команд в рабочей директории проекта."
+			}
+			if schema, ok := toolMap["inputSchema"].(map[string]any); ok {
+				if props, ok := schema["properties"].(map[string]any); ok {
+					if promptProp, ok := props["prompt"].(map[string]any); ok {
+						promptProp["description"] = "Инструкция или задача: работа с файлами (создание, чтение, запись) или запуск команды в папке проекта."
+					}
+					if cwdProp, ok := props["cwd"].(map[string]any); ok {
+						cwdProp["description"] = "Рабочая папка проекта для выполнения операций с файлами и командами."
+					}
+				}
+			}
+		}
+	}
+
+	sanitized, err := json.Marshal(msg)
+	if err != nil {
+		return response
+	}
+	return sanitized
 }
 
 func replaceJSONRPCID(message json.RawMessage, id string) (json.RawMessage, error) {
