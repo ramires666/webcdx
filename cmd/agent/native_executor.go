@@ -36,13 +36,13 @@ func newNativeExecutor() *nativeExecutor {
 		tools: []mcpToolDefinition{
 			{
 				Name:        "codex",
-				Description: "Работа с файлами и выполнение команд в рабочей директории проекта. Создание, запись, чтение, проверка файлов и запуск команд терминала.",
+				Description: "Работа с файлами и выполнение команд в рабочей директории проекта. Поддерживает длительные операции и сложные вычисления (таймаут до 20 минут / 1200 сек). Модель используется по умолчанию (параметр model не указывать, выбор модели автоматический).",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"prompt": map[string]any{
 							"type":        "string",
-							"description": "Инструкция или задача: работа с файлами (создание, чтение, запись) или запуск команды в папке проекта.",
+							"description": "Инструкция или задача: работа с файлами (создание, чтение, запись) или запуск команды в папке проекта. Для тяжелых расчетов и скриптов таймаут составляет до 20 минут.",
 						},
 						"cwd": map[string]any{
 							"type":        "string",
@@ -58,7 +58,7 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "codex-reply",
-				Description: "Продолжение работы с файлами и выполнения команд в рабочей директории проекта.",
+				Description: "Продолжение работы с файлами и выполнения команд в рабочей директории проекта (таймаут до 20 минут, модель по умолчанию).",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -76,7 +76,7 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "exec_command",
-				Description: "Execute a shell command locally on the worker machine (PowerShell on Windows, bash/sh on Unix) with timeout and working directory support.",
+				Description: "Execute a shell command locally on the worker machine (PowerShell on Windows, bash/sh on Unix) with timeout up to 20 minutes and working directory support.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -94,7 +94,7 @@ func newNativeExecutor() *nativeExecutor {
 						},
 						"timeout_sec": map[string]any{
 							"type":        "integer",
-							"description": "Optional execution timeout in seconds (default: 600).",
+							"description": "Optional execution timeout in seconds (default: 1200 / 20 minutes).",
 						},
 					},
 					"required": []string{"command"},
@@ -387,7 +387,7 @@ func (e *nativeExecutor) handleExecCommand(ctx context.Context, args map[string]
 		workdir, _ = args["cwd"].(string)
 	}
 
-	timeoutSec := 600
+	timeoutSec := 1200
 	if t, ok := args["timeout_sec"].(float64); ok && t > 0 {
 		timeoutSec = int(t)
 	}
@@ -870,7 +870,7 @@ func (e *nativeExecutor) getFolderListing(ctx context.Context, dir string) (stri
 		dir = "."
 	}
 	if runtime.GOOS == "windows" {
-		cmdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(cmdCtx, "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Get-ChildItem -Force")
 		cmd.Dir = dir

@@ -54,11 +54,12 @@ func findCodexMCP() (string, []string) {
 		}
 	}
 
+	codexCliArgs := []string{"--dangerously-bypass-approvals-and-sandbox", "mcp-server"}
 	if p, err := exec.LookPath("codex"); err == nil {
-		return p, append([]string{"mcp-server"}, defaultArgs...)
+		return p, codexCliArgs
 	}
 	if p, err := exec.LookPath("codex.exe"); err == nil {
-		return p, append([]string{"mcp-server"}, defaultArgs...)
+		return p, codexCliArgs
 	}
 
 	if runtime.GOOS == "windows" {
@@ -80,24 +81,24 @@ func main() {
 	if mode == "codex" || mode == "auto" {
 		binary, args := findCodexMCP()
 		if fileExists(binary) || isCommandAvailable(binary) {
-			log.Printf("Starting agent with full OpenAI Codex engine (%s)...", binary)
+			log.Printf("Starting agent with worker engine (%s)...", binary)
 			mcp, err := startMCP(context.Background(), binary, args)
 			if err != nil {
 				if mode == "codex" {
-					log.Fatalf("start codex mcp (%s): %v", binary, err)
+					log.Fatalf("start worker engine (%s): %v", binary, err)
 				}
-				log.Printf("failed to start codex mcp (%s): %v, falling back to native direct mode", binary, err)
+				log.Printf("failed to start worker engine (%s): %v, falling back to native direct mode", binary, err)
 			} else if err := mcp.initialize(context.Background()); err != nil {
 				if mode == "codex" {
-					log.Fatalf("initialize codex mcp: %v", err)
+					log.Fatalf("initialize worker engine: %v", err)
 				}
-				log.Printf("failed to initialize codex mcp: %v, falling back to native direct mode", err)
+				log.Printf("failed to initialize worker engine: %v, falling back to native direct mode", err)
 			} else {
-				log.Printf("Codex MCP engine connected and ready (all autonomous agent features active).")
+				log.Printf("Worker engine connected and ready (all autonomous agent features active).")
 				runner = mcp
 			}
 		} else if mode == "codex" {
-			log.Fatalf("Codex binary not found: %s", binary)
+			log.Fatalf("Worker engine binary not found: %s", binary)
 		}
 	}
 

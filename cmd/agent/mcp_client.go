@@ -88,16 +88,44 @@ func startMCP(ctx context.Context, binary string, args []string) (*mcpClient, er
 		pending: make(map[string]chan json.RawMessage),
 	}
 	go client.readLoop(stdout)
-	go logPipe("codex-mcp", stderr)
+	go logPipe("worker-engine", stderr)
 	go func() {
 		if err := cmd.Wait(); err != nil {
-			log.Printf("codex mcp exited: %v", err)
+			log.Printf("worker engine exited: %v", err)
 		}
 	}()
 	return client, nil
 }
 
+func stripModelParameter(request json.RawMessage) json.RawMessage {
+	var msg map[string]any
+	if err := json.Unmarshal(request, &msg); err != nil {
+		return request
+	}
+	method, _ := msg["method"].(string)
+	if method != "tools/call" {
+		return request
+	}
+	params, ok := msg["params"].(map[string]any)
+	if !ok {
+		return request
+	}
+	args, ok := params["arguments"].(map[string]any)
+	if !ok {
+		return request
+	}
+	if _, exists := args["model"]; exists {
+		delete(args, "model")
+		if updated, err := json.Marshal(msg); err == nil {
+			return updated
+		}
+	}
+	return request
+}
+
 func (c *mcpClient) call(ctx context.Context, request json.RawMessage) (json.RawMessage, error) {
+	request = stripModelParameter(request)
+
 	var msg jsonrpcMessage
 	if err := json.Unmarshal(request, &msg); err != nil {
 		return nil, fmt.Errorf("parse jsonrpc request: %w", err)
@@ -166,18 +194,29 @@ func sanitizeToolsListDescriptions(request json.RawMessage, response json.RawMes
 		if name == "codex" || name == "codex-reply" {
 			toolMap["title"] = "Работа с файлами и консолью"
 			if name == "codex" {
-				toolMap["description"] = "Работа с файлами и выполнение команд в рабочей директории проекта. Создание, запись, чтение, проверка файлов и запуск команд терминала."
+				toolMap["description"] = "Работа с файлами и выполнение команд в рабочей директории проекта. Поддерживает длительные операции и сложные вычисления (таймаут до 20 минут / 1200 сек). Модель используется по умолчанию (параметр model не указывать, выбор модели автоматический)."
 			} else {
-				toolMap["description"] = "Продолжение работы с файлами и выполнения команд в рабочей директории проекта."
+				toolMap["description"] = "Продолжение работы с файлами и выполнения команд в рабочей директории проекта (таймаут до 20 минут, модель по умолчанию)."
 			}
 			if schema, ok := toolMap["inputSchema"].(map[string]any); ok {
 				if props, ok := schema["properties"].(map[string]any); ok {
+					delete(props, "model")
 					if promptProp, ok := props["prompt"].(map[string]any); ok {
-						promptProp["description"] = "Инструкция или задача: работа с файлами (создание, чтение, запись) или запуск команды в папке проекта."
+						promptProp["description"] = "Инструкция или задача: работа с файлами (создание, чтение, запись) или запуск команды в папке проекта. Для сложных задач и тяжелых расчетов таймаут до 20 минут."
 					}
 					if cwdProp, ok := props["cwd"].(map[string]any); ok {
 						cwdProp["description"] = "Рабочая папка проекта для выполнения операций с файлами и командами."
 					}
+				}
+				if reqList, ok := schema["required"].([]any); ok {
+					var filtered []any
+					for _, r := range reqList {
+						if str, ok := r.(string); ok && str == "model" {
+							continue
+						}
+						filtered = append(filtered, r)
+					}
+					schema["required"] = filtered
 				}
 			}
 		}
@@ -239,7 +278,7 @@ func (c *mcpClient) readLoop(stdout io.Reader) {
 
 		var msg jsonrpcMessage
 		if err := json.Unmarshal(line, &msg); err != nil {
-			log.Printf("codex mcp bad json: %v", err)
+			log.Printf("worker engine bad json: %v", err)
 			continue
 		}
 		if len(msg.ID) == 0 {
@@ -248,7 +287,7 @@ func (c *mcpClient) readLoop(stdout io.Reader) {
 
 		var internalID string
 		if err := json.Unmarshal(msg.ID, &internalID); err != nil || internalID == "" {
-			log.Printf("codex mcp response has invalid internal id %s", string(msg.ID))
+			log.Printf("worker engine response has invalid internal id %s", string(msg.ID))
 			continue
 		}
 
@@ -256,7 +295,7 @@ func (c *mcpClient) readLoop(stdout io.Reader) {
 		respCh := c.pending[internalID]
 		c.pendingMu.Unlock()
 		if respCh == nil {
-			log.Printf("codex mcp response for unknown id %q", internalID)
+			log.Printf("worker engine response for unknown id %q", internalID)
 			continue
 		}
 
@@ -264,7 +303,7 @@ func (c *mcpClient) readLoop(stdout io.Reader) {
 		respCh <- response
 	}
 	if err := scanner.Err(); err != nil {
-		log.Printf("codex mcp stdout: %v", err)
+		log.Printf("worker engine stdout: %v", err)
 	}
 }
 

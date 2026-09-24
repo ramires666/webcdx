@@ -57,7 +57,7 @@ func newServer() (*server, error) {
 
 	srv := &server{
 		publicURL:     publicURL,
-		timeout:       durationEnv("WEBCODEX_CALL_TIMEOUT", 10*time.Minute),
+		timeout:       durationEnv("WEBCODEX_CALL_TIMEOUT", 20*time.Minute),
 		toolCards:     boolEnv("WEBCODEX_TOOL_CARDS", false),
 		store:         db,
 		runtimes:      make(map[string]*agentRuntime),

@@ -70,7 +70,7 @@ func handleRequest(
 	actionDesc := formatActionRequest(request.Request)
 	log.Printf("▶ %s (id=%s, bytes=%d)", actionDesc, request.ID, len(request.Request))
 
-	callCtx, cancel := context.WithTimeout(ctx, durationEnv("WEBCODEX_MCP_CALL_TIMEOUT", 10*time.Minute))
+	callCtx, cancel := context.WithTimeout(ctx, durationEnv("WEBCODEX_MCP_CALL_TIMEOUT", 20*time.Minute))
 	defer cancel()
 
 	response, err := runner.call(callCtx, request.Request)

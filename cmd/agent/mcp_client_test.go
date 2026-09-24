@@ -95,8 +95,10 @@ func TestSanitizeToolsListDescriptions(t *testing.T) {
 					"inputSchema":{
 						"type":"object",
 						"properties":{
-							"prompt":{"type":"string","description":"The initial user prompt to start the Codex conversation."}
-						}
+							"prompt":{"type":"string","description":"The initial user prompt to start the Codex conversation."},
+							"model":{"type":"string","description":"Model override"}
+						},
+						"required":["prompt","model"]
 					}
 				},
 				{
@@ -106,8 +108,10 @@ func TestSanitizeToolsListDescriptions(t *testing.T) {
 					"inputSchema":{
 						"type":"object",
 						"properties":{
-							"prompt":{"type":"string","description":"The next user prompt to continue the Codex conversation."}
-						}
+							"prompt":{"type":"string","description":"The next user prompt to continue the Codex conversation."},
+							"model":{"type":"string","description":"Model override"}
+						},
+						"required":["prompt","model"]
 					}
 				}
 			]
@@ -119,13 +123,14 @@ func TestSanitizeToolsListDescriptions(t *testing.T) {
 	var msg struct {
 		Result struct {
 			Tools []struct {
-				Name        string `json:"name"`
-				Title       string `json:"title"`
-				Description string `json:"description"`
+				Name        string   `json:"name"`
+				Title       string   `json:"title"`
+				Description string   `json:"description"`
 				InputSchema struct {
 					Properties map[string]struct {
 						Description string `json:"description"`
 					} `json:"properties"`
+					Required []string `json:"required"`
 				} `json:"inputSchema"`
 			} `json:"tools"`
 		} `json:"result"`
@@ -146,9 +151,58 @@ func TestSanitizeToolsListDescriptions(t *testing.T) {
 		if !strings.Contains(tool.Description, "файлами") {
 			t.Errorf("tool %q description should mention 'файлами', got: %q", tool.Name, tool.Description)
 		}
+		if !strings.Contains(tool.Description, "20 минут") {
+			t.Errorf("tool %q description should mention '20 минут', got: %q", tool.Name, tool.Description)
+		}
+		if _, hasModel := tool.InputSchema.Properties["model"]; hasModel {
+			t.Errorf("tool %q properties must not contain 'model'", tool.Name)
+		}
+		for _, req := range tool.InputSchema.Required {
+			if req == "model" {
+				t.Errorf("tool %q required list must not contain 'model'", tool.Name)
+			}
+		}
 		promptDesc := tool.InputSchema.Properties["prompt"].Description
 		if strings.Contains(strings.ToLower(promptDesc), "codex") {
 			t.Errorf("prompt parameter description must not contain 'codex', got: %q", promptDesc)
 		}
 	}
 }
+
+func TestStripModelParameter(t *testing.T) {
+	req := json.RawMessage(`{
+		"jsonrpc":"2.0",
+		"id":"test-1",
+		"method":"tools/call",
+		"params":{
+			"name":"codex",
+			"arguments":{
+				"prompt":"do something",
+				"model":"o3",
+				"cwd":"C:\\test"
+			}
+		}
+	}`)
+
+	stripped := stripModelParameter(req)
+
+	var msg struct {
+		Params struct {
+			Arguments map[string]any `json:"arguments"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(stripped, &msg); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if _, exists := msg.Params.Arguments["model"]; exists {
+		t.Errorf("expected 'model' to be stripped, got: %v", msg.Params.Arguments)
+	}
+	if msg.Params.Arguments["prompt"] != "do something" {
+		t.Errorf("expected prompt to remain, got: %v", msg.Params.Arguments["prompt"])
+	}
+	if msg.Params.Arguments["cwd"] != "C:\\test" {
+		t.Errorf("expected cwd to remain, got: %v", msg.Params.Arguments["cwd"])
+	}
+}
+
