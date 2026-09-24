@@ -57,14 +57,20 @@ func TestInitializeMetadataAndBodyLimit(t *testing.T) {
 	v4Unauthorized := httptest.NewRequest(http.MethodPost, "/mcp/v4", strings.NewReader(`{}`))
 	v4Recorder := httptest.NewRecorder()
 	srv.handleMCP(v4Recorder, v4Unauthorized)
-	if v4Recorder.Code != http.StatusUnauthorized || !strings.Contains(v4Recorder.Header().Get("WWW-Authenticate"), "/mcp/v4") {
+	if v4Recorder.Code != http.StatusUnauthorized || !strings.Contains(v4Recorder.Header().Get("WWW-Authenticate"), "/mcp/v4") || !strings.Contains(v4Recorder.Header().Get("WWW-Authenticate"), `scope="mcp"`) {
 		t.Fatalf("v4 unauthorized status=%d header=%q", v4Recorder.Code, v4Recorder.Header().Get("WWW-Authenticate"))
 	}
 	resource := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource/mcp/v4", nil)
 	resourceRecorder := httptest.NewRecorder()
 	srv.handleProtectedResource(resourceRecorder, resource)
-	if !strings.Contains(resourceRecorder.Body.String(), `"resource":"`+srv.publicURL+`/mcp/v4"`) {
+	if !strings.Contains(resourceRecorder.Body.String(), `"resource":"`+srv.publicURL+`/mcp/v4"`) || !strings.Contains(resourceRecorder.Body.String(), `"scopes_supported":["mcp"]`) {
 		t.Fatalf("v4 protected resource: %s", resourceRecorder.Body.String())
+	}
+	openid := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
+	openidRecorder := httptest.NewRecorder()
+	srv.routes().ServeHTTP(openidRecorder, openid)
+	if openidRecorder.Code != http.StatusNotFound {
+		t.Fatalf("non-OIDC server published OIDC metadata: status=%d", openidRecorder.Code)
 	}
 
 	largeResultBody := `{"id":"` + strings.Repeat("x", maxAgentResultBytes) + `"}`

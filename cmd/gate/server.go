@@ -196,7 +196,6 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp/v2", s.handleOAuthServer)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp/v3", s.handleOAuthServer)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp/v4", s.handleOAuthServer)
-	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOAuthServer)
 
 	// OAuth authorization & token exchange
 	mux.HandleFunc("GET /oauth/authorize", s.handleAuthorize)

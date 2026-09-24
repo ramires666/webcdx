@@ -27,6 +27,7 @@ func (s *server) handleProtectedResource(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{
 		"resource":              s.publicURL + mcpPath,
 		"authorization_servers": []string{s.publicURL},
+		"scopes_supported":      []string{"mcp"},
 	})
 }
 

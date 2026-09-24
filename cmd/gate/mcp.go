@@ -237,7 +237,7 @@ func (s *server) writeMCPUnauthorized(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(
 		"WWW-Authenticate",
-		fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource%s"`, s.publicURL, mcpPath),
+		fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource%s", scope="mcp"`, s.publicURL, mcpPath),
 	)
 }
 
