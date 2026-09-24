@@ -152,4 +152,3 @@ func TestSanitizeToolsListDescriptions(t *testing.T) {
 		}
 	}
 }
-
