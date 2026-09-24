@@ -82,39 +82,33 @@ func findCodexMCP() (string, []string) {
 func main() {
 	gateURL := strings.TrimRight(env("WEBCODEX_GATE_URL", ""), "/")
 	token := env("WEBCODEX_AGENT_TOKEN", "")
-	mode := strings.ToLower(env("WEBCODEX_MODE", "auto"))
+	mode := strings.ToLower(env("WEBCODEX_MODE", "native"))
 
 	if gateURL == "" || token == "" {
 		log.Fatal("WEBCODEX_GATE_URL and WEBCODEX_AGENT_TOKEN are required")
 	}
 
 	var runner mcpRunner
-	if mode == "codex" || mode == "auto" {
+	if mode == "codex" {
 		binary, args := findCodexMCP()
 		if fileExists(binary) || isCommandAvailable(binary) {
 			log.Printf("Starting agent with worker engine (%s)...", binary)
 			mcp, err := startMCP(context.Background(), binary, args)
 			if err != nil {
-				if mode == "codex" {
-					log.Fatalf("start worker engine (%s): %v", binary, err)
-				}
-				log.Printf("failed to start worker engine (%s): %v, falling back to native direct mode", binary, err)
+				log.Fatalf("start worker engine (%s): %v", binary, err)
 			} else if err := mcp.initialize(context.Background()); err != nil {
-				if mode == "codex" {
-					log.Fatalf("initialize worker engine: %v", err)
-				}
-				log.Printf("failed to initialize worker engine: %v, falling back to native direct mode", err)
+				log.Fatalf("initialize worker engine: %v", err)
 			} else {
 				log.Printf("Worker engine connected and ready (all autonomous agent features active).")
 				runner = mcp
 			}
-		} else if mode == "codex" {
+		} else {
 			log.Fatalf("Worker engine binary not found: %s", binary)
 		}
 	}
 
 	if runner == nil {
-		log.Printf("Starting agent in NATIVE DIRECT mode (zero external limits, pure local execution)")
+		log.Printf("Starting agent in NATIVE DIRECT mode (zero external limits, pure local execution, 0 tokens spent)")
 		runner = newNativeExecutor()
 	}
 

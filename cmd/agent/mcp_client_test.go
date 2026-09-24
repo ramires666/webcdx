@@ -29,6 +29,9 @@ func TestInitializeRequestIsOneJSONRPCLine(t *testing.T) {
 }
 
 func TestRealCodexMCPCall(t *testing.T) {
+	if os.Getenv("WEBCODEX_TEST_REAL_CODEX") != "true" {
+		t.Skip("skipping real Codex MCP test to avoid consuming tokens and external network calls; set WEBCODEX_TEST_REAL_CODEX=true to run")
+	}
 	binary, args := findCodexMCP()
 	t.Logf("Found Codex MCP binary: %s with args: %v", binary, args)
 

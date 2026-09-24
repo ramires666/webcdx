@@ -432,3 +432,260 @@ func TestNativeExecutorCodexFolderListing(t *testing.T) {
 		t.Fatalf("fallback must provide directory listing, got: %s", string(resp3))
 	}
 }
+
+func TestNativeExecutorSnakeHtmlAndVariations(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := newNativeExecutor()
+
+	// 1. Exact real-world ChatGPT prompt with "Use the filesystem only..." and 18KB content
+	largeContent := "<!DOCTYPE html>\n<html><head><title>Snake Game</title></head>\n<body>\n" +
+		strings.Repeat("<div>Snake Game Canvas Logic and Data</div>\n", 400) +
+		"</body></html>"
+
+	realWorldPrompt := "Use the filesystem only to inspect or create files in " + tmpDir + ".\n\n" +
+		"Create or overwrite the file `snake.html` with the following content:\n\n```html\n" +
+		largeContent + "\n```"
+
+	req1 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      101,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": realWorldPrompt,
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	req1Bytes, _ := json.Marshal(req1)
+	resp1, err := exec.call(context.Background(), req1Bytes)
+	if err != nil {
+		t.Fatalf("real-world snake.html write failed: %v", err)
+	}
+	if !strings.Contains(string(resp1), "Successfully created and wrote") {
+		t.Fatalf("expected write success, got: %s", string(resp1))
+	}
+
+	snakePath := filepath.Join(tmpDir, "snake.html")
+	data, err := os.ReadFile(snakePath)
+	if err != nil {
+		t.Fatalf("snake.html not found on disk: %v", err)
+	}
+	if len(data) != len(largeContent) {
+		t.Fatalf("expected %d bytes, got %d bytes", len(largeContent), len(data))
+	}
+
+	// 2. Prompt variation: "Target file: snake2.html\n```html\n..."
+	promptVar2 := "Target file: snake2.html\n```html\n<h1>Snake 2</h1>\n```"
+	req2 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      102,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": promptVar2,
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	req2Bytes, _ := json.Marshal(req2)
+	resp2, err := exec.call(context.Background(), req2Bytes)
+	if err != nil {
+		t.Fatalf("prompt variation 2 failed: %v", err)
+	}
+	if !strings.Contains(string(resp2), "Successfully created and wrote") {
+		t.Fatalf("expected success for target file variation, got: %s", string(resp2))
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "snake2.html")); err != nil {
+		t.Fatalf("snake2.html was not written to disk: %v", err)
+	}
+
+	// 3. Prompt variation: "Here is `game.js`:\n```javascript\nconsole.log('game');\n```"
+	promptVar3 := "Here is `game.js`:\n```javascript\nconsole.log('game');\n```"
+	req3 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      103,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": promptVar3,
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	req3Bytes, _ := json.Marshal(req3)
+	resp3, err := exec.call(context.Background(), req3Bytes)
+	if err != nil {
+		t.Fatalf("prompt variation 3 failed: %v", err)
+	}
+	if !strings.Contains(string(resp3), "Successfully created and wrote") {
+		t.Fatalf("expected success for 'Here is' variation, got: %s", string(resp3))
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "game.js")); err != nil {
+		t.Fatalf("game.js was not written to disk: %v", err)
+	}
+
+	// 4. Prompt variation: Russian instruction "Запиши в файл script.py:\n```python\nprint(42)\n```"
+	promptVar4 := "Запиши в файл script.py:\n```python\nprint(42)\n```"
+	req4 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      104,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": promptVar4,
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	req4Bytes, _ := json.Marshal(req4)
+	resp4, err := exec.call(context.Background(), req4Bytes)
+	if err != nil {
+		t.Fatalf("prompt variation 4 failed: %v", err)
+	}
+	if !strings.Contains(string(resp4), "Successfully created and wrote") {
+		t.Fatalf("expected success for Russian variation, got: %s", string(resp4))
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "script.py")); err != nil {
+		t.Fatalf("script.py was not written to disk: %v", err)
+	}
+
+	// 5. Multiple files in single prompt
+	promptVar5 := "Create or overwrite `style.css`:\n```css\nbody { margin: 0; }\n```\n\nCreate or overwrite `app.js`:\n```js\nalert(1);\n```"
+	req5 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      105,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": promptVar5,
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	req5Bytes, _ := json.Marshal(req5)
+	resp5, err := exec.call(context.Background(), req5Bytes)
+	if err != nil {
+		t.Fatalf("prompt variation 5 failed: %v", err)
+	}
+	if !strings.Contains(string(resp5), "Successfully created and wrote 2 file(s)") {
+		t.Fatalf("expected 2 files written, got: %s", string(resp5))
+	}
+
+	// 6. Raw HTML without fences
+	promptVar6 := "Save the file raw.html with:\n<!DOCTYPE html><html><body>Raw HTML</body></html>"
+	req6 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      106,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": promptVar6,
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	req6Bytes, _ := json.Marshal(req6)
+	resp6, err := exec.call(context.Background(), req6Bytes)
+	if err != nil {
+		t.Fatalf("prompt variation 6 failed: %v", err)
+	}
+	if !strings.Contains(string(resp6), "Successfully created and wrote") {
+		t.Fatalf("expected success for raw HTML variation, got: %s", string(resp6))
+	}
+}
+
+func TestNativeExecutorCwdPreservationAndAliases(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := newNativeExecutor()
+
+	// Step 1: Call codex with cwd set
+	req1 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      201,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "codex",
+			"arguments": map[string]any{
+				"prompt": "list the files in the directory",
+				"cwd":    tmpDir,
+			},
+		},
+	}
+	req1Bytes, _ := json.Marshal(req1)
+	_, _ = exec.call(context.Background(), req1Bytes)
+
+	// Step 2: Call write_file without cwd, using alias 'filePath' and 'code'
+	req2 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      202,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "write_file",
+			"arguments": map[string]any{
+				"filePath": "alias_test.txt",
+				"code":     "content from alias",
+			},
+		},
+	}
+	req2Bytes, _ := json.Marshal(req2)
+	resp2, err := exec.call(context.Background(), req2Bytes)
+	if err != nil {
+		t.Fatalf("write_file with aliases failed: %v", err)
+	}
+	if !strings.Contains(string(resp2), "Successfully wrote") {
+		t.Fatalf("expected success in write_file, got: %s", string(resp2))
+	}
+
+	// Verify it wrote into tmpDir because cwd was preserved
+	expectedFile := filepath.Join(tmpDir, "alias_test.txt")
+	content, err := os.ReadFile(expectedFile)
+	if err != nil {
+		t.Fatalf("file was not written in preserved cwd (%s): %v", tmpDir, err)
+	}
+	if string(content) != "content from alias" {
+		t.Fatalf("unexpected content: %s", string(content))
+	}
+
+	// Step 3: Call read_file using alias 'file' without cwd
+	req3 := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      203,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "read_file",
+			"arguments": map[string]any{
+				"file": "alias_test.txt",
+			},
+		},
+	}
+	req3Bytes, _ := json.Marshal(req3)
+	resp3, err := exec.call(context.Background(), req3Bytes)
+	if err != nil {
+		t.Fatalf("read_file failed: %v", err)
+	}
+	if !strings.Contains(string(resp3), "content from alias") {
+		t.Fatalf("expected content from alias in read_file, got: %s", string(resp3))
+	}
+}
+
+func TestNativeExecutorFolderListingSafetyWithCodeBlocks(t *testing.T) {
+	// Ensure that prompts containing code blocks are NEVER treated as folder listings,
+	// even if they mention words like "project", "files", "tree", "list".
+	promptWithCode := "Here is the project tree viewer script for our files:\n```html\n<div>Tree</div>\n```"
+	if isFolderListingRequest(promptWithCode) {
+		t.Errorf("prompt containing code block must never return true for isFolderListingRequest!")
+	}
+
+	promptWithWrite := "Write the file project_files_list.txt with content: hello"
+	if isFolderListingRequest(promptWithWrite) {
+		t.Errorf("prompt containing 'write' must never return true for isFolderListingRequest!")
+	}
+}
+

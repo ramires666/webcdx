@@ -27,6 +27,7 @@ type nativeExecutor struct {
 
 type mcpToolDefinition struct {
 	Name        string         `json:"name"`
+	Title       string         `json:"title,omitempty"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
 }
@@ -36,7 +37,8 @@ func newNativeExecutor() *nativeExecutor {
 		tools: []mcpToolDefinition{
 			{
 				Name:        "codex",
-				Description: "Работа с файлами и выполнение команд в рабочей директории проекта. Поддерживает длительные операции и сложные вычисления (таймаут до 20 минут / 1200 сек). Всегда используется модель gpt-5.6-sol с глубокими рассуждениями (thinking: high). Выбор модели автоматический.",
+				Title:       "Работа с файлами и консолью",
+				Description: "Работа с файлами и выполнение команд в рабочей директории проекта. Поддерживает длительные операции и сложные вычисления (таймаут до 20 минут / 1200 сек). Всегда используется модель по умолчанию (gpt-5.6-sol) с глубокими рассуждениями (thinking: high). Выбор модели автоматический.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -58,6 +60,7 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "codex-reply",
+				Title:       "Продолжение работы с файлами и консолью",
 				Description: "Продолжение работы с файлами и выполнения команд в рабочей директории проекта (таймаут до 20 минут, модель gpt-5.6-sol thinking: high).",
 				InputSchema: map[string]any{
 					"type": "object",
@@ -76,6 +79,7 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "exec_command",
+				Title:       "Выполнение команды терминала",
 				Description: "Execute a shell command locally on the worker machine (PowerShell on Windows, bash/sh on Unix) with timeout up to 20 minutes and working directory support.",
 				InputSchema: map[string]any{
 					"type": "object",
@@ -102,6 +106,7 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "shell_command",
+				Title:       "Выполнение команды терминала",
 				Description: "Alias for exec_command. Execute a command in the local shell.",
 				InputSchema: map[string]any{
 					"type": "object",
@@ -120,6 +125,7 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "read_file",
+				Title:       "Чтение файла",
 				Description: "Read file contents from the local filesystem with optional line offset and limit.",
 				InputSchema: map[string]any{
 					"type": "object",
@@ -129,6 +135,18 @@ func newNativeExecutor() *nativeExecutor {
 							"description": "Absolute or relative path to the file to read.",
 						},
 						"file_path": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
+						"filePath": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
+						"file": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
+						"filename": map[string]any{
 							"type":        "string",
 							"description": "Alternative alias for path.",
 						},
@@ -146,6 +164,7 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "write_file",
+				Title:       "Запись файла",
 				Description: "Write text content directly to a file on the local filesystem. Automatically creates parent directories if needed.",
 				InputSchema: map[string]any{
 					"type": "object",
@@ -158,9 +177,37 @@ func newNativeExecutor() *nativeExecutor {
 							"type":        "string",
 							"description": "Alternative alias for path.",
 						},
+						"filePath": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
+						"file": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
+						"filename": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
+						"target_file": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
+						"targetFile": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
 						"content": map[string]any{
 							"type":        "string",
 							"description": "Full text content to write into the file.",
+						},
+						"text": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for content.",
+						},
+						"code": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for content.",
 						},
 					},
 					"required": []string{"path", "content"},
@@ -168,6 +215,7 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "list_dir",
+				Title:       "Список файлов папки",
 				Description: "List files and subdirectories in a local directory with file sizes and modification dates.",
 				InputSchema: map[string]any{
 					"type": "object",
@@ -176,11 +224,20 @@ func newNativeExecutor() *nativeExecutor {
 							"type":        "string",
 							"description": "Directory path to inspect (default: current working directory).",
 						},
+						"dir": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
+						"directory": map[string]any{
+							"type":        "string",
+							"description": "Alternative alias for path.",
+						},
 					},
 				},
 			},
 			{
 				Name:        "apply_patch",
+				Title:       "Применение git patch",
 				Description: "Apply a unified diff patch to files in the repository using git apply.",
 				InputSchema: map[string]any{
 					"type": "object",
@@ -203,6 +260,7 @@ func newNativeExecutor() *nativeExecutor {
 			},
 			{
 				Name:        "grep_search",
+				Title:       "Поиск по содержимому файлов",
 				Description: "Search for text or regular expression across files in a directory.",
 				InputSchema: map[string]any{
 					"type": "object",
@@ -225,6 +283,29 @@ func newNativeExecutor() *nativeExecutor {
 			},
 		},
 	}
+}
+
+func (e *nativeExecutor) resolveCwd(args map[string]any) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	cwd, _ := args["cwd"].(string)
+	if cwd == "" {
+		cwd, _ = args["workdir"].(string)
+	}
+	if cwd != "" {
+		e.lastCwd = cwd
+		return cwd
+	}
+	if e.lastCwd != "" {
+		return e.lastCwd
+	}
+	wd, err := os.Getwd()
+	if err == nil && wd != "" {
+		e.lastCwd = wd
+		return wd
+	}
+	return "."
 }
 
 // call handles MCP JSON-RPC requests directly in Go.
@@ -382,10 +463,7 @@ func (e *nativeExecutor) handleExecCommand(ctx context.Context, args map[string]
 		return "error: missing required argument 'command'", true
 	}
 
-	workdir, _ := args["workdir"].(string)
-	if workdir == "" {
-		workdir, _ = args["cwd"].(string)
-	}
+	workdir := e.resolveCwd(args)
 
 	timeoutSec := 1200
 	if t, ok := args["timeout_sec"].(float64); ok && t > 0 {
@@ -402,7 +480,7 @@ func (e *nativeExecutor) handleExecCommand(ctx context.Context, args map[string]
 		cmd = exec.CommandContext(cmdCtx, "bash", "-c", cmdStr)
 	}
 
-	if workdir != "" {
+	if workdir != "" && workdir != "." {
 		cmd.Dir = workdir
 	}
 
@@ -442,8 +520,20 @@ func (e *nativeExecutor) handleReadFile(args map[string]any) (string, bool) {
 		path, _ = args["file_path"].(string)
 	}
 	if path == "" {
+		path, _ = args["filePath"].(string)
+	}
+	if path == "" {
+		path, _ = args["file"].(string)
+	}
+	if path == "" {
+		path, _ = args["filename"].(string)
+	}
+	if path == "" {
 		return "error: missing required argument 'path'", true
 	}
+
+	cwd := e.resolveCwd(args)
+	path = cleanPath(path, cwd)
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -485,13 +575,40 @@ func (e *nativeExecutor) handleWriteFile(args map[string]any) (string, bool) {
 		path, _ = args["file_path"].(string)
 	}
 	if path == "" {
+		path, _ = args["filePath"].(string)
+	}
+	if path == "" {
+		path, _ = args["file"].(string)
+	}
+	if path == "" {
+		path, _ = args["filename"].(string)
+	}
+	if path == "" {
+		path, _ = args["target_file"].(string)
+	}
+	if path == "" {
+		path, _ = args["targetFile"].(string)
+	}
+	if path == "" {
 		return "error: missing required argument 'path'", true
 	}
 
 	content, ok := args["content"].(string)
 	if !ok {
-		return "error: missing required argument 'content'", true
+		content, _ = args["text"].(string)
 	}
+	if content == "" {
+		content, _ = args["code"].(string)
+	}
+	if content == "" {
+		content, _ = args["data"].(string)
+	}
+	if content == "" {
+		content, _ = args["body"].(string)
+	}
+
+	cwd := e.resolveCwd(args)
+	path = cleanPath(path, cwd)
 
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
@@ -510,8 +627,17 @@ func (e *nativeExecutor) handleWriteFile(args map[string]any) (string, bool) {
 func (e *nativeExecutor) handleListDir(args map[string]any) (string, bool) {
 	path, _ := args["path"].(string)
 	if path == "" {
+		path, _ = args["dir"].(string)
+	}
+	if path == "" {
+		path, _ = args["directory"].(string)
+	}
+	if path == "" {
 		path = "."
 	}
+
+	cwd := e.resolveCwd(args)
+	path = cleanPath(path, cwd)
 
 	entries, err := os.ReadDir(path)
 	if err != nil {
@@ -545,10 +671,10 @@ func (e *nativeExecutor) handleApplyPatch(ctx context.Context, args map[string]a
 		return "error: missing required argument 'patch'", true
 	}
 
-	workdir, _ := args["workdir"].(string)
+	workdir := e.resolveCwd(args)
 
 	cmd := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", "-")
-	if workdir != "" {
+	if workdir != "" && workdir != "." {
 		cmd.Dir = workdir
 	}
 	cmd.Stdin = strings.NewReader(patch)
@@ -563,6 +689,9 @@ func (e *nativeExecutor) handleApplyPatch(ctx context.Context, args map[string]a
 func (e *nativeExecutor) handleGrepSearch(args map[string]any) (string, bool) {
 	query, _ := args["query"].(string)
 	if query == "" {
+		query, _ = args["pattern"].(string)
+	}
+	if query == "" {
 		return "error: missing required argument 'query'", true
 	}
 
@@ -570,6 +699,8 @@ func (e *nativeExecutor) handleGrepSearch(args map[string]any) (string, bool) {
 	if rootPath == "" {
 		rootPath = "."
 	}
+	cwd := e.resolveCwd(args)
+	rootPath = cleanPath(rootPath, cwd)
 
 	maxResults := 100
 	if m, ok := args["max_results"].(float64); ok && m > 0 {
@@ -643,9 +774,16 @@ func (e *nativeExecutor) handleGrepSearch(args map[string]any) (string, bool) {
 // Regex patterns for parsing ChatGPT instructions to the legacy codex tool
 var (
 	// Matches file creation instructions:
-	// "Create or overwrite the file `path` with the following content:"
-	// "Create file C:\projects\foo.txt:"
-	fileHeaderRegex = regexp.MustCompile(`(?i)(?:create or overwrite(?: the)? file|create(?: the)? file|overwrite(?: the)? file|write(?: to)?(?: the)? file|save to(?: the)? file|создай(?:те)?(?: файл)?|запиши(?:те)?(?: в)?(?: файл)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))`)
+	// "Create or overwrite the file `snake.html` with the following content:"
+	// "Create or overwrite snake.html:"
+	// "Write file C:\projects\foo.txt:"
+	// "Write to `snake.html`:"
+	// "Save snake.html:"
+	// "Target file: snake.html"
+	// "File: snake.html"
+	// "Создай файл snake.html:"
+	// "Запиши в файл snake.html:"
+	fileHeaderRegex = regexp.MustCompile(`(?i)(?:create or overwrite(?: the)?(?: file)?|create(?: the)?(?: file)?|overwrite(?: the)?(?: file)?|write(?: to)?(?: the)?(?: file)?|save(?: to)?(?: the)?(?: file)?|update(?: the)?(?: file)?|target[ _-]?file:|file:|filename:|path:|target[ _-]?path:|code for|script for|here is(?: the)?(?: updated)?(?: file)?|создай(?:те)?(?: файл)?|запиши(?:те)?(?: в)?(?: файл)?|сохрани(?:те)?(?: в)?(?: файл)?|обнови(?:те)?(?: файл)?|файл:)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+))`)
 
 	// Matches file existence checks:
 	// "Check whether C:\projects\gptpacman\pacman.html exists"
@@ -657,31 +795,22 @@ var (
 	readFileRegex = regexp.MustCompile(`(?i)(?:read(?: the)? file|show(?: the)? contents? of(?: the)? file|display(?: the)? file|inspect(?: the)? file|прочитай(?: файл)?|покажи содержимое(?: файла)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))`)
 
 	// Matches command execution requests:
-	// "Run the following command:\n```bash\n...\n```"
-	runCmdBlockRegex = regexp.MustCompile(`(?si)(?:run(?: the following)? command|execute(?: the following)? command|run:|execute:)\s*[:]?\s*` + "```(?:[a-zA-Z0-9_-]+)?\\r?\\n(.*?)(?:\\r?\\n```|$)")
-	runCmdLineRegex  = regexp.MustCompile(`(?i)(?:run(?: the following)? command|execute(?: the following)? command|run:|execute:)\s*[:]?\s*[` + "`" + `"]?([^` + "`" + `"\r\n]+)[` + "`" + `"]?`)
+	runCmdBlockRegex = regexp.MustCompile(`(?si)(?:run(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|execute(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|run:|execute:|выполни(?:те)?(?: следующую)? команду|запусти(?:те)?(?: следующую)? команду|выполни(?:те)?:|запусти(?:те)?:|команда:)\s*[:]?\s*` + "```(?:[a-zA-Z0-9_-]+)?\\r?\\n(.*?)(?:\\r?\\n```|$)")
+	runCmdLineRegex  = regexp.MustCompile(`(?i)(?:run(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|execute(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|run:|execute:|выполни(?:те)?(?: следующую)? команду|запусти(?:те)?(?: следующую)? команду|выполни(?:те)?:|запусти(?:те)?:|команда:)\s*[:]?\s*[` + "`" + `"]?([^` + "`" + `"\r\n]+)[` + "`" + `"]?`)
+	shellBlockRegex  = regexp.MustCompile("(?si)```(?:powershell|pwsh|bash|sh|cmd|shell|terminal)\\r?\\n(.*?)\\r?\\n```")
 
-	// Code block extractor
+	// Code block extractors
 	codeBlockFenceRegex = regexp.MustCompile("(?s)```[a-zA-Z0-9_-]*\\r?\\n(.*?)\\r?\\n```")
 	openFenceRegex      = regexp.MustCompile("(?s)```[a-zA-Z0-9_-]*\\r?\\n(.*)$")
+
+	// Filename mention regex: matches filenames with typical extensions or Windows paths
+	filenameMentionRegex = regexp.MustCompile(`(?i)(?:` + "`" + `([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)` + "`" + `|"([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)"|'([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)'|([A-Za-z]:\\[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)|([a-zA-Z0-9_.-]+\.(?:html?|js|mjs|cjs|ts|tsx|jsx|css|json|py|go|rs|java|cpp|c|h|cs|sh|bat|cmd|ps1|txt|md|yaml|yml|toml|sql|xml|svg)))`)
 )
 
 // handleCodexCall handles calls to legacy "codex" and "codex-reply" tools natively in Go.
 func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]any) (string, bool) {
 	prompt, _ := args["prompt"].(string)
-	cwd, _ := args["cwd"].(string)
-
-	e.mu.Lock()
-	if cwd != "" {
-		e.lastCwd = cwd
-	} else if e.lastCwd != "" {
-		cwd = e.lastCwd
-	}
-	e.mu.Unlock()
-
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
+	cwd := e.resolveCwd(args)
 
 	// 1. Try extracting and writing files
 	if written, err := extractAndWriteFiles(prompt, cwd); err == nil && len(written) > 0 {
@@ -707,15 +836,15 @@ func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]an
 		}
 	}
 
-	// 4. Folder / Directory listing & inspection (re-read, read, list, show, explore, scan, Get-ChildItem, dir, ls)
+	// 4. Command execution in code blocks (e.g. ```powershell, ```bash) or explicit "Run command:"
+	if cmd, ok := extractCommandFromPrompt(prompt); ok {
+		return e.handleExecCommand(ctx, map[string]any{"command": cmd, "workdir": cwd})
+	}
+
+	// 5. Folder / Directory listing & inspection (re-read, read, list, show, explore, scan, Get-ChildItem, dir, ls)
 	if isFolderListingRequest(prompt) {
 		targetDir := extractDirectoryPath(prompt, cwd)
 		return e.getFolderListing(ctx, targetDir)
-	}
-
-	// 5. Command execution in code blocks (e.g. ```bash, ```powershell) or explicit "Run command:"
-	if cmd, ok := extractCommandFromPrompt(prompt); ok {
-		return e.handleExecCommand(ctx, map[string]any{"command": cmd, "workdir": cwd})
 	}
 
 	// 6. Check if prompt explicitly mentions an existing directory path
@@ -747,6 +876,21 @@ func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]an
 
 func isFolderListingRequest(prompt string) bool {
 	lower := strings.ToLower(prompt)
+
+	// SAFETY: If prompt contains code blocks or file writing instructions, it is NEVER a folder listing!
+	if strings.Contains(prompt, "```") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<html") {
+		return false
+	}
+	writeWords := []string{
+		"create", "write", "overwrite", "save", "update", "script",
+		"создай", "запиши", "сохрани", "обнови", "код",
+	}
+	for _, w := range writeWords {
+		if strings.Contains(lower, w) {
+			return false
+		}
+	}
+
 	if strings.Contains(lower, "get-childitem") || strings.Contains(lower, "dir ") || strings.HasPrefix(lower, "dir") || strings.Contains(lower, "ls ") || strings.HasPrefix(lower, "ls") {
 		return true
 	}
@@ -841,10 +985,16 @@ func extractFilePath(prompt string, cwd string) string {
 }
 
 func extractCommandFromPrompt(prompt string) (string, bool) {
+	// 1. Check explicit "Run command:" with code block
 	if match := runCmdBlockRegex.FindStringSubmatch(prompt); len(match) > 1 {
 		return strings.TrimSpace(match[1]), true
 	}
+	// 2. Check explicit "Run command: `...`"
 	if match := runCmdLineRegex.FindStringSubmatch(prompt); len(match) > 1 {
+		return strings.TrimSpace(match[1]), true
+	}
+	// 3. Check shell block fences: ```powershell ... ``` or ```bash ... ```
+	if match := shellBlockRegex.FindStringSubmatch(prompt); len(match) > 1 {
 		return strings.TrimSpace(match[1]), true
 	}
 
@@ -885,56 +1035,118 @@ func (e *nativeExecutor) getFolderListing(ctx context.Context, dir string) (stri
 }
 
 func extractAndWriteFiles(prompt string, cwd string) ([]string, error) {
+	// Stage 1: Explicit file creation headers
 	locs := fileHeaderRegex.FindAllStringSubmatchIndex(prompt, -1)
-	if len(locs) == 0 {
-		return nil, errors.New("no file creation instruction found")
+	var written []string
+
+	if len(locs) > 0 {
+		for i, loc := range locs {
+			fullMatch := prompt[loc[0]:loc[1]]
+			submatch := fileHeaderRegex.FindStringSubmatch(fullMatch)
+			rawPath := firstNonEmpty(submatch[1], submatch[2], submatch[3], submatch[4])
+			filePath := cleanPath(rawPath, cwd)
+			if filePath == "" {
+				continue
+			}
+
+			headerEnd := loc[1]
+			var contentSlice string
+			if i+1 < len(locs) {
+				contentSlice = prompt[headerEnd:locs[i+1][0]]
+			} else {
+				contentSlice = prompt[headerEnd:]
+			}
+
+			var fileContent string
+			if cbMatch := codeBlockFenceRegex.FindStringSubmatch(contentSlice); len(cbMatch) > 1 {
+				fileContent = cbMatch[1]
+			} else if opMatch := openFenceRegex.FindStringSubmatch(contentSlice); len(opMatch) > 1 {
+				fileContent = opMatch[1]
+			} else if idx := strings.Index(contentSlice, "<!DOCTYPE"); idx >= 0 {
+				fileContent = strings.TrimSpace(contentSlice[idx:])
+			} else if idx := strings.Index(contentSlice, "<html"); idx >= 0 {
+				fileContent = strings.TrimSpace(contentSlice[idx:])
+			}
+
+			if fileContent == "" {
+				continue
+			}
+
+			dir := filepath.Dir(filePath)
+			if dir != "" && dir != "." {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					return nil, fmt.Errorf("mkdir %s: %w", dir, err)
+				}
+			}
+
+			if err := os.WriteFile(filePath, []byte(fileContent), 0644); err != nil {
+				return nil, fmt.Errorf("write %s: %w", filePath, err)
+			}
+
+			written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(fileContent)))
+		}
 	}
 
-	var written []string
-	for i, loc := range locs {
-		fullMatch := prompt[loc[0]:loc[1]]
-		submatch := fileHeaderRegex.FindStringSubmatch(fullMatch)
-		rawPath := firstNonEmpty(submatch[1], submatch[2], submatch[3], submatch[4])
-		filePath := cleanPath(rawPath, cwd)
-		if filePath == "" {
-			continue
-		}
+	if len(written) > 0 {
+		return written, nil
+	}
 
-		headerEnd := loc[1]
-		var contentSlice string
-		if i+1 < len(locs) {
-			contentSlice = prompt[headerEnd:locs[i+1][0]]
-		} else {
-			contentSlice = prompt[headerEnd:]
-		}
+	// Stage 2: Smart fallback when prompt contains code blocks or HTML but no standard header
+	fenceLocs := codeBlockFenceRegex.FindAllStringSubmatchIndex(prompt, -1)
+	if len(fenceLocs) > 0 {
+		for i, fl := range fenceLocs {
+			codeContent := prompt[fl[2]:fl[3]]
+			// Look for filename mention immediately before this fence
+			precedingText := prompt[:fl[0]]
+			if i > 0 {
+				precedingText = prompt[fenceLocs[i-1][1]:fl[0]]
+			}
 
-		var fileContent string
-		if cbMatch := codeBlockFenceRegex.FindStringSubmatch(contentSlice); len(cbMatch) > 1 {
-			fileContent = cbMatch[1]
-		} else if opMatch := openFenceRegex.FindStringSubmatch(contentSlice); len(opMatch) > 1 {
-			fileContent = opMatch[1]
-		} else if idx := strings.Index(contentSlice, "<!DOCTYPE"); idx >= 0 {
-			fileContent = strings.TrimSpace(contentSlice[idx:])
-		} else if idx := strings.Index(contentSlice, "<html"); idx >= 0 {
-			fileContent = strings.TrimSpace(contentSlice[idx:])
-		}
+			mentions := filenameMentionRegex.FindAllStringSubmatch(precedingText, -1)
+			var targetFilename string
+			if len(mentions) > 0 {
+				lastMention := mentions[len(mentions)-1]
+				targetFilename = firstNonEmpty(lastMention[1], lastMention[2], lastMention[3], lastMention[4], lastMention[5])
+			} else if len(fenceLocs) == 1 {
+				// Single code block: search anywhere in entire prompt for a filename
+				allMentions := filenameMentionRegex.FindAllStringSubmatch(prompt, -1)
+				if len(allMentions) > 0 {
+					targetFilename = firstNonEmpty(allMentions[0][1], allMentions[0][2], allMentions[0][3], allMentions[0][4], allMentions[0][5])
+				}
+			}
 
-		if fileContent == "" {
-			continue
-		}
-
-		dir := filepath.Dir(filePath)
-		if dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return nil, fmt.Errorf("mkdir %s: %w", dir, err)
+			if targetFilename != "" {
+				filePath := cleanPath(targetFilename, cwd)
+				dir := filepath.Dir(filePath)
+				if dir != "" && dir != "." {
+					if err := os.MkdirAll(dir, 0755); err != nil {
+						return nil, fmt.Errorf("mkdir %s: %w", dir, err)
+					}
+				}
+				if err := os.WriteFile(filePath, []byte(codeContent), 0644); err != nil {
+					return nil, fmt.Errorf("write %s: %w", filePath, err)
+				}
+				written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(codeContent)))
 			}
 		}
-
-		if err := os.WriteFile(filePath, []byte(fileContent), 0644); err != nil {
-			return nil, fmt.Errorf("write %s: %w", filePath, err)
+	} else if idx := strings.Index(prompt, "<!DOCTYPE"); idx >= 0 {
+		// Raw HTML without fences
+		htmlContent := strings.TrimSpace(prompt[idx:])
+		allMentions := filenameMentionRegex.FindAllStringSubmatch(prompt[:idx], -1)
+		var targetFilename string
+		if len(allMentions) > 0 {
+			targetFilename = firstNonEmpty(allMentions[len(allMentions)-1][1], allMentions[len(allMentions)-1][2], allMentions[len(allMentions)-1][3], allMentions[len(allMentions)-1][4], allMentions[len(allMentions)-1][5])
+		} else {
+			targetFilename = "index.html"
 		}
-
-		written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(fileContent)))
+		filePath := cleanPath(targetFilename, cwd)
+		dir := filepath.Dir(filePath)
+		if dir != "" && dir != "." {
+			_ = os.MkdirAll(dir, 0755)
+		}
+		if err := os.WriteFile(filePath, []byte(htmlContent), 0644); err == nil {
+			written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(htmlContent)))
+		}
 	}
 
 	if len(written) == 0 {
