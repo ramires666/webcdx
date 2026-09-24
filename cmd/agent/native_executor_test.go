@@ -689,3 +689,123 @@ func TestNativeExecutorFolderListingSafetyWithCodeBlocks(t *testing.T) {
 	}
 }
 
+func TestDebugPrompt(t *testing.T) {
+	prompts := []string{
+		"Write EXACTLY the following content to snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
+		"Write EXACTLY the following code to `snake.html`:\n```html\n<!DOCTYPE html><html></html>\n```",
+		"Write EXACTLY the following content to C:\\projects\\gptpacman\\snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
+		"Write EXACTLY the following code to C:\\projects\\gptpacman\\snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
+		"Write EXACTLY the following code into snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
+		"Write EXACTLY the following to snake.html:\n```html\n<!DOCTYPE html><html></html>\n```",
+		"Write EXACTLY the following content to snake.html:\n<!DOCTYPE html><html><body>test</body></html>",
+		"Write EXACTLY the following content:\nFile: snake.html\n```html\n<!DOCTYPE html><html></html>\n```",
+	}
+	tmp := t.TempDir()
+	for i, p := range prompts {
+		written, err := extractAndWriteFiles(p, tmp, nil)
+		if err != nil || len(written) == 0 {
+			t.Fatalf("Prompt %d failed: %v", i, err)
+		}
+		t.Logf("Prompt %d: written=%v", i, written)
+	}
+}
+
+func TestCodexCallNeverReturnsListingOnWrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := newNativeExecutor()
+
+	htmlCode := "<!DOCTYPE html>\n<html><head><title>Snake Game</title></head>\n<body>\n" +
+		strings.Repeat("<div>Canvas Game Loop Logic 12345</div>\n", 300) +
+		"</body></html>"
+
+	testPrompts := []struct {
+		name   string
+		prompt string
+		args   map[string]any
+	}{
+		{
+			name:   "Write EXACTLY to snake.html with backticks",
+			prompt: "Write EXACTLY the following content to snake.html:\n```html\n" + htmlCode + "\n```",
+			args:   map[string]any{"cwd": tmpDir},
+		},
+		{
+			name:   "Write EXACTLY to full path with backticks",
+			prompt: "Write EXACTLY the following content to " + filepath.Join(tmpDir, "snake.html") + ":\n```html\n" + htmlCode + "\n```",
+			args:   map[string]any{"cwd": tmpDir},
+		},
+		{
+			name:   "Write EXACTLY raw HTML without backticks",
+			prompt: "Write EXACTLY the following content to snake.html:\n" + htmlCode,
+			args:   map[string]any{"cwd": tmpDir},
+		},
+		{
+			name:   "Write EXACTLY unclosed backtick fence",
+			prompt: "Write EXACTLY the following content to snake.html:\n```html\n" + htmlCode,
+			args:   map[string]any{"cwd": tmpDir},
+		},
+		{
+			name:   "Args with base-instructions and prompt",
+			prompt: "Write EXACTLY the following content to snake.html:\n```html\n" + htmlCode + "\n```",
+			args: map[string]any{
+				"base-instructions": "You are a shell execution agent",
+				"cwd":               tmpDir,
+				"sandbox":           "danger-full-access",
+				"approval-policy":   "never",
+			},
+		},
+		{
+			name:   "Path in args and code in prompt",
+			prompt: "Here is the complete source:\n```html\n" + htmlCode + "\n```",
+			args: map[string]any{
+				"path": "snake.html",
+				"cwd":  tmpDir,
+			},
+		},
+	}
+
+	for _, tc := range testPrompts {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.Remove(filepath.Join(tmpDir, "snake.html"))
+
+			callArgs := map[string]any{
+				"prompt": tc.prompt,
+			}
+			for k, v := range tc.args {
+				callArgs[k] = v
+			}
+
+			reqBytes, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      999,
+				"method":  "tools/call",
+				"params": map[string]any{
+					"name":      "codex",
+					"arguments": callArgs,
+				},
+			})
+
+			resp, err := exec.call(context.Background(), reqBytes)
+			if err != nil {
+				t.Fatalf("call failed: %v", err)
+			}
+
+			respStr := string(resp)
+			if strings.Contains(respStr, "Directory listing of") {
+				t.Fatalf("CRITICAL ERROR: Got directory listing instead of file creation! Response: %s", respStr)
+			}
+			if !strings.Contains(respStr, "Successfully created and wrote") {
+				t.Fatalf("expected write confirmation, got: %s", respStr)
+			}
+
+			// Verify file on disk
+			data, err := os.ReadFile(filepath.Join(tmpDir, "snake.html"))
+			if err != nil {
+				t.Fatalf("file was not written on disk: %v", err)
+			}
+			if !strings.Contains(string(data), "Canvas Game Loop Logic") {
+				t.Fatalf("file content on disk is invalid, got %d bytes", len(data))
+			}
+		})
+	}
+}
+

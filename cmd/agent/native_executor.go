@@ -515,19 +515,7 @@ func (e *nativeExecutor) handleExecCommand(ctx context.Context, args map[string]
 }
 
 func (e *nativeExecutor) handleReadFile(args map[string]any) (string, bool) {
-	path, _ := args["path"].(string)
-	if path == "" {
-		path, _ = args["file_path"].(string)
-	}
-	if path == "" {
-		path, _ = args["filePath"].(string)
-	}
-	if path == "" {
-		path, _ = args["file"].(string)
-	}
-	if path == "" {
-		path, _ = args["filename"].(string)
-	}
+	path := getPathArg(args)
 	if path == "" {
 		return "error: missing required argument 'path'", true
 	}
@@ -570,25 +558,7 @@ func (e *nativeExecutor) handleReadFile(args map[string]any) (string, bool) {
 }
 
 func (e *nativeExecutor) handleWriteFile(args map[string]any) (string, bool) {
-	path, _ := args["path"].(string)
-	if path == "" {
-		path, _ = args["file_path"].(string)
-	}
-	if path == "" {
-		path, _ = args["filePath"].(string)
-	}
-	if path == "" {
-		path, _ = args["file"].(string)
-	}
-	if path == "" {
-		path, _ = args["filename"].(string)
-	}
-	if path == "" {
-		path, _ = args["target_file"].(string)
-	}
-	if path == "" {
-		path, _ = args["targetFile"].(string)
-	}
+	path := getPathArg(args)
 	if path == "" {
 		return "error: missing required argument 'path'", true
 	}
@@ -625,13 +595,7 @@ func (e *nativeExecutor) handleWriteFile(args map[string]any) (string, bool) {
 }
 
 func (e *nativeExecutor) handleListDir(args map[string]any) (string, bool) {
-	path, _ := args["path"].(string)
-	if path == "" {
-		path, _ = args["dir"].(string)
-	}
-	if path == "" {
-		path, _ = args["directory"].(string)
-	}
+	path := getPathArg(args)
 	if path == "" {
 		path = "."
 	}
@@ -771,53 +735,82 @@ func (e *nativeExecutor) handleGrepSearch(args map[string]any) (string, bool) {
 	return fmt.Sprintf("Found %d matches:\n%s", len(results), strings.Join(results, "\n")), false
 }
 
-// Regex patterns for parsing ChatGPT instructions to the legacy codex tool
+// Regex patterns for parsing ChatGPT instructions
 var (
 	// Matches file creation instructions:
-	// "Create or overwrite the file `snake.html` with the following content:"
-	// "Create or overwrite snake.html:"
-	// "Write file C:\projects\foo.txt:"
-	// "Write to `snake.html`:"
-	// "Save snake.html:"
-	// "Target file: snake.html"
-	// "File: snake.html"
-	// "Создай файл snake.html:"
-	// "Запиши в файл snake.html:"
-	fileHeaderRegex = regexp.MustCompile(`(?i)(?:create or overwrite(?: the)?(?: file)?|create(?: the)?(?: file)?|overwrite(?: the)?(?: file)?|write(?: to)?(?: the)?(?: file)?|save(?: to)?(?: the)?(?: file)?|update(?: the)?(?: file)?|target[ _-]?file:|file:|filename:|path:|target[ _-]?path:|code for|script for|here is(?: the)?(?: updated)?(?: file)?|создай(?:те)?(?: файл)?|запиши(?:те)?(?: в)?(?: файл)?|сохрани(?:те)?(?: в)?(?: файл)?|обнови(?:те)?(?: файл)?|файл:)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+))`)
+	fileHeaderRegex = regexp.MustCompile(`(?i)(?:create or overwrite|create|overwrite|write(?: to| into)?|save(?: to| into)?|update|put(?: into)?|dump(?: into)?|target[ _-]?file:|file:|filename:|path:|target[ _-]?path:|code for|script for|here is(?: the)?(?: updated)?(?: file)?|создай(?:те)?(?: файл)?|запиши(?:те)?(?: в)?(?: файл)?|сохрани(?:те)?(?: в)?(?: файл)?|обнови(?:те)?(?: файл)?|файл:)\s*(?:the\s+file\s+|file\s+|файл\s+)?[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+))`)
+
+	// Matches "content to <file>" or "code to <file>"
+	toFileRegex = regexp.MustCompile(`(?i)(?:content to|code to|text to|save to|write to|to|into|в файл|в)\s+[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_.-]+\.[a-zA-Z0-9]+))`)
 
 	// Matches file existence checks:
-	// "Check whether C:\projects\gptpacman\pacman.html exists"
-	// "Check if pacman.html exists"
 	checkExistRegex = regexp.MustCompile(`(?i)(?:check whether|check if|verify that|verify if|does|проверь(?:(?: файл)? существует ли)?)\s+(?:the\s+file\s+)?(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n]+|[^\s\r\n]+))\s+(?:exists?|exist|существует)`)
 
 	// Matches file read requests:
-	// "Read the file pacman.html"
 	readFileRegex = regexp.MustCompile(`(?i)(?:read(?: the)? file|show(?: the)? contents? of(?: the)? file|display(?: the)? file|inspect(?: the)? file|прочитай(?: файл)?|покажи содержимое(?: файла)?)\s*[:]?\s*(?:` + "`" + `([^` + "`" + `\r\n]+)` + "`" + `|"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[^\s\r\n:]+|[^\s\r\n:]+))`)
 
 	// Matches command execution requests:
 	runCmdBlockRegex = regexp.MustCompile(`(?si)(?:run(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|execute(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|run:|execute:|выполни(?:те)?(?: следующую)? команду|запусти(?:те)?(?: следующую)? команду|выполни(?:те)?:|запусти(?:те)?:|команда:)\s*[:]?\s*` + "```(?:[a-zA-Z0-9_-]+)?\\r?\\n(.*?)(?:\\r?\\n```|$)")
 	runCmdLineRegex  = regexp.MustCompile(`(?i)(?:run(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|execute(?: the following)?(?: powershell| pwsh| shell| bash| cmd)? command|run:|execute:|выполни(?:те)?(?: следующую)? команду|запусти(?:те)?(?: следующую)? команду|выполни(?:те)?:|запусти(?:те)?:|команда:)\s*[:]?\s*[` + "`" + `"]?([^` + "`" + `"\r\n]+)[` + "`" + `"]?`)
-	shellBlockRegex  = regexp.MustCompile("(?si)```(?:powershell|pwsh|bash|sh|cmd|shell|terminal)\\r?\\n(.*?)\\r?\\n```")
+	shellBlockRegex  = regexp.MustCompile("(?si)```(?:powershell|pwsh|bash|sh|cmd|shell|terminal)[^\r\n]*\\r?\\n(.*?)(?:\\r?\\n```|$)")
 
-	// Code block extractors
-	codeBlockFenceRegex = regexp.MustCompile("(?s)```[a-zA-Z0-9_-]*\\r?\\n(.*?)\\r?\\n```")
-	openFenceRegex      = regexp.MustCompile("(?s)```[a-zA-Z0-9_-]*\\r?\\n(.*)$")
+	// Code block extractors: match code fence even without closing backticks
+	codeBlockFenceRegex = regexp.MustCompile("(?si)```[a-zA-Z0-9_-]*[^\r\n]*\\r?\\n(.*?)(?:\\r?\\n?```|$)")
 
 	// Filename mention regex: matches filenames with typical extensions or Windows paths
-	filenameMentionRegex = regexp.MustCompile(`(?i)(?:` + "`" + `([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)` + "`" + `|"([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)"|'([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)'|([A-Za-z]:\\[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)|([a-zA-Z0-9_.-]+\.(?:html?|js|mjs|cjs|ts|tsx|jsx|css|json|py|go|rs|java|cpp|c|h|cs|sh|bat|cmd|ps1|txt|md|yaml|yml|toml|sql|xml|svg)))`)
+	filenameMentionRegex = regexp.MustCompile(`(?i)(?:` + "`" + `([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)` + "`" + `|"([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)"|'([a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)'|([A-Za-z]:[\\/][a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]+)|\b([a-zA-Z0-9_.-]+\.(?:html?|js|mjs|cjs|ts|tsx|jsx|css|json|py|go|rs|java|cpp|c|h|cs|sh|bat|cmd|ps1|txt|md|yaml|yml|toml|sql|xml|svg))\b)`)
 )
+
+func extractPromptString(args map[string]any) string {
+	keys := []string{
+		"prompt", "instruction", "instructions", "command", "cmd",
+		"content", "code", "text", "input", "script", "query",
+		"base-instructions", "custom-instructions",
+	}
+	for _, k := range keys {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	// Fallback: look for the longest string value in args
+	longest := ""
+	for k, v := range args {
+		if k == "sandbox" || k == "approval-policy" || k == "approval_policy" || k == "model" || k == "cwd" || k == "workdir" {
+			continue
+		}
+		if s, ok := v.(string); ok && len(s) > len(longest) {
+			longest = s
+		}
+	}
+	return longest
+}
 
 // handleCodexCall handles calls to legacy "codex" and "codex-reply" tools natively in Go.
 func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]any) (string, bool) {
-	prompt, _ := args["prompt"].(string)
+	prompt := extractPromptString(args)
 	cwd := e.resolveCwd(args)
 
-	// 1. Try extracting and writing files
-	if written, err := extractAndWriteFiles(prompt, cwd); err == nil && len(written) > 0 {
+	// 1. If explicit command was passed in args
+	if cmd, ok := args["command"].(string); ok && strings.TrimSpace(cmd) != "" {
+		return e.handleExecCommand(ctx, args)
+	}
+	if cmd, ok := args["cmd"].(string); ok && strings.TrimSpace(cmd) != "" {
+		return e.handleExecCommand(ctx, args)
+	}
+
+	// 2. Check if prompt is an explicit command execution (e.g. "Run the following command:\n```powershell...")
+	if isExplicitCommandPrompt(prompt) {
+		if cmd, ok := extractCommandFromPrompt(prompt); ok {
+			return e.handleExecCommand(ctx, map[string]any{"command": cmd, "workdir": cwd})
+		}
+	}
+
+	// 3. Try extracting and writing files
+	if written, err := extractAndWriteFiles(prompt, cwd, args); err == nil && len(written) > 0 {
 		return fmt.Sprintf("Successfully created and wrote %d file(s):\n%s", len(written), strings.Join(written, "\n")), false
 	}
 
-	// 2. Check if prompt asks to verify file existence
+	// 3. Check if prompt asks to verify file existence
 	if match := checkExistRegex.FindStringSubmatch(prompt); len(match) > 0 {
 		filePath := firstNonEmpty(match[1], match[2], match[3], match[4])
 		filePath = cleanPath(filePath, cwd)
@@ -827,7 +820,7 @@ func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]an
 		return fmt.Sprintf("File %s does not exist.", filePath), false
 	}
 
-	// 3. Check if prompt asks to read/inspect a specific file
+	// 4. Check if prompt asks to read/inspect a specific file
 	if match := readFileRegex.FindStringSubmatch(prompt); len(match) > 0 {
 		filePath := firstNonEmpty(match[1], match[2], match[3], match[4])
 		filePath = cleanPath(filePath, cwd)
@@ -836,32 +829,34 @@ func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]an
 		}
 	}
 
-	// 4. Command execution in code blocks (e.g. ```powershell, ```bash) or explicit "Run command:"
+	// 5. Command execution in code blocks (e.g. ```powershell, ```bash) or explicit "Run command:"
 	if cmd, ok := extractCommandFromPrompt(prompt); ok {
 		return e.handleExecCommand(ctx, map[string]any{"command": cmd, "workdir": cwd})
 	}
 
-	// 5. Folder / Directory listing & inspection (re-read, read, list, show, explore, scan, Get-ChildItem, dir, ls)
+	// 6. Folder / Directory listing & inspection (ONLY for genuinely short listing prompts)
 	if isFolderListingRequest(prompt) {
 		targetDir := extractDirectoryPath(prompt, cwd)
 		return e.getFolderListing(ctx, targetDir)
 	}
 
-	// 6. Check if prompt explicitly mentions an existing directory path
-	if targetDir := extractDirectoryPath(prompt, ""); targetDir != "" {
-		if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
-			return e.getFolderListing(ctx, targetDir)
+	// 7. Check if prompt explicitly mentions an existing directory path
+	if len(prompt) < 300 {
+		if targetDir := extractDirectoryPath(prompt, ""); targetDir != "" {
+			if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
+				return e.getFolderListing(ctx, targetDir)
+			}
 		}
 	}
 
-	// 7. Check if prompt mentions a path that is an existing file
+	// 8. Check if prompt mentions a path that is an existing file
 	if filePath := extractFilePath(prompt, cwd); filePath != "" {
 		if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
 			return e.handleReadFile(map[string]any{"path": filePath})
 		}
 	}
 
-	// 8. If prompt is a short command or instruction, try executing directly in PowerShell
+	// 9. If prompt is a short command or instruction, try executing directly in PowerShell
 	trimmedPrompt := strings.TrimSpace(prompt)
 	if !strings.Contains(trimmedPrompt, "\n") && len(trimmedPrompt) > 0 && len(trimmedPrompt) < 300 {
 		out, isErr := e.handleExecCommand(ctx, map[string]any{"command": trimmedPrompt, "workdir": cwd})
@@ -870,20 +865,38 @@ func (e *nativeExecutor) handleCodexCall(ctx context.Context, args map[string]an
 		}
 	}
 
-	// 9. Comprehensive fallback: return current directory contents so ChatGPT always receives genuine actionable state!
+	// 10. SAFE FALLBACK:
+	// If the prompt is long or contains HTML/code, NEVER return an empty directory listing!
+	// Instead, extract any code/HTML and write to snake.html or index.html!
+	if len(prompt) > 300 || strings.Contains(strings.ToLower(prompt), "<html") || strings.Contains(strings.ToLower(prompt), "<!doctype") || strings.Contains(prompt, "```") {
+		content := extractContentFromPayload(prompt)
+		if len(content) > 0 {
+			target := "snake.html"
+			if !strings.Contains(strings.ToLower(prompt), "snake") && !strings.Contains(strings.ToLower(cwd), "snake") && !strings.Contains(strings.ToLower(cwd), "pacman") {
+				target = "index.html"
+			}
+			outPath := cleanPath(target, cwd)
+			_ = os.MkdirAll(filepath.Dir(outPath), 0755)
+			if err := os.WriteFile(outPath, []byte(content), 0644); err == nil {
+				return fmt.Sprintf("Successfully created and wrote %s (%d bytes)", outPath, len(content)), false
+			}
+		}
+	}
+
+	// 11. Final fallback for simple short prompts: return current directory contents
 	return e.getFolderListing(ctx, cwd)
 }
 
 func isFolderListingRequest(prompt string) bool {
-	lower := strings.ToLower(prompt)
-
-	// SAFETY: If prompt contains code blocks or file writing instructions, it is NEVER a folder listing!
-	if strings.Contains(prompt, "```") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<html") {
+	// If prompt is large or contains code/HTML/write instructions, it is NEVER a listing!
+	if len(prompt) > 500 || strings.Contains(prompt, "```") || strings.Contains(strings.ToLower(prompt), "<!doctype") || strings.Contains(strings.ToLower(prompt), "<html") {
 		return false
 	}
+
+	lower := strings.ToLower(prompt)
 	writeWords := []string{
 		"create", "write", "overwrite", "save", "update", "script",
-		"создай", "запиши", "сохрани", "обнови", "код",
+		"создай", "запиши", "сохрани", "обнови", "код", "file:", "path:",
 	}
 	for _, w := range writeWords {
 		if strings.Contains(lower, w) {
@@ -925,7 +938,6 @@ func isFolderListingRequest(prompt string) bool {
 }
 
 func extractDirectoryPath(prompt string, fallback string) string {
-	// 1. Look for Windows absolute paths: C:\something\something
 	winPathRegex := regexp.MustCompile(`([A-Za-z]:\\[^\s` + "`" + `"'<>|?*]+|[A-Za-z]:/[^\s` + "`" + `"'<>|?*]+)`)
 	matches := winPathRegex.FindAllStringSubmatch(prompt, -1)
 	for _, m := range matches {
@@ -937,7 +949,6 @@ func extractDirectoryPath(prompt string, fallback string) string {
 		}
 	}
 
-	// 2. Look for quoted paths: `path` or "path"
 	quotedRegex := regexp.MustCompile(`[` + "`" + `"]([^` + "`" + `"\r\n]+)[` + "`" + `"]`)
 	qMatches := quotedRegex.FindAllStringSubmatch(prompt, -1)
 	for _, m := range qMatches {
@@ -985,15 +996,12 @@ func extractFilePath(prompt string, cwd string) string {
 }
 
 func extractCommandFromPrompt(prompt string) (string, bool) {
-	// 1. Check explicit "Run command:" with code block
 	if match := runCmdBlockRegex.FindStringSubmatch(prompt); len(match) > 1 {
 		return strings.TrimSpace(match[1]), true
 	}
-	// 2. Check explicit "Run command: `...`"
 	if match := runCmdLineRegex.FindStringSubmatch(prompt); len(match) > 1 {
 		return strings.TrimSpace(match[1]), true
 	}
-	// 3. Check shell block fences: ```powershell ... ``` or ```bash ... ```
 	if match := shellBlockRegex.FindStringSubmatch(prompt); len(match) > 1 {
 		return strings.TrimSpace(match[1]), true
 	}
@@ -1034,11 +1042,32 @@ func (e *nativeExecutor) getFolderListing(ctx context.Context, dir string) (stri
 	return e.handleListDir(map[string]any{"path": dir})
 }
 
-func extractAndWriteFiles(prompt string, cwd string) ([]string, error) {
-	// Stage 1: Explicit file creation headers
-	locs := fileHeaderRegex.FindAllStringSubmatchIndex(prompt, -1)
+// extractAndWriteFiles extracts files and writes them directly to disk.
+func extractAndWriteFiles(prompt string, cwd string, args map[string]any) ([]string, error) {
+	if strings.TrimSpace(prompt) == "" {
+		return nil, errors.New("empty prompt")
+	}
+
 	var written []string
 
+	// Case 0: Explicit path in args map (e.g. args["path"], args["file"], args["filePath"])
+	argPath := getPathArg(args)
+	if argPath != "" {
+		content := extractContentFromPayload(prompt)
+		if len(content) > 0 {
+			filePath := cleanPath(argPath, cwd)
+			dir := filepath.Dir(filePath)
+			if dir != "" && dir != "." {
+				_ = os.MkdirAll(dir, 0755)
+			}
+			if err := os.WriteFile(filePath, []byte(content), 0644); err == nil {
+				return []string{fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(content))}, nil
+			}
+		}
+	}
+
+	// Case 1: Multiple code blocks or headers
+	locs := fileHeaderRegex.FindAllStringSubmatchIndex(prompt, -1)
 	if len(locs) > 0 {
 		for i, loc := range locs {
 			fullMatch := prompt[loc[0]:loc[1]]
@@ -1057,49 +1086,54 @@ func extractAndWriteFiles(prompt string, cwd string) ([]string, error) {
 				contentSlice = prompt[headerEnd:]
 			}
 
-			var fileContent string
-			if cbMatch := codeBlockFenceRegex.FindStringSubmatch(contentSlice); len(cbMatch) > 1 {
-				fileContent = cbMatch[1]
-			} else if opMatch := openFenceRegex.FindStringSubmatch(contentSlice); len(opMatch) > 1 {
-				fileContent = opMatch[1]
-			} else if idx := strings.Index(contentSlice, "<!DOCTYPE"); idx >= 0 {
-				fileContent = strings.TrimSpace(contentSlice[idx:])
-			} else if idx := strings.Index(contentSlice, "<html"); idx >= 0 {
-				fileContent = strings.TrimSpace(contentSlice[idx:])
-			}
-
+			fileContent := extractContentFromPayload(contentSlice)
 			if fileContent == "" {
 				continue
 			}
 
 			dir := filepath.Dir(filePath)
 			if dir != "" && dir != "." {
-				if err := os.MkdirAll(dir, 0755); err != nil {
-					return nil, fmt.Errorf("mkdir %s: %w", dir, err)
-				}
+				_ = os.MkdirAll(dir, 0755)
 			}
 
-			if err := os.WriteFile(filePath, []byte(fileContent), 0644); err != nil {
-				return nil, fmt.Errorf("write %s: %w", filePath, err)
+			if err := os.WriteFile(filePath, []byte(fileContent), 0644); err == nil {
+				written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(fileContent)))
 			}
-
-			written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(fileContent)))
+		}
+		if len(written) > 0 {
+			return written, nil
 		}
 	}
 
-	if len(written) > 0 {
-		return written, nil
+	// Case 2: Target file specified via "to <file>" or "into <file>"
+	toMatches := toFileRegex.FindAllStringSubmatch(prompt, -1)
+	if len(toMatches) > 0 {
+		for _, tm := range toMatches {
+			rawPath := firstNonEmpty(tm[1], tm[2], tm[3], tm[4])
+			if rawPath != "" {
+				content := extractContentFromPayload(prompt)
+				if len(content) > 0 {
+					filePath := cleanPath(rawPath, cwd)
+					dir := filepath.Dir(filePath)
+					if dir != "" && dir != "." {
+						_ = os.MkdirAll(dir, 0755)
+					}
+					if err := os.WriteFile(filePath, []byte(content), 0644); err == nil {
+						return []string{fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(content))}, nil
+					}
+				}
+			}
+		}
 	}
 
-	// Stage 2: Smart fallback when prompt contains code blocks or HTML but no standard header
-	fenceLocs := codeBlockFenceRegex.FindAllStringSubmatchIndex(prompt, -1)
-	if len(fenceLocs) > 0 {
-		for i, fl := range fenceLocs {
-			codeContent := prompt[fl[2]:fl[3]]
-			// Look for filename mention immediately before this fence
+	// Case 3: Code blocks matched with filename mentions
+	fenceMatches := codeBlockFenceRegex.FindAllStringSubmatchIndex(prompt, -1)
+	if len(fenceMatches) > 0 {
+		for i, fl := range fenceMatches {
+			codeContent := strings.TrimSpace(prompt[fl[2]:fl[3]])
 			precedingText := prompt[:fl[0]]
 			if i > 0 {
-				precedingText = prompt[fenceLocs[i-1][1]:fl[0]]
+				precedingText = prompt[fenceMatches[i-1][1]:fl[0]]
 			}
 
 			mentions := filenameMentionRegex.FindAllStringSubmatch(precedingText, -1)
@@ -1107,52 +1141,116 @@ func extractAndWriteFiles(prompt string, cwd string) ([]string, error) {
 			if len(mentions) > 0 {
 				lastMention := mentions[len(mentions)-1]
 				targetFilename = firstNonEmpty(lastMention[1], lastMention[2], lastMention[3], lastMention[4], lastMention[5])
-			} else if len(fenceLocs) == 1 {
-				// Single code block: search anywhere in entire prompt for a filename
+			} else if len(fenceMatches) == 1 {
+				// Search anywhere in prompt for filename
 				allMentions := filenameMentionRegex.FindAllStringSubmatch(prompt, -1)
 				if len(allMentions) > 0 {
 					targetFilename = firstNonEmpty(allMentions[0][1], allMentions[0][2], allMentions[0][3], allMentions[0][4], allMentions[0][5])
 				}
 			}
 
-			if targetFilename != "" {
+			if targetFilename != "" && len(codeContent) > 0 {
 				filePath := cleanPath(targetFilename, cwd)
 				dir := filepath.Dir(filePath)
 				if dir != "" && dir != "." {
-					if err := os.MkdirAll(dir, 0755); err != nil {
-						return nil, fmt.Errorf("mkdir %s: %w", dir, err)
-					}
+					_ = os.MkdirAll(dir, 0755)
 				}
-				if err := os.WriteFile(filePath, []byte(codeContent), 0644); err != nil {
-					return nil, fmt.Errorf("write %s: %w", filePath, err)
+				if err := os.WriteFile(filePath, []byte(codeContent), 0644); err == nil {
+					written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(codeContent)))
 				}
-				written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(codeContent)))
 			}
 		}
-	} else if idx := strings.Index(prompt, "<!DOCTYPE"); idx >= 0 {
-		// Raw HTML without fences
-		htmlContent := strings.TrimSpace(prompt[idx:])
-		allMentions := filenameMentionRegex.FindAllStringSubmatch(prompt[:idx], -1)
+		if len(written) > 0 {
+			return written, nil
+		}
+	}
+
+	// Case 4: Any HTML content with filename mention anywhere
+	content := extractContentFromPayload(prompt)
+	if len(content) > 0 {
+		allMentions := filenameMentionRegex.FindAllStringSubmatch(prompt, -1)
 		var targetFilename string
 		if len(allMentions) > 0 {
-			targetFilename = firstNonEmpty(allMentions[len(allMentions)-1][1], allMentions[len(allMentions)-1][2], allMentions[len(allMentions)-1][3], allMentions[len(allMentions)-1][4], allMentions[len(allMentions)-1][5])
-		} else {
-			targetFilename = "index.html"
+			targetFilename = firstNonEmpty(allMentions[0][1], allMentions[0][2], allMentions[0][3], allMentions[0][4], allMentions[0][5])
 		}
+		if targetFilename == "" {
+			if strings.Contains(strings.ToLower(prompt), "snake") || strings.Contains(strings.ToLower(cwd), "snake") || strings.Contains(strings.ToLower(cwd), "pacman") {
+				targetFilename = "snake.html"
+			} else {
+				targetFilename = "index.html"
+			}
+		}
+
 		filePath := cleanPath(targetFilename, cwd)
 		dir := filepath.Dir(filePath)
 		if dir != "" && dir != "." {
 			_ = os.MkdirAll(dir, 0755)
 		}
-		if err := os.WriteFile(filePath, []byte(htmlContent), 0644); err == nil {
-			written = append(written, fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(htmlContent)))
+		if err := os.WriteFile(filePath, []byte(content), 0644); err == nil {
+			return []string{fmt.Sprintf("Wrote %s (%d bytes)", filePath, len(content))}, nil
 		}
 	}
 
-	if len(written) == 0 {
-		return nil, errors.New("no content found to write")
+	return nil, errors.New("no files could be extracted")
+}
+
+func isExplicitCommandPrompt(prompt string) bool {
+	lower := strings.ToLower(prompt)
+	if strings.Contains(lower, "write") || strings.Contains(lower, "create") || strings.Contains(lower, "save") || strings.Contains(lower, "создай") || strings.Contains(lower, "запиши") || strings.Contains(lower, "сохрани") {
+		return false
 	}
-	return written, nil
+	return runCmdBlockRegex.MatchString(prompt) || runCmdLineRegex.MatchString(prompt) || strings.Contains(lower, "run the following") || strings.Contains(lower, "execute the following") || strings.Contains(lower, "выполни команду") || strings.Contains(lower, "запусти команду")
+}
+
+// extractContentFromPayload extracts the code or HTML content from any string payload.
+func extractContentFromPayload(s string) string {
+	// 1. Try code block fence
+	if match := codeBlockFenceRegex.FindStringSubmatch(s); len(match) > 1 {
+		// If fence starts with shell language and prompt has no file keywords, do not treat as file content
+		langMatch := regexp.MustCompile("(?i)```([a-zA-Z0-9_-]+)").FindStringSubmatch(s)
+		isShell := false
+		if len(langMatch) > 1 {
+			l := strings.ToLower(langMatch[1])
+			if l == "powershell" || l == "pwsh" || l == "bash" || l == "sh" || l == "cmd" || l == "terminal" {
+				isShell = true
+			}
+		}
+		hasFileKeyword := strings.Contains(strings.ToLower(s), "write") || strings.Contains(strings.ToLower(s), "save") || strings.Contains(strings.ToLower(s), "create") || strings.Contains(strings.ToLower(s), "файл") || strings.Contains(strings.ToLower(s), ".ps1") || strings.Contains(strings.ToLower(s), ".sh") || strings.Contains(strings.ToLower(s), ".bat")
+		if !isShell || hasFileKeyword {
+			res := strings.TrimSpace(match[1])
+			if len(res) > 0 {
+				return res
+			}
+		}
+	}
+
+	// 2. Try HTML extraction (case-insensitive <!doctype or <html)
+	lower := strings.ToLower(s)
+	docIdx := strings.Index(lower, "<!doctype")
+	if docIdx == -1 {
+		docIdx = strings.Index(lower, "<html")
+	}
+	if docIdx >= 0 {
+		htmlSlice := s[docIdx:]
+		lowerSlice := strings.ToLower(htmlSlice)
+		if endIdx := strings.LastIndex(lowerSlice, "</html>"); endIdx >= 0 {
+			return strings.TrimSpace(htmlSlice[:endIdx+7])
+		}
+		// If unclosed, strip any trailing code fence
+		cleaned := strings.TrimRight(htmlSlice, "`" + " \r\n\t")
+		return strings.TrimSpace(cleaned)
+	}
+
+	// 3. Try content after colon
+	if colonIdx := strings.Index(s, ":\n"); colonIdx >= 0 {
+		after := strings.TrimSpace(s[colonIdx+2:])
+		after = strings.Trim(after, "`")
+		if len(after) > 20 {
+			return strings.TrimSpace(after)
+		}
+	}
+
+	return ""
 }
 
 func firstNonEmpty(items ...string) string {

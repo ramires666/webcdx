@@ -195,7 +195,10 @@ func formatActionResponse(raw []byte, callErr error, elapsed time.Duration) stri
 }
 
 func getPathArg(args map[string]any) string {
-	for _, key := range []string{"path", "file_path", "filePath", "dir", "directory"} {
+	for _, key := range []string{
+		"path", "file_path", "filePath", "file", "filename",
+		"target_file", "targetFile", "target", "dir", "directory",
+	} {
 		if val, ok := args[key].(string); ok && val != "" {
 			return val
 		}
