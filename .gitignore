@@ -9,6 +9,8 @@ third_party/codex/**/node_modules/
 !.env.example
 data/
 dev-data/
+/tmp/
+/.kilo/
 *.db
 *.sqlite
 *.sqlite3

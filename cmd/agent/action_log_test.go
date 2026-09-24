@@ -19,6 +19,12 @@ func TestFormatActionRequest(t *testing.T) {
 			t.Errorf("formatActionRequest() = %q, want %q", got, test.contains)
 		}
 	}
+	sensitive := formatActionRequest([]byte(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"exec_command","arguments":{"command":"SECRET_COMMAND","cwd":"C:/repo","stdin":"SECRET_STDIN","env":{"TOKEN":"SECRET_ENV"}}}}`))
+	for _, secret := range []string{"SECRET_COMMAND", "SECRET_STDIN", "SECRET_ENV"} {
+		if strings.Contains(sensitive, secret) {
+			t.Fatalf("action log contains %q: %s", secret, sensitive)
+		}
+	}
 }
 
 func TestFormatActionResponseAndUnicodeTruncation(t *testing.T) {

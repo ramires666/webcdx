@@ -150,7 +150,7 @@ func TestBinaryAndAllowedRoots(t *testing.T) {
 		t.Fatalf("binary error = %v", err)
 	}
 	outside := filepath.Join(filepath.Dir(root), "outside.txt")
-	if _, err := executor.writeFile(map[string]any{"path": outside, "content": "no"}); err == nil {
+	if _, err := executor.writeFile(map[string]any{"path": outside, "content": "no"}, false); err == nil {
 		t.Fatal("outside path was accepted")
 	}
 	if _, err := executor.readFile(map[string]any{"path": "relative.txt"}); err == nil {

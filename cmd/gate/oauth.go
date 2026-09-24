@@ -21,6 +21,8 @@ func (s *server) handleProtectedResource(w http.ResponseWriter, r *http.Request)
 		mcpPath = "/mcp/v2"
 	} else if strings.HasSuffix(r.URL.Path, "/mcp/v3") {
 		mcpPath = "/mcp/v3"
+	} else if strings.HasSuffix(r.URL.Path, "/mcp/v4") {
+		mcpPath = "/mcp/v4"
 	}
 	writeJSON(w, map[string]any{
 		"resource":              s.publicURL + mcpPath,

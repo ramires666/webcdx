@@ -229,12 +229,12 @@
                 </div>
                 <div class="form-group">
                     <label for="denied_tools">Запрещенные инструменты (Denied Tools)</label>
-                    <textarea id="denied_tools" name="denied_tools" rows="2" placeholder="exec_command (имеет наивысший приоритет)">{{.Agent.DeniedTools}}</textarea>
+                    <textarea id="denied_tools" name="denied_tools" rows="2" placeholder="exec_command,edit_file,move_path,delete_path (имеет наивысший приоритет)">{{.Agent.DeniedTools}}</textarea>
                     <div style="font-size:0.8rem; color:var(--text-secondary); margin-top:0.25rem;">Через запятую. Запрещенные инструменты фильтруются в первую очередь.</div>
                 </div>
                 <button type="submit" class="btn">Сохранить политику инструментов</button>
             </form>
-            <div class="notice" style="margin-top:1rem; border-left-color:var(--warning-color);">⚠️ <strong>exec_command</strong> дает удаленное выполнение команд с правами пользователя локального агента. Запрещайте этот инструмент для агентов, которым shell не нужен, и не запускайте agent от администратора/root.</div>
+            <div class="notice" style="margin-top:1rem; border-left-color:var(--warning-color);">⚠️ <strong>exec_command</strong> дает удаленное выполнение команд с правами пользователя локального агента. <strong>edit_file</strong>, <strong>move_path</strong> и <strong>delete_path</strong> по умолчанию запрещены для новых агентов; включайте их явно. Не запускайте agent от администратора/root.</div>
         </section>
 
         <section class="card">
@@ -256,7 +256,7 @@ $env:WEBCODEX_LOG_DIR = "$PSScriptRoot\logs"
                 <button class="btn btn-copy" onclick="copyCode('code-chatgpt-run', this)">📋 Скопировать</button>
             </div>
             <div class="notice">Используйте эти параметры при добавлении Custom MCP / Action в ChatGPT:</div>
-            <pre id="code-chatgpt-run">Server URL:        {{.PublicURL}}/mcp/v3
+            <pre id="code-chatgpt-run">Server URL:        {{.PublicURL}}/mcp/v4
 Authorization URL: {{.PublicURL}}/oauth/authorize
 Token URL:         {{.PublicURL}}/oauth/token
 Client ID:         {{.Agent.OAuthClientID}}

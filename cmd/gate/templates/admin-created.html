@@ -216,7 +216,7 @@ $env:WEBCODEX_LOG_DIR = "$PSScriptRoot\logs"
                 <h2>Конфигурация OAuth для ChatGPT</h2>
                 <button class="btn btn-copy" onclick="copyCode('code-chatgpt', this)">📋 Скопировать параметры</button>
             </div>
-            <pre id="code-chatgpt">Server URL:        {{.PublicURL}}/mcp/v3
+            <pre id="code-chatgpt">Server URL:        {{.PublicURL}}/mcp/v4
 Authorization URL: {{.PublicURL}}/oauth/authorize
 Token URL:         {{.PublicURL}}/oauth/token
 Client ID:         {{.OAuthClientID}}
@@ -242,7 +242,7 @@ Client Secret:     {{.OAuthClientSecret}}</pre>
 
         const envContent = `WEBCODEX_GATE_URL=${gateURL}\r\nWEBCODEX_AGENT_TOKEN=${agentToken}\r\nWEBCODEX_ALLOWED_ROOTS=/srv/projects\r\nWEBCODEX_LOG_DIR=/var/log/webcodex-agent\r\n`;
 
-        const chatgptContent = `WebCodex ChatGPT MCP Configuration for Agent: ${agentID}\r\n\r\nServer URL:        ${gateURL}/mcp/v3\r\nAuthorization URL: ${gateURL}/oauth/authorize\r\nToken URL:         ${gateURL}/oauth/token\r\nClient ID:         ${clientID}\r\nClient Secret:     ${clientSecret}\r\nAuth Type:         OAuth 2.0 (Authorization Code + PKCE S256)\r\n`;
+        const chatgptContent = `WebCodex ChatGPT MCP Configuration for Agent: ${agentID}\r\n\r\nServer URL:        ${gateURL}/mcp/v4\r\nAuthorization URL: ${gateURL}/oauth/authorize\r\nToken URL:         ${gateURL}/oauth/token\r\nClient ID:         ${clientID}\r\nClient Secret:     ${clientSecret}\r\nAuth Type:         OAuth 2.0 (Authorization Code + PKCE S256)\r\n`;
 
         function downloadFile(filename, text) {
             const element = document.createElement('a');

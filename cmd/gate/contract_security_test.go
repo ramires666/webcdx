@@ -54,6 +54,18 @@ func TestInitializeMetadataAndBodyLimit(t *testing.T) {
 	if unauthorizedRecorder.Code != http.StatusUnauthorized || !strings.Contains(unauthorizedRecorder.Header().Get("WWW-Authenticate"), "/mcp/v3") {
 		t.Fatalf("unauthorized status=%d header=%q", unauthorizedRecorder.Code, unauthorizedRecorder.Header().Get("WWW-Authenticate"))
 	}
+	v4Unauthorized := httptest.NewRequest(http.MethodPost, "/mcp/v4", strings.NewReader(`{}`))
+	v4Recorder := httptest.NewRecorder()
+	srv.handleMCP(v4Recorder, v4Unauthorized)
+	if v4Recorder.Code != http.StatusUnauthorized || !strings.Contains(v4Recorder.Header().Get("WWW-Authenticate"), "/mcp/v4") {
+		t.Fatalf("v4 unauthorized status=%d header=%q", v4Recorder.Code, v4Recorder.Header().Get("WWW-Authenticate"))
+	}
+	resource := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource/mcp/v4", nil)
+	resourceRecorder := httptest.NewRecorder()
+	srv.handleProtectedResource(resourceRecorder, resource)
+	if !strings.Contains(resourceRecorder.Body.String(), `"resource":"`+srv.publicURL+`/mcp/v4"`) {
+		t.Fatalf("v4 protected resource: %s", resourceRecorder.Body.String())
+	}
 
 	largeResultBody := `{"id":"` + strings.Repeat("x", maxAgentResultBytes) + `"}`
 	largeResult := httptest.NewRequest(http.MethodPost, "/agent/result", strings.NewReader(largeResultBody))

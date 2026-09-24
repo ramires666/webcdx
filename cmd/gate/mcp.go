@@ -151,7 +151,15 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, err := rt.callAgent(r.Context(), body, s.timeout)
+	agentRequest := body
+	if r.URL.Path == "/mcp/v4" {
+		agentRequest, err = markContract(body, "v4")
+		if err != nil {
+			writeRPCError(w, msg.ID, -32602, err.Error())
+			return
+		}
+	}
+	resp, err := rt.callAgent(r.Context(), agentRequest, s.timeout)
 	if err != nil {
 		log.Printf(
 			"mcp response error agent=%s method=%q id=%s error=%v elapsed=%s",
@@ -224,13 +232,31 @@ func (s *server) handleMCPStream(w http.ResponseWriter, r *http.Request, authori
 
 func (s *server) writeMCPUnauthorized(w http.ResponseWriter, r *http.Request) {
 	mcpPath := "/mcp"
-	if r.URL.Path == "/mcp/v2" || r.URL.Path == "/mcp/v3" {
+	if r.URL.Path == "/mcp/v2" || r.URL.Path == "/mcp/v3" || r.URL.Path == "/mcp/v4" {
 		mcpPath = r.URL.Path
 	}
 	w.Header().Set(
 		"WWW-Authenticate",
 		fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource%s"`, s.publicURL, mcpPath),
 	)
+}
+
+func markContract(request json.RawMessage, version string) (json.RawMessage, error) {
+	var message map[string]any
+	if err := json.Unmarshal(request, &message); err != nil {
+		return nil, fmt.Errorf("parse request contract: %w", err)
+	}
+	params, _ := message["params"].(map[string]any)
+	if params == nil {
+		params = map[string]any{}
+		message["params"] = params
+	}
+	params["_webcodex_contract"] = version
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		return nil, fmt.Errorf("encode request contract: %w", err)
+	}
+	return encoded, nil
 }
 
 type toolCall struct {

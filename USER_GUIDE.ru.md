@@ -4,7 +4,7 @@
 
 Откройте `https://<ваш-домен>/admin`, создайте agent и сохраните выданные agent token, OAuth Client ID и OAuth Client Secret. Секреты повторно не показываются; при потере выполните ротацию.
 
-В карточке agent настройте `AllowedTools`/`DeniedTools`. Если выполнение команд не требуется, добавьте `exec_command` в `DeniedTools`.
+В карточке agent настройте `AllowedTools`/`DeniedTools`. Если выполнение команд не требуется, добавьте `exec_command,cancel_command` в `DeniedTools`. У новых агентов `edit_file`, `move_path` и `delete_path` уже запрещены; удаляйте нужные имена из `DeniedTools` явно.
 
 ## 2. Запустите бинарник на рабочем компьютере
 
@@ -36,19 +36,19 @@ export WEBCODEX_LOG_DIR="/var/log/webcodex-agent"
 
 | Поле | Значение |
 | --- | --- |
-| Server URL | `https://<ваш-домен>/mcp/v3` |
+| Server URL | `https://<ваш-домен>/mcp/v4` |
 | Authorization URL | `https://<ваш-домен>/oauth/authorize` |
 | Token URL | `https://<ваш-домен>/oauth/token` |
 | Client ID | значение из `/admin` |
 | Client Secret | значение из `/admin` |
 | OAuth | Authorization Code + PKCE S256 |
 
-Это MCP endpoint, а не OpenAPI schema. После переподключения начните новый чат и убедитесь, что доступны семь инструментов: `read_file`, `write_file`, `list_directory`, `search_files`, `exec_command`, `poll_command`, `cancel_command`.
+Это MCP endpoint, а не OpenAPI schema. После подключения начните новый чат и убедитесь, что доступны одиннадцать инструментов: `read_file`, `write_file`, `list_directory`, `search_files`, `exec_command`, `poll_command`, `cancel_command`, `edit_file`, `find_files`, `move_path`, `delete_path`.
 
 ## Диагностика
 
 - `OFFLINE`: проверьте `WEBCODEX_GATE_URL`, agent token, HTTPS и доступ к `/agent/stream`.
 - `path is outside WEBCODEX_ALLOWED_ROOTS`: добавьте нужный абсолютный корень и перезапустите agent.
-- Долгая команда: используйте `session_id` с `poll_command`; полный вывод остаётся в файле из `log_path`.
+- Долгая команда: используйте `session_id` и раздельные offsets с `poll_command`; полный вывод остаётся в `stdout_log_path` и `stderr_log_path`.
 - Потерян секрет: выполните ротацию в `/admin`; старые токены перестанут работать.
-- После смены инструментов всё ещё виден старый список: подключитесь к `/mcp/v3` заново и начните новый чат.
+- После смены инструментов всё ещё виден старый список: создайте новый connector на `/mcp/v4` и начните новый чат.

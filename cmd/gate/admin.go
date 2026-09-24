@@ -136,7 +136,7 @@ func (s *server) handleAdminCreateAgent(w http.ResponseWriter, r *http.Request) 
 		OAuthClientID:         rawClientID,
 		OAuthClientSecretHash: hashSecret(rawOAuthSecret),
 		AllowedTools:          "",
-		DeniedTools:           "",
+		DeniedTools:           "edit_file,move_path,delete_path",
 	}
 
 	if err := s.store.CreateAgent(r.Context(), agent); err != nil {

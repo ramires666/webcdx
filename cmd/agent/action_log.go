@@ -59,15 +59,19 @@ func describeToolCall(name string, args map[string]any) string {
 	case "read_file":
 		path := getPathArg(args)
 		return fmt.Sprintf("📖 [read_file] %s", path)
-	case "write_file":
+	case "write_file", "edit_file", "delete_path":
 		path := getPathArg(args)
-		return fmt.Sprintf("💾 [write_file] %s", path)
+		return fmt.Sprintf("💾 [%s] %s", name, path)
 	case "list_directory":
 		path := getPathArg(args)
 		return fmt.Sprintf("📁 [list_directory] %s", path)
-	case "search_files":
+	case "search_files", "find_files":
 		path := getPathArg(args)
-		return fmt.Sprintf("🔍 [search_files] %s", path)
+		return fmt.Sprintf("🔍 [%s] %s", name, path)
+	case "move_path":
+		source, _ := args["source"].(string)
+		destination, _ := args["destination"].(string)
+		return fmt.Sprintf("📦 [move_path] %s → %s", source, destination)
 	case "poll_command", "cancel_command":
 		sessionID, _ := args["session_id"].(string)
 		return fmt.Sprintf("⚙️ [%s] %s", name, sessionID)
@@ -84,8 +88,9 @@ func formatActionResponse(raw []byte, callErr error, elapsed time.Duration) stri
 
 	var msg struct {
 		Result struct {
-			IsError bool `json:"isError"`
-			Content []struct {
+			IsError    bool           `json:"isError"`
+			Structured map[string]any `json:"structuredContent"`
+			Content    []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"content"`
@@ -111,7 +116,24 @@ func formatActionResponse(raw []byte, callErr error, elapsed time.Duration) stri
 		return fmt.Sprintf("⚠️ Завершено с предупреждением/ошибкой за %s: %s", elapsed.Round(time.Millisecond), compactString(errorText, 90))
 	}
 
-	return fmt.Sprintf("✅ Успешно за %s", elapsed.Round(time.Millisecond))
+	details := []string{}
+	if path, ok := msg.Result.Structured["path"].(string); ok && path != "" {
+		details = append(details, "path="+path)
+	}
+	for _, field := range []string{"bytes_written", "size", "line_count"} {
+		if value, ok := msg.Result.Structured[field].(float64); ok {
+			details = append(details, fmt.Sprintf("%s=%d", field, int64(value)))
+			break
+		}
+	}
+	if status, ok := msg.Result.Structured["status"].(string); ok {
+		details = append(details, "status="+status)
+	}
+	detail := ""
+	if len(details) > 0 {
+		detail = ", " + strings.Join(details, ", ")
+	}
+	return fmt.Sprintf("✅ Успешно за %s%s", elapsed.Round(time.Millisecond), detail)
 }
 
 func getPathArg(args map[string]any) string {

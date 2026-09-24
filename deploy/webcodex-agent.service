@@ -12,6 +12,11 @@ EnvironmentFile=/etc/webcodex/agent.env
 ExecStart=/usr/local/bin/webcodex-agent
 Restart=always
 RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=-/srv/projects -/opt/work -/var/log/webcodex-agent
 
 [Install]
 WantedBy=multi-user.target

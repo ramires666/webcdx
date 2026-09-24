@@ -180,16 +180,22 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /mcp/v3", s.handleMCP)
 	mux.HandleFunc("DELETE /mcp/v3", s.handleMCP)
 	mux.HandleFunc("HEAD /mcp/v3", s.handleMCP)
+	mux.HandleFunc("GET /mcp/v4", s.handleMCP)
+	mux.HandleFunc("POST /mcp/v4", s.handleMCP)
+	mux.HandleFunc("DELETE /mcp/v4", s.handleMCP)
+	mux.HandleFunc("HEAD /mcp/v4", s.handleMCP)
 
 	// OAuth discovery & metadata
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.handleProtectedResource)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.handleProtectedResource)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/v2", s.handleProtectedResource)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/v3", s.handleProtectedResource)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/v4", s.handleProtectedResource)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleOAuthServer)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp", s.handleOAuthServer)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp/v2", s.handleOAuthServer)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp/v3", s.handleOAuthServer)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp/v4", s.handleOAuthServer)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOAuthServer)
 
 	// OAuth authorization & token exchange

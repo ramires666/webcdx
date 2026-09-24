@@ -12,17 +12,21 @@ MCP client ── HTTPS + OAuth ──> Gate ── outbound NDJSON stream ─�
 
 ## Tools
 
-`tools/list` contains exactly:
+`/mcp/v4` exposes exactly eleven tools. `/mcp/v3` remains available with the original seven-tool contract during migration.
 
 | Tool | Operation |
 | --- | --- |
 | `read_file` | Read a UTF-8 file or line range. |
-| `write_file` | Atomically replace a file with exact content. |
+| `write_file` | Atomically create or replace a file with a required precondition. |
 | `list_directory` | List one directory without recursion. |
 | `search_files` | Search text files by substring or optional regular expression. |
-| `exec_command` | Start a non-interactive shell command and stream output to a bounded log. |
-| `poll_command` | Read new log bytes and process status. |
+| `exec_command` | Start a shell command or argument vector with env/stdin and separate bounded logs. |
+| `poll_command` | Read new stdout/stderr bytes and process status. |
 | `cancel_command` | Terminate the process tree. |
+| `edit_file` | Apply exact replacements guarded by a complete-file SHA-256. |
+| `find_files` | Find files and directories recursively by basename glob. |
+| `move_path` | Rename a regular file or empty directory without overwriting. |
+| `delete_path` | Delete a hash-checked file or empty directory. |
 
 File paths and command working directories must be absolute. There is no natural-language task parser, conversation state, interactive terminal, or tool alias.
 
@@ -47,7 +51,7 @@ Copy `.env.example` to `.env`, set a strong admin password, then start the publi
 docker compose up -d --build
 ```
 
-The important endpoints are `/mcp`, `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, and `/healthz`. Put the gate behind HTTPS. OAuth requires PKCE S256 and a recognized ChatGPT callback URI. Access tokens expire after `WEBCODEX_ACCESS_TOKEN_TTL` (24 hours by default).
+The current connector endpoint is `/mcp/v4`; `/mcp/v3` is retained for rollback. The other important endpoints are `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, and `/healthz`. Put the gate behind HTTPS. OAuth requires PKCE S256 and a recognized ChatGPT callback URI. Access tokens expire after `WEBCODEX_ACCESS_TOKEN_TTL` (24 hours by default).
 
 Create an agent in `/admin`; copy its one-time agent token and OAuth client secret immediately. Only their SHA-256 hashes are persisted.
 
@@ -76,10 +80,12 @@ WEBCODEX_MAX_LOG_BYTES=52428800
 
 By default only the agent's startup directory is allowed. `WEBCODEX_ALLOWED_ROOTS=*` deliberately permits all local paths. Symlinks are resolved before access checks.
 
-Command output is written from process start to `<UTC timestamp>-<session_id>.log`; a call returns only a bounded tail. Finished sessions and logs expire after 24 hours by default. The agent cancels active process trees during shutdown.
+Each command session is stored under `<log-dir>/<session-id>/` with `metadata.json`, `stdout.log`, and `stderr.log`. Metadata excludes command text, stdin, and environment values. Completed sessions remain pollable after an agent restart and expire after 24 hours by default. Running sessions are restored only when the persisted PID identity still matches.
 
 ## Security
 
-`exec_command` is remote code execution with the operating-system rights of the local agent. Deny it per agent unless it is needed, and do not run the agent as Administrator/root. File root restrictions do not constrain shell commands.
+`exec_command` is remote code execution with the operating-system rights of the local agent. `WEBCODEX_ALLOWED_ROOTS` protects filesystem tools only; it cannot contain a shell process. Deny `exec_command` and `cancel_command` unless needed. New agents also deny `edit_file`, `move_path`, and `delete_path` until they are explicitly enabled.
 
-Back up the SQLite database before deployment. Gate and agent binaries can be rolled back independently because this release does not change the database schema. After changing the tool schema, reconnect the MCP integration or use `/mcp/v3` and start a new conversation to avoid a cached tool list.
+Run the agent under a dedicated unprivileged account. On Windows, grant that account NTFS access only to the intended workspaces and log directory. On Linux, update `ReadWritePaths` in `deploy/webcodex-agent.service` to match the configured roots; the unit also enables `NoNewPrivileges`, `PrivateTmp`, and `ProtectSystem`. Restrict outbound network access at the OS or container layer when builds do not need downloads.
+
+Back up SQLite, binaries, service files, and command logs before deployment. Deploy Gate first with v3/v4 enabled, then replace the agent binary. Create a fresh connector at `/mcp/v4` and start a new conversation so the eleven-tool schema is not read from cache. Roll back by reconnecting to `/mcp/v3` and restoring the prior agent binary.
