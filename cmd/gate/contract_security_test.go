@@ -92,6 +92,16 @@ func TestOAuthRequiresKnownRedirectAndS256(t *testing.T) {
 	if badRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("bad redirect status = %d", badRecorder.Code)
 	}
+	callbackRedirect := httptest.NewRequest(http.MethodGet,
+		base+url.QueryEscape("https://chatgpt.com/connector/oauth/callback-id"), nil)
+	callbackRecorder := httptest.NewRecorder()
+	srv.handleAuthorize(callbackRecorder, callbackRedirect)
+	if callbackRecorder.Code != http.StatusFound {
+		t.Fatalf("callback-specific redirect status = %d body=%q", callbackRecorder.Code, callbackRecorder.Body.String())
+	}
+	if allowedOAuthRedirect("https://chatgpt.com/connector/oauth/a/b") {
+		t.Fatal("nested callback path accepted")
+	}
 	plain := httptest.NewRequest(http.MethodGet,
 		"/oauth/authorize?client_id=oauth-security-client&redirect_uri="+url.QueryEscape("https://chatgpt.com/oauth/callback")+"&code_challenge=abc&code_challenge_method=plain", nil)
 	plainRecorder := httptest.NewRecorder()

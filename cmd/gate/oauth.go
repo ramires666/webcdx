@@ -235,9 +235,13 @@ func allowedOAuthRedirect(value string) bool {
 	switch value {
 	case "https://chatgpt.com/oauth/callback", "https://chatgpt.com/connector_platform_oauth_redirect":
 		return true
-	default:
+	}
+	target, err := url.Parse(value)
+	if err != nil || target.Scheme != "https" || !strings.EqualFold(target.Host, "chatgpt.com") || target.RawQuery != "" || target.Fragment != "" {
 		return false
 	}
+	callbackID := strings.TrimPrefix(target.Path, "/connector/oauth/")
+	return callbackID != target.Path && callbackID != "" && !strings.Contains(callbackID, "/")
 }
 
 func tokenParams(r *http.Request) (map[string]string, error) {
