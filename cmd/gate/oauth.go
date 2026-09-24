@@ -38,14 +38,15 @@ func (s *server) handleOAuthServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{
-		"issuer":                                s.publicURL,
-		"authorization_endpoint":                s.publicURL + "/oauth/authorize",
-		"token_endpoint":                        s.publicURL + "/oauth/token",
-		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
-		"code_challenge_methods_supported":      []string{"S256"},
-		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "client_secret_basic"},
-		"scopes_supported":                      []string{"mcp"},
+		"issuer": s.publicURL,
+		"authorization_response_iss_parameter_supported": true,
+		"authorization_endpoint":                         s.publicURL + "/oauth/authorize",
+		"token_endpoint":                                 s.publicURL + "/oauth/token",
+		"response_types_supported":                       []string{"code"},
+		"grant_types_supported":                          []string{"authorization_code"},
+		"code_challenge_methods_supported":               []string{"S256"},
+		"token_endpoint_auth_methods_supported":          []string{"client_secret_post", "client_secret_basic"},
+		"scopes_supported":                               []string{"mcp"},
 	})
 }
 
@@ -89,21 +90,25 @@ func (s *server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "redirect_uri is not allowed", http.StatusBadRequest)
 		return
 	}
-	challenge := r.URL.Query().Get("code_challenge")
-	if challenge == "" || r.URL.Query().Get("code_challenge_method") != "S256" {
-		http.Error(w, "PKCE S256 is required", http.StatusBadRequest)
-		return
-	}
 
 	target, err := url.Parse(redirectURI)
 	if err != nil {
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
 		return
 	}
+	if r.URL.Query().Get("response_type") != "code" {
+		s.redirectOAuthError(w, r, target, "unsupported_response_type", "response_type must be code")
+		return
+	}
+	challenge := r.URL.Query().Get("code_challenge")
+	if challenge == "" || r.URL.Query().Get("code_challenge_method") != "S256" {
+		s.redirectOAuthError(w, r, target, "invalid_request", "PKCE S256 is required")
+		return
+	}
 
 	code, err := generateSecret("wc_code_")
 	if err != nil {
-		http.Error(w, "generate code error", http.StatusInternalServerError)
+		s.redirectOAuthError(w, r, target, "server_error", "generate code error")
 		return
 	}
 
@@ -122,11 +127,24 @@ func (s *server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	query := target.Query()
 	query.Set("code", code)
+	query.Set("iss", s.publicURL)
 	if state := r.URL.Query().Get("state"); state != "" {
 		query.Set("state", state)
 	}
 	target.RawQuery = query.Encode()
 
+	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
+func (s *server) redirectOAuthError(w http.ResponseWriter, r *http.Request, target *url.URL, code, description string) {
+	query := target.Query()
+	query.Set("error", code)
+	query.Set("error_description", description)
+	query.Set("iss", s.publicURL)
+	if state := r.URL.Query().Get("state"); state != "" {
+		query.Set("state", state)
+	}
+	target.RawQuery = query.Encode()
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 

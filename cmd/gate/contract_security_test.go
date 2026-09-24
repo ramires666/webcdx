@@ -66,6 +66,12 @@ func TestInitializeMetadataAndBodyLimit(t *testing.T) {
 	if !strings.Contains(resourceRecorder.Body.String(), `"resource":"`+srv.publicURL+`/mcp/v4"`) || !strings.Contains(resourceRecorder.Body.String(), `"scopes_supported":["mcp"]`) {
 		t.Fatalf("v4 protected resource: %s", resourceRecorder.Body.String())
 	}
+	metadata := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
+	metadataRecorder := httptest.NewRecorder()
+	srv.handleOAuthServer(metadataRecorder, metadata)
+	if !strings.Contains(metadataRecorder.Body.String(), `"authorization_response_iss_parameter_supported":true`) {
+		t.Fatalf("OAuth metadata lacks issuer identification: %s", metadataRecorder.Body.String())
+	}
 	openid := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
 	openidRecorder := httptest.NewRecorder()
 	srv.routes().ServeHTTP(openidRecorder, openid)
@@ -91,7 +97,7 @@ func TestOAuthRequiresKnownRedirectAndS256(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	base := "/oauth/authorize?client_id=oauth-security-client&code_challenge=abc&code_challenge_method=S256&redirect_uri="
+	base := "/oauth/authorize?client_id=oauth-security-client&response_type=code&code_challenge=abc&code_challenge_method=S256&redirect_uri="
 	badRedirect := httptest.NewRequest(http.MethodGet, base+url.QueryEscape("https://evil.example/callback"), nil)
 	badRecorder := httptest.NewRecorder()
 	srv.handleAuthorize(badRecorder, badRedirect)
@@ -105,14 +111,19 @@ func TestOAuthRequiresKnownRedirectAndS256(t *testing.T) {
 	if callbackRecorder.Code != http.StatusFound {
 		t.Fatalf("callback-specific redirect status = %d body=%q", callbackRecorder.Code, callbackRecorder.Body.String())
 	}
+	callbackLocation, err := url.Parse(callbackRecorder.Header().Get("Location"))
+	if err != nil || callbackLocation.Query().Get("iss") != srv.publicURL {
+		t.Fatalf("callback-specific redirect issuer: location=%q err=%v", callbackRecorder.Header().Get("Location"), err)
+	}
 	if allowedOAuthRedirect("https://chatgpt.com/connector/oauth/a/b") {
 		t.Fatal("nested callback path accepted")
 	}
 	plain := httptest.NewRequest(http.MethodGet,
-		"/oauth/authorize?client_id=oauth-security-client&redirect_uri="+url.QueryEscape("https://chatgpt.com/oauth/callback")+"&code_challenge=abc&code_challenge_method=plain", nil)
+		"/oauth/authorize?client_id=oauth-security-client&response_type=code&redirect_uri="+url.QueryEscape("https://chatgpt.com/oauth/callback")+"&code_challenge=abc&code_challenge_method=plain", nil)
 	plainRecorder := httptest.NewRecorder()
 	srv.handleAuthorize(plainRecorder, plain)
-	if plainRecorder.Code != http.StatusBadRequest || verifyPKCE("abc", "abc", "plain") {
+	plainLocation, err := url.Parse(plainRecorder.Header().Get("Location"))
+	if plainRecorder.Code != http.StatusFound || err != nil || plainLocation.Query().Get("error") != "invalid_request" || plainLocation.Query().Get("iss") != srv.publicURL || verifyPKCE("abc", "abc", "plain") {
 		t.Fatalf("plain PKCE accepted: status=%d", plainRecorder.Code)
 	}
 }

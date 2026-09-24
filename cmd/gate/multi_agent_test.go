@@ -212,6 +212,7 @@ func TestOAuthAndMCPRoutingEndToEnd(t *testing.T) {
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 
 	authURL := "/oauth/authorize?client_id=" + clientID +
+		"&response_type=code" +
 		"&redirect_uri=" + url.QueryEscape("https://chatgpt.com/oauth/callback") +
 		"&code_challenge=" + challenge +
 		"&code_challenge_method=S256&state=state-123"
