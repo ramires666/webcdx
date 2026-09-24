@@ -123,9 +123,9 @@ func TestSanitizeToolsListDescriptions(t *testing.T) {
 	var msg struct {
 		Result struct {
 			Tools []struct {
-				Name        string   `json:"name"`
-				Title       string   `json:"title"`
-				Description string   `json:"description"`
+				Name        string `json:"name"`
+				Title       string `json:"title"`
+				Description string `json:"description"`
 				InputSchema struct {
 					Properties map[string]struct {
 						Description string `json:"description"`
@@ -154,6 +154,12 @@ func TestSanitizeToolsListDescriptions(t *testing.T) {
 		if !strings.Contains(tool.Description, "20 минут") {
 			t.Errorf("tool %q description should mention '20 минут', got: %q", tool.Name, tool.Description)
 		}
+		if !strings.Contains(tool.Description, "gpt-5.6-sol") {
+			t.Errorf("tool %q description should mention 'gpt-5.6-sol', got: %q", tool.Name, tool.Description)
+		}
+		if !strings.Contains(tool.Description, "thinking: high") {
+			t.Errorf("tool %q description should mention 'thinking: high', got: %q", tool.Name, tool.Description)
+		}
 		if _, hasModel := tool.InputSchema.Properties["model"]; hasModel {
 			t.Errorf("tool %q properties must not contain 'model'", tool.Name)
 		}
@@ -169,7 +175,7 @@ func TestSanitizeToolsListDescriptions(t *testing.T) {
 	}
 }
 
-func TestStripModelParameter(t *testing.T) {
+func TestEnforceDefaultModelAndReasoning(t *testing.T) {
 	req := json.RawMessage(`{
 		"jsonrpc":"2.0",
 		"id":"test-1",
@@ -184,19 +190,29 @@ func TestStripModelParameter(t *testing.T) {
 		}
 	}`)
 
-	stripped := stripModelParameter(req)
+	enforced := enforceDefaultModelAndReasoning(req)
 
 	var msg struct {
 		Params struct {
 			Arguments map[string]any `json:"arguments"`
 		} `json:"params"`
 	}
-	if err := json.Unmarshal(stripped, &msg); err != nil {
+	if err := json.Unmarshal(enforced, &msg); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
 
-	if _, exists := msg.Params.Arguments["model"]; exists {
-		t.Errorf("expected 'model' to be stripped, got: %v", msg.Params.Arguments)
+	if msg.Params.Arguments["model"] != "gpt-5.6-sol" {
+		t.Errorf("expected 'model' to be 'gpt-5.6-sol', got: %v", msg.Params.Arguments["model"])
+	}
+	cfg, ok := msg.Params.Arguments["config"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected 'config' object, got: %v", msg.Params.Arguments["config"])
+	}
+	if cfg["model"] != "gpt-5.6-sol" {
+		t.Errorf("expected config.model to be 'gpt-5.6-sol', got: %v", cfg["model"])
+	}
+	if cfg["model_reasoning_effort"] != "high" {
+		t.Errorf("expected config.model_reasoning_effort to be 'high', got: %v", cfg["model_reasoning_effort"])
 	}
 	if msg.Params.Arguments["prompt"] != "do something" {
 		t.Errorf("expected prompt to remain, got: %v", msg.Params.Arguments["prompt"])
@@ -205,4 +221,3 @@ func TestStripModelParameter(t *testing.T) {
 		t.Errorf("expected cwd to remain, got: %v", msg.Params.Arguments["cwd"])
 	}
 }
-

@@ -97,7 +97,7 @@ func startMCP(ctx context.Context, binary string, args []string) (*mcpClient, er
 	return client, nil
 }
 
-func stripModelParameter(request json.RawMessage) json.RawMessage {
+func enforceDefaultModelAndReasoning(request json.RawMessage) json.RawMessage {
 	var msg map[string]any
 	if err := json.Unmarshal(request, &msg); err != nil {
 		return request
@@ -110,21 +110,37 @@ func stripModelParameter(request json.RawMessage) json.RawMessage {
 	if !ok {
 		return request
 	}
-	args, ok := params["arguments"].(map[string]any)
-	if !ok {
+	name, _ := params["name"].(string)
+	if name != "codex" {
 		return request
 	}
-	if _, exists := args["model"]; exists {
-		delete(args, "model")
-		if updated, err := json.Marshal(msg); err == nil {
-			return updated
-		}
+	args, ok := params["arguments"].(map[string]any)
+	if !ok {
+		args = map[string]any{}
+		params["arguments"] = args
+	}
+
+	model := env("WEBCODEX_DEFAULT_MODEL", "gpt-5.6-sol")
+	reasoning := env("WEBCODEX_DEFAULT_REASONING_EFFORT", "high")
+
+	args["model"] = model
+
+	cfg, _ := args["config"].(map[string]any)
+	if cfg == nil {
+		cfg = map[string]any{}
+		args["config"] = cfg
+	}
+	cfg["model"] = model
+	cfg["model_reasoning_effort"] = reasoning
+
+	if updated, err := json.Marshal(msg); err == nil {
+		return updated
 	}
 	return request
 }
 
 func (c *mcpClient) call(ctx context.Context, request json.RawMessage) (json.RawMessage, error) {
-	request = stripModelParameter(request)
+	request = enforceDefaultModelAndReasoning(request)
 
 	var msg jsonrpcMessage
 	if err := json.Unmarshal(request, &msg); err != nil {
@@ -194,9 +210,9 @@ func sanitizeToolsListDescriptions(request json.RawMessage, response json.RawMes
 		if name == "codex" || name == "codex-reply" {
 			toolMap["title"] = "Работа с файлами и консолью"
 			if name == "codex" {
-				toolMap["description"] = "Работа с файлами и выполнение команд в рабочей директории проекта. Поддерживает длительные операции и сложные вычисления (таймаут до 20 минут / 1200 сек). Модель используется по умолчанию (параметр model не указывать, выбор модели автоматический)."
+				toolMap["description"] = "Работа с файлами и выполнение команд в рабочей директории проекта. Поддерживает длительные операции и сложные вычисления (таймаут до 20 минут / 1200 сек). Всегда используется модель gpt-5.6-sol с глубокими рассуждениями (thinking: high). Выбор модели автоматический."
 			} else {
-				toolMap["description"] = "Продолжение работы с файлами и выполнения команд в рабочей директории проекта (таймаут до 20 минут, модель по умолчанию)."
+				toolMap["description"] = "Продолжение работы с файлами и выполнения команд в рабочей директории проекта (таймаут до 20 минут, модель gpt-5.6-sol thinking: high)."
 			}
 			if schema, ok := toolMap["inputSchema"].(map[string]any); ok {
 				if props, ok := schema["properties"].(map[string]any); ok {

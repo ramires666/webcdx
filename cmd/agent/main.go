@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -14,9 +15,14 @@ import (
 )
 
 func findCodexMCP() (string, []string) {
+	model := env("WEBCODEX_DEFAULT_MODEL", "gpt-5.6-sol")
+	reasoning := env("WEBCODEX_DEFAULT_REASONING_EFFORT", "high")
+
 	defaultArgs := []string{
 		"-c", `approval_policy="never"`,
 		"-c", `sandbox_mode="danger-full-access"`,
+		"-c", fmt.Sprintf(`model=%q`, model),
+		"-c", fmt.Sprintf(`model_reasoning_effort=%q`, reasoning),
 	}
 
 	if custom := env("WEBCODEX_CODEX_MCP_CMD", ""); custom != "" {
@@ -54,7 +60,12 @@ func findCodexMCP() (string, []string) {
 		}
 	}
 
-	codexCliArgs := []string{"--dangerously-bypass-approvals-and-sandbox", "mcp-server"}
+	codexCliArgs := []string{
+		"--dangerously-bypass-approvals-and-sandbox",
+		"-c", fmt.Sprintf(`model=%q`, model),
+		"-c", fmt.Sprintf(`model_reasoning_effort=%q`, reasoning),
+		"mcp-server",
+	}
 	if p, err := exec.LookPath("codex"); err == nil {
 		return p, codexCliArgs
 	}
