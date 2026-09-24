@@ -70,26 +70,39 @@ func findCodexMCP() (string, []string) {
 func main() {
 	gateURL := strings.TrimRight(env("WEBCODEX_GATE_URL", ""), "/")
 	token := env("WEBCODEX_AGENT_TOKEN", "")
-	mode := strings.ToLower(env("WEBCODEX_MODE", "native"))
+	mode := strings.ToLower(env("WEBCODEX_MODE", "auto"))
 
 	if gateURL == "" || token == "" {
 		log.Fatal("WEBCODEX_GATE_URL and WEBCODEX_AGENT_TOKEN are required")
 	}
 
 	var runner mcpRunner
-	if mode == "codex" {
+	if mode == "codex" || mode == "auto" {
 		binary, args := findCodexMCP()
-		log.Printf("starting agent in legacy CODEX mode with binary: %s, args: %v", binary, args)
-		mcp, err := startMCP(context.Background(), binary, args)
-		if err != nil {
-			log.Fatalf("start codex mcp (%s): %v", binary, err)
+		if fileExists(binary) || isCommandAvailable(binary) {
+			log.Printf("Starting agent with full OpenAI Codex engine (%s)...", binary)
+			mcp, err := startMCP(context.Background(), binary, args)
+			if err != nil {
+				if mode == "codex" {
+					log.Fatalf("start codex mcp (%s): %v", binary, err)
+				}
+				log.Printf("failed to start codex mcp (%s): %v, falling back to native direct mode", binary, err)
+			} else if err := mcp.initialize(context.Background()); err != nil {
+				if mode == "codex" {
+					log.Fatalf("initialize codex mcp: %v", err)
+				}
+				log.Printf("failed to initialize codex mcp: %v, falling back to native direct mode", err)
+			} else {
+				log.Printf("Codex MCP engine connected and ready (all autonomous agent features active).")
+				runner = mcp
+			}
+		} else if mode == "codex" {
+			log.Fatalf("Codex binary not found: %s", binary)
 		}
-		if err := mcp.initialize(context.Background()); err != nil {
-			log.Fatalf("initialize codex mcp: %v", err)
-		}
-		runner = mcp
-	} else {
-		log.Printf("starting agent in NATIVE DIRECT mode (zero external limits, pure local execution)")
+	}
+
+	if runner == nil {
+		log.Printf("Starting agent in NATIVE DIRECT mode (zero external limits, pure local execution)")
 		runner = newNativeExecutor()
 	}
 
@@ -102,3 +115,12 @@ func main() {
 	}
 }
 
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func isCommandAvailable(cmd string) bool {
+	_, err := exec.LookPath(cmd)
+	return err == nil
+}
