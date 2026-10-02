@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"webcodex/internal/protocol"
 )
 
 const (
@@ -39,6 +41,7 @@ type executorConfig struct {
 	ProcessTTL       time.Duration
 	MaxLogBytes      int64
 	MaxResponseBytes int
+	Verbose          bool
 }
 
 type nativeExecutor struct {
@@ -48,6 +51,7 @@ type nativeExecutor struct {
 	processTTL   time.Duration
 	maxLogBytes  int64
 	maxResponse  int
+	verbose      bool
 
 	mu       sync.Mutex
 	sessions map[string]*processSession
@@ -95,6 +99,7 @@ func newNativeExecutor() (*nativeExecutor, error) {
 		ProcessTTL:       durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour),
 		MaxLogBytes:      int64Env("WEBCODEX_MAX_LOG_BYTES", defaultLogMax),
 		MaxResponseBytes: intEnv("WEBCODEX_MAX_RESPONSE_BYTES", defaultResponseMax),
+		Verbose:          env("WEBCODEX_VERBOSE", "1") != "0",
 	})
 }
 
@@ -124,6 +129,7 @@ func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error)
 	e := &nativeExecutor{
 		logDir: filepath.Clean(logDir), processTTL: config.ProcessTTL,
 		maxLogBytes: config.MaxLogBytes, maxResponse: config.MaxResponseBytes,
+		verbose:  config.Verbose,
 		sessions: make(map[string]*processSession), stop: make(chan struct{}),
 	}
 	for _, root := range config.AllowedRoots {
@@ -164,7 +170,7 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (jso
 			"protocolVersion": "2025-06-18",
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "local-workspace", "title": "Local Workspace", "version": "1.0.0"},
-			"instructions":    "Use explicit file paths and command working directories. Long commands continue through process sessions and logs.",
+			"instructions":    protocol.ExecutionInstructions,
 		}), nil
 	case "ping", "notifications/initialized":
 		return rpcResult(message.ID, map[string]any{}), nil

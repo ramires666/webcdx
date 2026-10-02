@@ -38,4 +38,22 @@ func TestFormatActionResponseAndUnicodeTruncation(t *testing.T) {
 	if got := compactString("абвгд", 3); got != "абв..." {
 		t.Fatalf("unicode truncation = %q", got)
 	}
+	for _, test := range []struct {
+		status string
+		code   any
+		want   string
+	}{
+		{"running", nil, "ещё выполняется"},
+		{"exited", 0, "Статус процесса"},
+		{"exited", 7, "с ошибкой"},
+		{"failed", nil, "с ошибкой"},
+		{"timed_out", nil, "с ошибкой"},
+		{"cancelled", nil, "Статус процесса"},
+	} {
+		response := toolResult([]byte(`1`), map[string]any{"session_id": "proc_test", "status": test.status, "exit_code": test.code}, nil)
+		got := formatActionResponse(response, nil, time.Millisecond)
+		if !strings.Contains(got, test.want) || !strings.Contains(got, "proc_test") || strings.Contains(got, "Успешно") {
+			t.Fatalf("status %s code %v: %s", test.status, test.code, got)
+		}
+	}
 }

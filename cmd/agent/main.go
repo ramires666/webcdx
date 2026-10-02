@@ -23,6 +23,7 @@ func main() {
 		log.Fatalf("initialize local executor: %v", err)
 	}
 	defer executor.Close()
+	log.Printf("agent ready: verbose=%t log_dir=%q; WEBCODEX_VERBOSE=0 hides commands and output", executor.verbose, executor.logDir)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

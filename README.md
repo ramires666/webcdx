@@ -82,6 +82,35 @@ By default only the agent's startup directory is allowed. `WEBCODEX_ALLOWED_ROOT
 
 Each command session is stored under `<log-dir>/<session-id>/` with `metadata.json`, `stdout.log`, and `stderr.log`. Metadata excludes command text, stdin, and environment values. Completed sessions remain pollable after an agent restart and expire after 24 hours by default. Running sessions are restored only when the persisted PID identity still matches.
 
+## Execution visibility
+
+The agent console shows command/argv, cwd, session ID, PID, timeout, log paths,
+and incoming stdout/stderr by default. Output chunks are quoted to escape
+terminal control characters. Active processes emit `RUNNING` every 10 seconds;
+completion emits `EXIT` with status and exit code, independently of polling.
+Start failures, stop requests and disk log limits are also reported.
+Console output continues after the disk log budget is exhausted.
+
+Set `WEBCODEX_VERBOSE=0` to hide commands and output while retaining lifecycle
+events. Environment values and stdin are not automatically logged, but commands
+and program output can contain secrets. Restored processes report status and
+elapsed time; use `poll_command` for their output. Their exit code may be unknown.
+
+`exec_command` now yields after 1 second by default (at most 3 seconds even if
+a longer wait is requested); the process continues in
+the background. Client disconnects do not cancel it. Resume with `poll_command`
+using its session ID, rather than rerunning the command. Set `timeout_seconds`
+for the expected computation time (default 1200, maximum 86400).
+
+Gate instructions recommend explaining commands before execution, yielding
+after 1–3 seconds, polling running sessions with returned offsets and reporting
+meaningful progress about every 10–20 seconds. Chat updates depend on the client
+following these instructions; no messages are pushed into a completed chat.
+A successful tool response does not mean the process has finished successfully.
+
+See [the development plan](EXECUTION_TRANSPARENCY.ru.md) for the minimal and
+expanded versions.
+
 ## Security
 
 `exec_command` is remote code execution with the operating-system rights of the local agent. `WEBCODEX_ALLOWED_ROOTS` protects filesystem tools only; it cannot contain a shell process. Deny `exec_command` and `cancel_command` unless needed. New agents also deny `edit_file`, `move_path`, and `delete_path` until they are explicitly enabled.

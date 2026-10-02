@@ -35,6 +35,7 @@ func streamOnce(ctx context.Context, client *http.Client, gateURL, token string,
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("stream status %s", resp.Status)
 	}
+	log.Printf("agent connected to gate")
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)

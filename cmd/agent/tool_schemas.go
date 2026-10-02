@@ -99,14 +99,14 @@ func localTools(version string) []mcpToolDefinition {
 	}, "path", "pattern")
 	v3ExecInput := object(map[string]any{
 		"command": stringField("Shell command."), "cwd": stringField("Absolute working directory."),
-		"timeout_seconds": integerField("Maximum process lifetime in seconds.", 1), "yield_time_ms": integerField("Wait up to 30000 ms before returning.", 0),
+		"timeout_seconds": integerField("Maximum process lifetime in seconds.", 1), "yield_time_ms": integerField("Initial wait; default 1000 ms, effective maximum 3000 ms. Values up to 30000 remain accepted for compatibility.", 0),
 	}, "command", "cwd")
 	argvField := array(stringField("Executable or argument."))
 	argvField["minItems"] = 1
 	v4ExecInput := object(map[string]any{
 		"command": stringField("Shell command."), "argv": argvField, "cwd": stringField("Absolute working directory."),
 		"env": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}, "stdin": stringField("Standard input written once and closed."),
-		"timeout_seconds": integerField("Maximum process lifetime in seconds.", 1), "yield_time_ms": integerField("Wait up to 30000 ms before returning.", 0),
+		"timeout_seconds": integerField("Maximum process lifetime in seconds.", 1), "yield_time_ms": integerField("Initial wait; default 1000 ms, effective maximum 3000 ms. Values up to 30000 remain accepted for compatibility.", 0),
 	}, "cwd")
 	v4ExecInput["oneOf"] = []any{
 		map[string]any{"required": []string{"command"}, "not": map[string]any{"required": []string{"argv"}}},
@@ -126,8 +126,8 @@ func localTools(version string) []mcpToolDefinition {
 		tool("write_file", "Atomically write exact UTF-8 text to an absolute local path.", v3WriteInput, writeOutput, false, true, false),
 		tool("list_directory", "List one local directory without recursion.", listInput, listOutput, true, false, false),
 		tool("search_files", "Search text files below an absolute local path.", searchInput, searchOutput, true, false, false),
-		tool("exec_command", "Start a non-interactive shell command in an explicit working directory.", v3ExecInput, v3SessionOutput, false, true, true),
-		tool("poll_command", "Read new output and status from a command session.", v3PollInput, v3SessionOutput, true, false, false),
+		tool("exec_command", "Start a non-interactive command in an explicit working directory. Explain the command and purpose to the user first, omitting secrets. Prefer yield_time_ms=1000 to 3000. If status is running, keep monitoring with poll_command and report progress; this is not completion.", v3ExecInput, v3SessionOutput, false, true, true),
+		tool("poll_command", "Read new output and status from a command session. Pass the returned next offsets to avoid repeating output. Keep monitoring running sessions and give the user progress updates about every 10 to 20 seconds, then report terminal status and exit_code.", v3PollInput, v3SessionOutput, true, false, false),
 		tool("cancel_command", "Terminate a command session and its process tree.", cancelInput, v3SessionOutput, false, true, false),
 	}
 	if version != "v4" {

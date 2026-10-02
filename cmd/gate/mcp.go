@@ -109,7 +109,7 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 					"title":   "Local Workspace",
 					"version": "1.0.0",
 				},
-				"instructions": "Use explicit file paths and command working directories. Long commands continue through process sessions and logs.",
+				"instructions": protocol.ExecutionInstructions,
 			},
 		})
 		log.Printf("mcp response ok agent=%s method=%q id=%s local=true elapsed=%s", agent.ID, msg.Method, string(msg.ID), time.Since(started))

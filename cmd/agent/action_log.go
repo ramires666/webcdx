@@ -115,6 +115,17 @@ func formatActionResponse(raw []byte, callErr error, elapsed time.Duration) stri
 		}
 		return fmt.Sprintf("⚠️ Завершено с предупреждением/ошибкой за %s: %s", elapsed.Round(time.Millisecond), compactString(errorText, 90))
 	}
+	if status, ok := msg.Result.Structured["status"].(string); ok {
+		sessionID, _ := msg.Result.Structured["session_id"].(string)
+		exitCode := msg.Result.Structured["exit_code"]
+		label := "Статус процесса"
+		if status == "running" {
+			label = "Процесс ещё выполняется"
+		} else if status == "failed" || status == "timed_out" || status == "orphaned" || status == "exited" && exitCode != nil && exitCode != float64(0) {
+			label = "Процесс завершился с ошибкой"
+		}
+		return fmt.Sprintf("%s: session=%s status=%s exit_code=%v (ответ за %s)", label, sessionID, status, exitCode, elapsed.Round(time.Millisecond))
+	}
 
 	details := []string{}
 	if path, ok := msg.Result.Structured["path"].(string); ok && path != "" {
@@ -125,9 +136,6 @@ func formatActionResponse(raw []byte, callErr error, elapsed time.Duration) stri
 			details = append(details, fmt.Sprintf("%s=%d", field, int64(value)))
 			break
 		}
-	}
-	if status, ok := msg.Result.Structured["status"].(string); ok {
-		details = append(details, "status="+status)
 	}
 	detail := ""
 	if len(details) > 0 {

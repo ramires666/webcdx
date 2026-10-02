@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,9 +66,11 @@ type logBudget struct {
 }
 
 type cappedStreamWriter struct {
-	file   *os.File
-	budget *logBudget
-	stderr bool
+	file      *os.File
+	budget    *logBudget
+	stderr    bool
+	sessionID string
+	verbose   bool
 }
 
 func (w *cappedStreamWriter) Write(data []byte) (int, error) {
@@ -75,6 +78,9 @@ func (w *cappedStreamWriter) Write(data []byte) (int, error) {
 	defer w.budget.mu.Unlock()
 	part := data
 	if int64(len(part)) > w.budget.remaining {
+		if !w.budget.stdoutTruncated && !w.budget.stderrTruncated {
+			log.Printf("[session=%s] LOG_LIMIT reached; further output is not saved to disk", w.sessionID)
+		}
 		part = part[:max(0, int(w.budget.remaining))]
 		if w.stderr {
 			w.budget.stderrTruncated = true
@@ -88,6 +94,15 @@ func (w *cappedStreamWriter) Write(data []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+	}
+	if w.verbose && len(data) > 0 {
+		stream := "stdout"
+		if w.stderr {
+			stream = "stderr"
+		}
+		// Quote chunks so command output cannot inject terminal control sequences.
+		// ponytail: synchronous console output; use a bounded queue if a slow terminal becomes a bottleneck.
+		log.Printf("[session=%s] %s: %q", w.sessionID, stream, data)
 	}
 	return len(data), nil
 }
@@ -121,7 +136,7 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 	if err != nil {
 		return nil, err
 	}
-	yieldMS, err := optionalInt(args, "yield_time_ms", 10000, 0, 30000)
+	yieldMS, err := optionalInt(args, "yield_time_ms", 1000, 0, 30000)
 	if err != nil {
 		return nil, err
 	}
@@ -181,8 +196,8 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 		return nil, toolErr("io_error", "create stderr log", err)
 	}
 	budget := &logBudget{remaining: e.maxLogBytes}
-	cmd.Stdout = &cappedStreamWriter{file: stdoutFile, budget: budget}
-	cmd.Stderr = &cappedStreamWriter{file: stderrFile, budget: budget, stderr: true}
+	cmd.Stdout = &cappedStreamWriter{file: stdoutFile, budget: budget, sessionID: id, verbose: e.verbose}
+	cmd.Stderr = &cappedStreamWriter{file: stderrFile, budget: budget, stderr: true, sessionID: id, verbose: e.verbose}
 	configureProcess(cmd)
 	started := time.Now().UTC()
 	session := &processSession{
@@ -194,7 +209,15 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 	e.mu.Lock()
 	e.sessions[id] = session
 	e.mu.Unlock()
+	if e.verbose {
+		if hasCommand {
+			log.Printf("[session=%s] COMMAND %q cwd=%q", id, command, cwd)
+		} else {
+			log.Printf("[session=%s] ARGV %q cwd=%q", id, cmd.Args, cwd)
+		}
+	}
 	if err := cmd.Start(); err != nil {
+		log.Printf("[session=%s] START_FAILED error=%q", id, err.Error())
 		stdoutFile.Close()
 		stderrFile.Close()
 		e.mu.Lock()
@@ -208,15 +231,18 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 	e.mu.Lock()
 	session.pid = cmd.Process.Pid
 	session.processIdentity, _ = processIdentity(session.pid)
+	log.Printf("[session=%s] START pid=%d cwd=%q timeout=%ds stdout=%q stderr=%q", id, session.pid, cwd, timeoutSeconds, stdoutPath, stderrPath)
 	e.mu.Unlock()
 	go e.waitProcess(session)
+	go e.commandHeartbeat(session)
 	if err := e.persistSession(session); err != nil {
 		_ = e.stopSession(session.id, "failed")
 		return nil, toolErr("io_error", "persist command session", err)
 	}
 	go e.enforceTimeout(session)
 	if yieldMS > 0 {
-		timer := time.NewTimer(time.Duration(yieldMS) * time.Millisecond)
+		// Keep tool responses short even when a client requests a longer initial wait.
+		timer := time.NewTimer(time.Duration(min(yieldMS, 3000)) * time.Millisecond)
 		defer timer.Stop()
 		select {
 		case <-session.done:
@@ -286,7 +312,7 @@ func (e *nativeExecutor) waitProcess(session *processSession) {
 		exitCode := session.cmd.ProcessState.ExitCode()
 		session.exitCode = &exitCode
 	}
-	if err != nil && session.cmd.ProcessState == nil && session.status == "running" {
+	if err != nil && session.cmd.ProcessState == nil && session.status == "exited" {
 		session.status = "failed"
 	}
 	if session.budget != nil {
@@ -296,9 +322,36 @@ func (e *nativeExecutor) waitProcess(session *processSession) {
 		session.budget.mu.Unlock()
 	}
 	session.finishedAt = time.Now().UTC()
+	log.Printf("[session=%s] EXIT status=%s exit_code=%v elapsed=%s error=%v", session.id, session.status, exitCodeValue(session.exitCode), session.finishedAt.Sub(session.startedAt).Round(time.Millisecond), err)
 	e.mu.Unlock()
 	_ = e.persistSession(session)
 	session.closeDone()
+}
+
+func exitCodeValue(code *int) any {
+	if code == nil {
+		return nil
+	}
+	return *code
+}
+
+func (e *nativeExecutor) commandHeartbeat(session *processSession) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			e.mu.Lock()
+			if session.status == "running" {
+				log.Printf("[session=%s] RUNNING pid=%d elapsed=%s", session.id, session.pid, time.Since(session.startedAt).Round(time.Second))
+			}
+			e.mu.Unlock()
+		case <-session.done:
+			return
+		case <-e.stop:
+			return
+		}
+	}
 }
 
 func (e *nativeExecutor) enforceTimeout(session *processSession) {
@@ -396,15 +449,18 @@ func (e *nativeExecutor) stopSession(id, status string) error {
 		return toolErr("process_identity_mismatch", "process identity no longer matches the persisted session")
 	}
 	session.status = status
+	log.Printf("[session=%s] STOP requested status=%s pid=%d", id, status, pid)
 	e.mu.Unlock()
 	_ = e.persistSession(session)
 	if cmd != nil {
 		if err := terminateProcessTree(cmd); err != nil {
+			log.Printf("[session=%s] STOP_FAILED error=%q", id, err.Error())
 			return toolErr("cancel_failed", "terminate process tree", err)
 		}
 		return nil
 	}
 	if err := terminatePIDTree(pid); err != nil {
+		log.Printf("[session=%s] STOP_FAILED error=%q", id, err.Error())
 		return toolErr("cancel_failed", "terminate restored process tree", err)
 	}
 	return nil
@@ -430,10 +486,7 @@ func (e *nativeExecutor) sessionResult(id string, stdoutOffset, stderrOffset *in
 	if !finishedAt.IsZero() {
 		finishedValue = finishedAt.Format(timeFormat)
 	}
-	exitValue := any(nil)
-	if exitCode != nil {
-		exitValue = *exitCode
-	}
+	exitValue := exitCodeValue(exitCode)
 	if v4 {
 		stdout, stderr, stdoutNext, stderrNext, stdoutMore, stderrMore, err := readSeparateLogs(stdoutPath, stderrPath, stdoutOffset, stderrOffset, maxBytes)
 		if err != nil {
@@ -645,7 +698,9 @@ func (e *nativeExecutor) restoreSessions() error {
 		}
 		if session.status == "running" && processAliveWithIdentity(session.pid, session.processIdentity) {
 			e.sessions[session.id] = session
+			log.Printf("[session=%s] RESTORED pid=%d", session.id, session.pid)
 			go e.monitorRestored(session)
+			go e.commandHeartbeat(session)
 			continue
 		}
 		if session.status == "running" {
@@ -674,6 +729,7 @@ func (e *nativeExecutor) monitorRestored(session *processSession) {
 					session.status = "exited"
 				}
 				session.finishedAt = time.Now().UTC()
+				log.Printf("[session=%s] EXIT status=%s exit_code=unknown (restored process)", session.id, session.status)
 				e.mu.Unlock()
 				_ = e.persistSession(session)
 				session.closeDone()

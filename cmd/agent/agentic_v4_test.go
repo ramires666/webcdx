@@ -283,6 +283,13 @@ func TestV4CommandHelper(t *testing.T) {
 	case "sleep":
 		fmt.Fprint(os.Stdout, "STARTED")
 		time.Sleep(10 * time.Second)
+	case "observe", "observe-quick":
+		fmt.Fprint(os.Stdout, "LIVE\x1b[2J\n")
+		fmt.Fprint(os.Stderr, "ERROR_STREAM\n")
+		if mode == "observe" {
+			time.Sleep(11 * time.Second)
+		}
+		os.Exit(7)
 	}
 	os.Exit(0)
 }
