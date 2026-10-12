@@ -68,7 +68,7 @@ func TestBrowserManagedEndToEnd(t *testing.T) {
 			w.Header().Set("Content-Disposition", `attachment; filename="report.txt"`)
 			fmt.Fprint(w, "test report")
 		default:
-			fmt.Fprint(w, `<!doctype html><title>Browser test</title><form action="/submit" method="post"><label>Name<input id="name" name="name"></label><button id="submit">Submit</button></form><input type="password" value="PASSWORD_SECRET"><input id="upload" type="file"><a id="download" href="/download">Download</a><button id="popup" onclick="window.open('/frame')">Popup</button><a href="/login" id="login">Login</a><iframe src="/frame"></iframe><div id="shadow"></div><script>document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML='<button id="shadow-button">Shadow button</button>';console.error('DO_NOT_LOG_SECRET')</script>`)
+			fmt.Fprintf(w, `<!doctype html><title>Browser test</title><form action="/submit" method="post"><label>Name<input id="name" name="name"></label><button id="submit">Submit</button></form><input type="password" value="PASSWORD_SECRET"><input id="upload" type="file"><a id="download" href="/download">Download</a><button id="popup" onclick="window.open('/frame')">Popup</button><a href="/login" id="login">Login</a><iframe src="/frame"></iframe><iframe src="http://%s/frame"></iframe><div id="shadow"></div><script>document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML='<button id="shadow-button">Shadow button</button>';console.error('DO_NOT_LOG_SECRET')</script>`, strings.Replace(r.Host, "127.0.0.1", "localhost", 1))
 		}
 	}))
 	defer site.Close()
@@ -115,6 +115,13 @@ func TestBrowserManagedEndToEnd(t *testing.T) {
 	if !strings.Contains(frame["text"].(string), "Frame button") {
 		t.Fatal("iframe not readable")
 	}
+	if len(frames) < 3 {
+		t.Fatal("cross-site iframe missing")
+	}
+	cross := call("browser_snapshot", args(map[string]any{"frame_id": frames[2]["frame_id"]})).(map[string]any)
+	if !strings.Contains(cross["text"].(string), "Frame button") {
+		t.Fatal("cross-site iframe unreadable")
+	}
 	call("browser_interact", args(map[string]any{"action": "fill", "selector": "#name", "text": "Alice", "request_key": "fill"}))
 	file := filepath.Join(root, "upload.txt")
 	if err := os.WriteFile(file, []byte("upload contents"), 0o600); err != nil {
@@ -146,6 +153,10 @@ func TestBrowserManagedEndToEnd(t *testing.T) {
 	}
 	call("browser_interact", args(map[string]any{"action": "click", "selector": "#popup", "request_key": "popup"}))
 	tabs := call("browser_tabs", args(map[string]any{"action": "list"})).(map[string]any)
+	for deadline := time.Now().Add(3 * time.Second); len(tabs["tabs"].([]map[string]any)) < 2 && time.Now().Before(deadline); {
+		time.Sleep(50 * time.Millisecond)
+		tabs = call("browser_tabs", args(map[string]any{"action": "list"})).(map[string]any)
+	}
 	if len(tabs["tabs"].([]map[string]any)) < 2 {
 		t.Fatal("popup was not discovered")
 	}

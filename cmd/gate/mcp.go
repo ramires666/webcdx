@@ -127,6 +127,10 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(msg.ID) == 0 {
+		if msg.Method == "tools/call" || msg.Method == "tools/list" {
+			writeRPCError(w, nil, -32600, "tool requests require an id")
+			return
+		}
 		if err := rt.enqueue(r.Context(), protocol.AgentRequest{ID: "", Request: body, Deadline: time.Now().Add(s.timeout)}); err != nil {
 			log.Printf("mcp notification enqueue error agent=%s method=%q error=%v", agent.ID, msg.Method, err)
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)

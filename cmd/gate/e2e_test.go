@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -70,7 +72,11 @@ func TestRealGateAndLocalExecutorEndToEnd(t *testing.T) {
 			"WEBCODEX_AGENT_TOKEN="+agentToken,
 			"WEBCODEX_ALLOWED_ROOTS="+root,
 			"WEBCODEX_LOG_DIR="+logs,
+			"WEBCODEX_BROWSER_ENABLED=0", "WEBCODEX_BROWSER_PERSONAL_ENABLED=0", "WEBCODEX_BROWSER_DIR="+filepath.Join(root, "browser"), "WEBCODEX_BROWSER_ALLOW_LOCAL=1",
 		)
+		if os.Getenv("WEBCODEX_BROWSER_TEST") == "1" {
+			command.Env = append(command.Env, "WEBCODEX_BROWSER_ENABLED=1")
+		}
 		command.Stdout, command.Stderr = agentLog, agentLog
 		if err := command.Start(); err != nil {
 			cancel()
@@ -276,6 +282,76 @@ func TestRealGateAndLocalExecutorEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(movedPath); err != nil {
 		t.Fatalf("denied delete reached local executor: %v", err)
+	}
+	if os.Getenv("WEBCODEX_BROWSER_TEST") == "1" {
+		testBrowserThroughMCP(t, srv, httpServer.URL, mcpToken)
+	}
+}
+
+func testBrowserThroughMCP(t *testing.T, srv *server, endpoint, token string) {
+	t.Helper()
+	var submits atomic.Int32
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/submit" {
+			submits.Add(1)
+			fmt.Fprint(w, "submitted")
+			return
+		}
+		fmt.Fprint(w, `<!doctype html><form action="/submit" method="post"><input id="field" name="field"><button id="submit">Submit</button></form>`)
+	}))
+	defer site.Close()
+	request := func(name string, args map[string]any) map[string]any {
+		response := postMCPVersion(t, endpoint, token, "v5", map[string]any{"jsonrpc": "2.0", "id": 31, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+		return response["result"].(map[string]any)
+	}
+	call := func(name string, args map[string]any) map[string]any {
+		result := request(name, args)
+		for deadline := time.Now().Add(25 * time.Second); ; {
+			if result["isError"] == true {
+				t.Fatalf("browser MCP %s: %v", name, result)
+			}
+			data := result["structuredContent"].(map[string]any)
+			if data["status"] != "running" {
+				return result
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("browser operation did not finish")
+			}
+			time.Sleep(50 * time.Millisecond)
+			result = request("browser_control", map[string]any{"action": "status", "operation_id": data["operation_id"]})
+		}
+	}
+	opened := call("browser_open", map[string]any{"mode": "clean", "request_key": "mcp-browser-open"})["structuredContent"].(map[string]any)
+	id := opened["browser_session_id"]
+	defer call("browser_control", map[string]any{"browser_session_id": id, "action": "disconnect"})
+	args := func(properties map[string]any) map[string]any {
+		properties["browser_session_id"] = id
+		return properties
+	}
+	call("browser_navigate", args(map[string]any{"action": "url", "url": site.URL, "request_key": "mcp-nav"}))
+	call("browser_interact", args(map[string]any{"action": "fill", "selector": "#field", "text": "MCP", "request_key": "mcp-fill"}))
+	submit := args(map[string]any{"action": "click", "selector": "#submit", "request_key": "mcp-submit"})
+	call("browser_interact", submit)
+	call("browser_interact", submit)
+	call("browser_wait", args(map[string]any{"condition": "text", "text": "submitted"}))
+	if submits.Load() != 1 {
+		t.Fatalf("MCP Retry repeated submit: %d", submits.Load())
+	}
+	image := call("browser_screenshot", args(map[string]any{}))
+	found := false
+	for _, item := range image["content"].([]any) {
+		if item.(map[string]any)["type"] == "image" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("MCP image content lost at Gate")
+	}
+	if err := srv.store.UpdateToolPolicy(context.Background(), "real-e2e", "", "browser_navigate"); err != nil {
+		t.Fatal(err)
+	}
+	if denied := request("browser_navigate", args(map[string]any{"action": "url", "url": site.URL, "request_key": "denied-nav"})); denied["isError"] != true {
+		t.Fatal("browser policy deny bypassed")
 	}
 }
 

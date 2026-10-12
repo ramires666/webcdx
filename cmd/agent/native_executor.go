@@ -101,7 +101,7 @@ func newNativeExecutor() (*nativeExecutor, error) {
 		return nil, err
 	}
 	return newNativeExecutorWithConfig(executorConfig{
-		Browser:          browserConfig{Enabled: env("WEBCODEX_BROWSER_ENABLED", "0") == "1", Executable: env("WEBCODEX_BROWSER_PATH", ""), Dir: env("WEBCODEX_BROWSER_DIR", filepath.Join(configDir, "webcodex", "browser")), AllowLocal: env("WEBCODEX_BROWSER_ALLOW_LOCAL", "0") == "1"},
+		Browser:          browserConfig{Enabled: env("WEBCODEX_BROWSER_ENABLED", "0") == "1", Executable: env("WEBCODEX_BROWSER_PATH", ""), Dir: env("WEBCODEX_BROWSER_DIR", filepath.Join(configDir, "webcodex", "browser")), AllowLocal: env("WEBCODEX_BROWSER_ALLOW_LOCAL", "0") == "1", Personal: env("WEBCODEX_BROWSER_PERSONAL_ENABLED", "0") == "1", DownloadDir: env("WEBCODEX_BROWSER_DOWNLOAD_DIR", "")},
 		AllowedRoots:     splitPathList(env("WEBCODEX_ALLOWED_ROOTS", cwd)),
 		LogDir:           logDir,
 		ProcessTTL:       durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour),

@@ -13,6 +13,19 @@ import (
 )
 
 func main() {
+	if nativeHostInvocation(os.Args) {
+		if err := runBrowserNativeHost(os.Args[1]); err != nil {
+			log.Printf("native browser host: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "--install-browser-host" || os.Args[1] == "--remove-browser-host") {
+		if err := installBrowserNativeHost(os.Args[1] == "--remove-browser-host"); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	gateURL := strings.TrimRight(env("WEBCODEX_GATE_URL", ""), "/")
 	token := env("WEBCODEX_AGENT_TOKEN", "")
 	if gateURL == "" || token == "" {

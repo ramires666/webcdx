@@ -26,6 +26,9 @@ type browserConfig struct {
 	Enabled              bool
 	Executable, Dir      string
 	AllowLocal, Headless bool
+	Personal             bool
+	BridgePath           string
+	DownloadDir          string
 }
 
 type browserManager struct {
@@ -35,6 +38,10 @@ type browserManager struct {
 	sessions   map[string]*browserSession
 	operations map[string]*browserOperation
 	closed     bool
+	listener   *browserIPCListener
+	bridge     *browserBridge
+	bridgePath string
+	artifactMu sync.Mutex
 }
 
 type browserSession struct {
@@ -46,6 +53,7 @@ type browserSession struct {
 	selected             string
 	paused, disconnected bool
 	active               context.CancelFunc
+	personal             *browserBridge
 	downloadMu           sync.Mutex
 	downloads            map[string]*browserDownload
 }
@@ -60,6 +68,9 @@ type browserTab struct {
 	diagnostics             []map[string]any
 	dialog                  bool
 	blocked                 bool
+	personal                *browserBridge
+	nativeTabID             int
+	frameContexts           map[string]context.Context
 }
 
 type browserOperation struct {
@@ -104,6 +115,9 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 	if err := privateBrowserDirectory(config.Dir); err != nil {
 		return nil, err
 	}
+	if _, err := b.cleanArtifacts(); err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(filepath.Join(config.Dir, "operations"))
 	if err != nil {
 		return nil, err
@@ -134,6 +148,15 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 		op.done = make(chan struct{})
 		close(op.done)
 		b.operations[op.ID] = &op
+	}
+	if config.Personal {
+		path := config.BridgePath
+		if path == "" {
+			path = browserBridgePath()
+		}
+		if err := b.startBridge(path); err != nil {
+			return nil, err
+		}
 	}
 	return b, nil
 }
@@ -309,11 +332,12 @@ func (b *browserManager) control(args map[string]any) (any, error) {
 		return nil, err
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	s := b.sessions[id]
 	if s == nil {
+		b.mu.Unlock()
 		return nil, toolErr("unknown_session", "unknown browser_session_id")
 	}
+	var closeSession context.CancelFunc
 	switch action {
 	case "pause":
 		s.paused = true
@@ -321,6 +345,15 @@ func (b *browserManager) control(args map[string]any) (any, error) {
 			s.active()
 		}
 	case "resume":
+		if s.personal != nil {
+			s.personal.mu.Lock()
+			local := s.personal.localPaused
+			s.personal.mu.Unlock()
+			if local {
+				b.mu.Unlock()
+				return nil, toolErr("access_paused", "resume locally in the extension first")
+			}
+		}
 		s.paused = false
 	case "waiting_user":
 		s.paused = true
@@ -336,9 +369,10 @@ func (b *browserManager) control(args map[string]any) (any, error) {
 		if s.active != nil {
 			s.active()
 		}
-		s.cancel()
+		closeSession = s.cancel
 	case "status":
 	default:
+		b.mu.Unlock()
 		return nil, toolErr("invalid_arguments", "unknown control action")
 	}
 	status := "ready"
@@ -350,6 +384,23 @@ func (b *browserManager) control(args map[string]any) (any, error) {
 	}
 	if s.disconnected {
 		status = "disconnected"
+	}
+	link := s.personal
+	b.mu.Unlock()
+	if closeSession != nil {
+		closeSession()
+	}
+	if link != nil && (action == "pause" || action == "waiting_user" || action == "resume") {
+		control := action
+		if control == "waiting_user" {
+			control = "pause"
+		}
+		link.mu.Lock()
+		link.paused = control == "pause"
+		link.mu.Unlock()
+		if err := link.send(browserBridgeMessage{Kind: "control", Action: control}); err != nil {
+			return nil, toolErr("disconnected", "personal control write failed")
+		}
 	}
 	return map[string]any{"browser_session_id": id, "status": status, "truncated": false}, nil
 }
@@ -398,6 +449,9 @@ func (b *browserManager) open(ctx context.Context, args map[string]any) (any, er
 	mode, err := requiredString(args, "mode")
 	if err != nil {
 		return nil, err
+	}
+	if mode == "personal" {
+		return b.openPersonal(ctx, args)
 	}
 	if mode != "clean" && mode != "persistent" {
 		return nil, toolErr("unsupported_mode", "managed browser supports clean and persistent")
@@ -508,6 +562,9 @@ func (t *browserTab) command(ctx context.Context, method string, params, result 
 	if t.ctx.Err() != nil {
 		return toolErr("disconnected", "browser tab closed")
 	}
+	if t.personal != nil {
+		return t.personal.call(ctx, t.nativeTabID, method, params, result)
+	}
 	if err := chromedp.FromContext(t.ctx).Target.Call(ctx, method, params, result); err != nil {
 		return toolErr("browser_failed", "browser rejected "+method)
 	}
@@ -515,6 +572,17 @@ func (t *browserTab) command(ctx context.Context, method string, params, result 
 }
 
 func (b *browserManager) setupTab(ctx context.Context, t *browserTab) error {
+	if t.personal != nil {
+		t.personal.mu.Lock()
+		t.personal.attached[t.nativeTabID] = t
+		t.personal.mu.Unlock()
+		for _, method := range []string{"Page.enable", "Runtime.enable", "Network.enable"} {
+			if err := t.command(ctx, method, map[string]any{}, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	events, stop := chromedp.FromContext(t.ctx).Target.Subscribe("Fetch.requestPaused")
 	go func() {
 		defer stop()
@@ -663,6 +731,9 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 }
 
 func (b *browserManager) tabs(ctx context.Context, s *browserSession, t *browserTab, args map[string]any) (any, error) {
+	if s.personal != nil {
+		return b.personalTabs(ctx, s, t, args)
+	}
 	action, _ := requiredString(args, "action")
 	if action == "list" {
 		available, err := chromedp.Targets(s.ctx)
@@ -768,7 +839,14 @@ func (b *browserManager) Close() {
 		s.disconnected = true
 		cancels = append(cancels, s.cancel)
 	}
+	link := b.bridge
 	b.mu.Unlock()
+	if b.listener != nil {
+		b.listener.Close()
+	}
+	if link != nil {
+		link.conn.Close()
+	}
 	for _, cancel := range cancels {
 		cancel()
 	}
@@ -831,6 +909,15 @@ func (b *browserManager) screenshot(ctx context.Context, s *browserSession, t *b
 	if save, _, err := optionalBool(args, "save"); err != nil {
 		return nil, err
 	} else if save {
+		b.artifactMu.Lock()
+		defer b.artifactMu.Unlock()
+		size, err := b.cleanArtifacts()
+		if err != nil {
+			return nil, toolErr("io_error", "inspect artifacts", err)
+		}
+		if size+int64(len(data)) > browserArtifactMax {
+			return nil, toolErr("limit_reached", "browser artifact budget reached")
+		}
 		path := filepath.Join(b.config.Dir, "artifacts", browserID("image_")+".jpg")
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			return nil, toolErr("io_error", "save screenshot", err)

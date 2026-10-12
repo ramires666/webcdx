@@ -10,28 +10,17 @@ import (
 type browserUserGesture struct{}
 
 func (b *browserManager) pageFrame(ctx context.Context, t *browserTab, wanted string) (map[string]any, error) {
-	var result struct {
-		FrameTree map[string]any `json:"frameTree"`
-	}
-	if err := t.command(ctx, "Page.getFrameTree", map[string]any{}, &result); err != nil {
+	frames, err := t.frames(ctx)
+	if err != nil {
 		return nil, err
 	}
-	var find func(map[string]any) map[string]any
-	find = func(tree map[string]any) map[string]any {
-		frame, _ := tree["frame"].(map[string]any)
-		if wanted == "" || frame["id"] == wanted {
-			return frame
+	var frame map[string]any
+	for _, candidate := range frames {
+		if wanted == "" || candidate["id"] == wanted {
+			frame = candidate
+			break
 		}
-		children, _ := tree["childFrames"].([]any)
-		for _, child := range children {
-			object, _ := child.(map[string]any)
-			if found := find(object); found != nil {
-				return found
-			}
-		}
-		return nil
 	}
-	frame := find(result.FrameTree)
 	if frame == nil {
 		return nil, toolErr("unknown_frame", "frame does not belong to this tab")
 	}
@@ -57,7 +46,7 @@ func (b *browserManager) eval(ctx context.Context, t *browserTab, frameID, expre
 		var res struct {
 			ID int `json:"executionContextId"`
 		}
-		if err := t.command(ctx, "Page.createIsolatedWorld", map[string]any{"frameId": id, "worldName": "webcodex"}, &res); err != nil {
+		if err := t.commandFrame(ctx, id, "Page.createIsolatedWorld", map[string]any{"frameId": id, "worldName": "webcodex"}, &res); err != nil {
 			return err
 		}
 		world = res.ID
@@ -71,7 +60,7 @@ func (b *browserManager) eval(ctx context.Context, t *browserTab, frameID, expre
 		} `json:"result"`
 		Exception json.RawMessage `json:"exceptionDetails"`
 	}
-	if err := t.command(ctx, "Runtime.evaluate", map[string]any{"expression": expression, "contextId": world, "returnByValue": true, "awaitPromise": true, "silent": true, "userGesture": ctx.Value(browserUserGesture{}) == true}, &response); err != nil {
+	if err := t.commandFrame(ctx, id, "Runtime.evaluate", map[string]any{"expression": expression, "contextId": world, "returnByValue": true, "awaitPromise": true, "silent": true, "userGesture": ctx.Value(browserUserGesture{}) == true}, &response); err != nil {
 		return err
 	}
 	if len(response.Exception) > 0 {
@@ -108,23 +97,12 @@ return {snapshot_id:id,url:location.href,title:document.title,viewport_width:inn
 	}
 	u, _ := result["url"].(string)
 	result["url"] = safeBrowserURL(u)
-	var tree struct {
-		FrameTree map[string]any `json:"frameTree"`
-	}
 	frames := []map[string]any{}
-	if err := t.command(ctx, "Page.getFrameTree", map[string]any{}, &tree); err == nil {
-		var collect func(map[string]any)
-		collect = func(node map[string]any) {
-			f, _ := node["frame"].(map[string]any)
+	if available, err := t.frames(ctx); err == nil {
+		for _, f := range available {
 			url, _ := f["url"].(string)
 			frames = append(frames, map[string]any{"frame_id": f["id"], "url": safeBrowserURL(url)})
-			children, _ := node["childFrames"].([]any)
-			for _, child := range children {
-				n, _ := child.(map[string]any)
-				collect(n)
-			}
 		}
-		collect(tree.FrameTree)
 	}
 	result["frames"] = frames
 	var ax struct {
