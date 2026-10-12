@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Команды {{.Agent.Name}} — WebCodex</title>
+<style>
+:root{color-scheme:dark}body{font:16px system-ui;background:#0f172a;color:#f8fafc;max-width:1100px;margin:2rem auto;padding:0 1rem}a{color:#38bdf8}input,select,button{font:inherit;padding:.5rem;background:#1e293b;color:inherit;border:1px solid #64748b;border-radius:4px}table{border-collapse:collapse;width:100%;margin:1rem 0}td,th{text-align:left;padding:.5rem;border-bottom:1px solid #334155;word-break:break-word}pre{background:#1e293b;padding:1rem;white-space:pre-wrap;overflow:auto;max-height:24rem}button{cursor:pointer}#error{color:#fca5a5}.filters{display:flex;gap:1rem;flex-wrap:wrap}.running{color:#38bdf8}.bad{color:#fca5a5}
+</style>
+<body data-base="/admin/agents/{{.Agent.ID}}/commands" data-csrf="{{.CSRF}}">
+<a href="/admin/agents/{{.Agent.ID}}">← Агент</a><h1>Команды: {{.Agent.Name}}</h1>
+<p>Обновление каждые 2 секунды. Журналы могут содержать секреты, напечатанные программой.</p>
+<div class="filters"><label>Поиск <input id="search" type="search" placeholder="Session ID или cwd"></label><label>Статус <select id="filter"><option value="">Все</option><option>running</option><option>exited</option><option>failed</option><option>cancelled</option><option>timed_out</option><option>orphaned</option><option>outcome_unknown</option></select></label></div>
+<p id="error" role="status"></p><table><thead><tr><th>Сессия / каталог</th><th>PID</th><th>Статус / exit code</th><th>Время</th><th>Действия</th></tr></thead><tbody id="rows"></tbody></table>
+<section id="details" hidden><h2 id="selected"></h2><p id="state" role="status"></p><p><a id="download-out">Скачать stdout</a> · <a id="download-err">Скачать stderr</a></p><h3>stdout</h3><pre id="stdout" tabindex="0"></pre><h3>stderr</h3><pre id="stderr" tabindex="0"></pre><h3>События</h3><pre id="events" tabindex="0"></pre></section>
+<script>
+const base=document.body.dataset.base,csrf=document.body.dataset.csrf;
+let sessions=[],selected='',outOffset=0,errOffset=0,generation=0;
+async function request(url,options){const response=await fetch(url,{...options,cache:'no-store',credentials:'same-origin'});if(!response.ok)throw Error(await response.text());return response.json()}
+function choose(id){selected=id;generation++;outOffset=errOffset=0;for(const name of ['stdout','stderr','events'])document.getElementById(name).textContent='';document.getElementById('selected').textContent=id;document.getElementById('details').hidden=false;for(const [name,stream] of [['download-out','stdout'],['download-err','stderr']])document.getElementById(name).href=base+'/log?'+new URLSearchParams({session_id:id,stream})}
+function render(){const rows=document.getElementById('rows');rows.replaceChildren();const query=document.getElementById('search').value.toLowerCase(),status=document.getElementById('filter').value;
+for(const session of sessions){if(status&&session.status!==status||!`${session.session_id} ${session.cwd}`.toLowerCase().includes(query))continue;const row=document.createElement('tr');row.className=session.status==='running'?'running':session.exit_code!==null&&session.exit_code!==0?'bad':'';
+for(const text of [session.session_id+'\n'+session.cwd,session.pid,session.status+' / '+(session.exit_code??'неизвестен'),Math.floor(session.duration_ms/1000)+' сек.']){const td=document.createElement('td');td.textContent=text;row.append(td)}const td=document.createElement('td'),view=document.createElement('button');view.textContent='Открыть';view.onclick=()=>choose(session.session_id);td.append(view);
+if(session.status==='running'){const stop=document.createElement('button');stop.textContent='Остановить';stop.onclick=async()=>{stop.disabled=true;try{await request(base+'/stop',{method:'POST',body:new URLSearchParams({csrf,session_id:session.session_id})})}catch(error){document.getElementById('error').textContent=error.message}finally{stop.disabled=false}};td.append(' ',stop)}row.append(td);rows.append(row)}}
+async function refresh(){try{const list=await request(base+'/data');sessions=list.sessions;render();document.getElementById('error').textContent=list.truncated?'Показаны последние 500 сессий.':'';
+if(selected){const gen=generation,id=selected,data=await request(base+'/data?'+new URLSearchParams({session_id:id,stdout_offset:outOffset,stderr_offset:errOffset}));if(gen===generation){for(const name of ['stdout','stderr']){const pre=document.getElementById(name);pre.textContent=(pre.textContent+data[name]).slice(-262144)}outOffset=data.stdout_next_offset;errOffset=data.stderr_next_offset;document.getElementById('state').textContent=`${data.status} · PID ${data.pid} · exit code ${data.exit_code??'неизвестен'} · ${Math.floor(data.duration_ms/1000)} сек.`;document.getElementById('events').textContent=JSON.stringify(data.events,null,2)}}
+}catch(error){document.getElementById('error').textContent='Нет обновления: '+error.message}finally{setTimeout(refresh,2000)}}
+document.getElementById('search').oninput=render;document.getElementById('filter').onchange=render;refresh();
+</script></body></html>

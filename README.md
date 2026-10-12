@@ -113,6 +113,19 @@ expanded versions.
 
 ## Security
 
+Open **Monitoring** on the agent's admin page (`/admin/agents/<id>/commands`)
+to filter recent sessions, tail stdout/stderr, download logs and stop processes.
+The page polls every two seconds; admin authentication, tool policy and CSRF
+apply. It displays the last 256 KiB per stream; downloads stop at EOF or 100 MiB.
+Logs stay on the agent. Offline agents show an update error and reconnect.
+
+Connect to `/mcp/v5` for `list_commands` and idempotent `exec_command`.
+Supply a unique `request_key`; reuse the same key and arguments after Retry.
+Conflicting arguments are rejected; ambiguous launches return `outcome_unknown`
+without relaunching. Keys expire with their session (`WEBCODEX_PROCESS_TTL`);
+do not retry expired launches. v3/v4 retain their tool lists and schemas.
+Update Gate and agent before using v5.
+
 `exec_command` is remote code execution with the operating-system rights of the local agent. `WEBCODEX_ALLOWED_ROOTS` protects filesystem tools only; it cannot contain a shell process. Deny `exec_command` and `cancel_command` unless needed. New agents also deny `edit_file`, `move_path`, and `delete_path` until they are explicitly enabled.
 
 Run the agent under a dedicated unprivileged account. On Windows, grant that account NTFS access only to the intended workspaces and log directory. On Linux, update `ReadWritePaths` in `deploy/webcodex-agent.service` to match the configured roots; the unit also enables `NoNewPrivileges`, `PrivateTmp`, and `ProtectSystem`. Restrict outbound network access at the OS or container layer when builds do not need downloads.

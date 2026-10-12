@@ -223,6 +223,10 @@ func (s *server) routes() http.Handler {
 	})
 
 	// Admin Web UI (protected by Basic Auth)
+	mux.HandleFunc("GET /admin/agents/{id}/commands", s.adminAuth(s.handleCommandMonitor))
+	mux.HandleFunc("GET /admin/agents/{id}/commands/data", s.adminAuth(s.handleCommandData))
+	mux.HandleFunc("GET /admin/agents/{id}/commands/log", s.adminAuth(s.handleCommandLog))
+	mux.HandleFunc("POST /admin/agents/{id}/commands/stop", s.adminAuth(s.handleCommandStop))
 	mux.HandleFunc("GET /admin", s.adminAuth(s.handleAdminIndex))
 	mux.HandleFunc("POST /admin/agents", s.adminAuth(s.handleAdminCreateAgent))
 	mux.HandleFunc("GET /admin/agents/{id}", s.adminAuth(s.handleAdminAgent))

@@ -207,6 +207,64 @@ func TestRealGateAndLocalExecutorEndToEnd(t *testing.T) {
 	}
 
 	protected := invokeTool(t, httpServer.URL, mcpToken, "read_file", map[string]any{"path": movedPath})
+	retryArgs := map[string]any{"argv": e2eArgvCommand("RETRY", ""), "cwd": root, "request_key": "e2e-once", "yield_time_ms": 3000}
+	launch := func() map[string]any {
+		response := postMCPVersion(t, httpServer.URL, mcpToken, "v5", map[string]any{
+			"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": map[string]any{"name": "exec_command", "arguments": retryArgs},
+		})
+		result := response["result"].(map[string]any)
+		if result["isError"] == true {
+			t.Fatalf("v5 launch: %v", result)
+		}
+		return result["structuredContent"].(map[string]any)
+	}
+	once := launch()
+	if retry := launch(); retry["session_id"] != once["session_id"] {
+		t.Fatal("v5 Retry duplicated process")
+	}
+	monitor := func(method, suffix, body string, authenticated bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, "/admin/agents/real-e2e/commands"+suffix, strings.NewReader(body))
+		if authenticated {
+			request.SetBasicAuth(srv.adminUser, srv.adminPassword)
+		}
+		if method == http.MethodPost {
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		recorder := httptest.NewRecorder()
+		srv.routes().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if response := monitor("GET", "", "", false); response.Code != http.StatusUnauthorized {
+		t.Fatal("monitor allowed unauthenticated access")
+	}
+	if response := monitor("GET", "", "", true); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Команды:") {
+		t.Fatalf("monitor page: %s", response.Body.String())
+	}
+	if response := monitor("GET", "/data", "", true); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), once["session_id"].(string)) {
+		t.Fatalf("monitor list: %s", response.Body.String())
+	}
+	query := "?session_id=" + once["session_id"].(string)
+	if response := monitor("GET", "/data"+query+"&stdout_offset=0&stderr_offset=0", "", true); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "RETRY") {
+		t.Fatalf("monitor poll: %s", response.Body.String())
+	}
+	if response := monitor("GET", "/log"+query+"&stream=stdout", "", true); response.Code != http.StatusOK || response.Body.String() != "RETRY" {
+		t.Fatalf("monitor log: %s", response.Body.String())
+	}
+	if response := monitor("GET", "/data?session_id=proc_foreign&stdout_offset=0&stderr_offset=0", "", true); response.Code != http.StatusBadGateway {
+		t.Fatal("foreign session accepted")
+	}
+	if response := monitor("POST", "/stop", "session_id="+once["session_id"].(string), true); response.Code != http.StatusForbidden {
+		t.Fatal("stop bypassed CSRF")
+	}
+	if err := srv.store.UpdateToolPolicy(context.Background(), "real-e2e", "", "poll_command,cancel_command"); err != nil {
+		t.Fatal(err)
+	}
+	if response := monitor("GET", "/log"+query+"&stream=stdout", "", true); response.Code != http.StatusForbidden {
+		t.Fatal("download bypassed poll policy")
+	}
+	if response := monitor("POST", "/stop", "csrf="+srv.adminCSRF+"&session_id="+once["session_id"].(string), true); response.Code != http.StatusForbidden {
+		t.Fatal("stop bypassed cancel policy")
+	}
 	if err := srv.store.UpdateToolPolicy(context.Background(), "real-e2e", "", "delete_path"); err != nil {
 		t.Fatal(err)
 	}
@@ -222,9 +280,13 @@ func TestRealGateAndLocalExecutorEndToEnd(t *testing.T) {
 }
 
 func postMCP(t *testing.T, endpoint, token string, payload map[string]any) map[string]any {
+	return postMCPVersion(t, endpoint, token, "v4", payload)
+}
+
+func postMCPVersion(t *testing.T, endpoint, token, version string, payload map[string]any) map[string]any {
 	t.Helper()
 	body, _ := json.Marshal(payload)
-	request, err := http.NewRequest(http.MethodPost, endpoint+"/mcp/v4", bytes.NewReader(body))
+	request, err := http.NewRequest(http.MethodPost, endpoint+"/mcp/"+version, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
