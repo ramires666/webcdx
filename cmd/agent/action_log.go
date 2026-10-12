@@ -116,6 +116,12 @@ func formatActionResponse(raw []byte, callErr error, elapsed time.Duration) stri
 		return fmt.Sprintf("⚠️ Завершено с предупреждением/ошибкой за %s: %s", elapsed.Round(time.Millisecond), compactString(errorText, 90))
 	}
 	if status, ok := msg.Result.Structured["status"].(string); ok {
+		if browserID, ok := msg.Result.Structured["browser_session_id"].(string); ok {
+			return fmt.Sprintf("Браузер: session=%s status=%s (ответ за %s)", browserID, status, elapsed.Round(time.Millisecond))
+		}
+		if operationID, ok := msg.Result.Structured["operation_id"].(string); ok {
+			return fmt.Sprintf("Браузер: operation=%s status=%s (ответ за %s)", operationID, status, elapsed.Round(time.Millisecond))
+		}
 		sessionID, _ := msg.Result.Structured["session_id"].(string)
 		exitCode := msg.Result.Structured["exit_code"]
 		label := "Статус процесса"

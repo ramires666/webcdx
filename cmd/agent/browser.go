@@ -1,0 +1,841 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"image"
+	"image/jpeg"
+	"log"
+	"net"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/chromedp/cdproto/target"
+	"github.com/chromedp/chromedp"
+)
+
+type browserConfig struct {
+	Enabled              bool
+	Executable, Dir      string
+	AllowLocal, Headless bool
+}
+
+type browserManager struct {
+	mu         sync.Mutex
+	config     browserConfig
+	executor   *nativeExecutor
+	sessions   map[string]*browserSession
+	operations map[string]*browserOperation
+	closed     bool
+}
+
+type browserSession struct {
+	mu                   sync.Mutex
+	id, mode, profile    string
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	tabs                 map[string]*browserTab
+	selected             string
+	paused, disconnected bool
+	active               context.CancelFunc
+	downloadMu           sync.Mutex
+	downloads            map[string]*browserDownload
+}
+
+type browserTab struct {
+	id                      string
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	eventMu                 sync.Mutex
+	worlds                  map[string]int
+	snapshot, snapshotFrame string
+	diagnostics             []map[string]any
+	dialog                  bool
+	blocked                 bool
+}
+
+type browserOperation struct {
+	ID        string         `json:"operation_id"`
+	KeyHash   string         `json:"key_hash,omitempty"`
+	Hash      string         `json:"hash,omitempty"`
+	Status    string         `json:"status"`
+	At        time.Time      `json:"at"`
+	Result    map[string]any `json:"result,omitempty"`
+	ErrorCode string         `json:"error_code,omitempty"`
+	done      chan struct{}
+	cancel    context.CancelFunc
+	image     string
+}
+
+type browserImage struct {
+	Result map[string]any
+	Data   string
+}
+
+func browserID(prefix string) string {
+	id, err := randomSessionID()
+	if err != nil {
+		panic(err)
+	}
+	return prefix + strings.TrimPrefix(id, "proc_")
+}
+
+func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager, error) {
+	b := &browserManager{config: config, executor: e, sessions: map[string]*browserSession{}, operations: map[string]*browserOperation{}}
+	if !config.Enabled {
+		return b, nil
+	}
+	if config.Dir == "" {
+		return nil, errors.New("browser data directory required")
+	}
+	for _, sub := range []string{"profiles", "operations", "artifacts"} {
+		if err := os.MkdirAll(filepath.Join(config.Dir, sub), 0o700); err != nil {
+			return nil, err
+		}
+	}
+	if err := privateBrowserDirectory(config.Dir); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(config.Dir, "operations"))
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "bop_") || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(config.Dir, "operations", entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var op browserOperation
+		if json.Unmarshal(data, &op) != nil {
+			return nil, errors.New("invalid browser operation journal")
+		}
+		if time.Since(op.At) > 24*time.Hour {
+			if err := os.Remove(path); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if op.Status == "running" {
+			op.Status = "failed"
+			op.ErrorCode = "outcome_unknown"
+		}
+		op.done = make(chan struct{})
+		close(op.done)
+		b.operations[op.ID] = &op
+	}
+	return b, nil
+}
+
+func (b *browserManager) saveOperation(op *browserOperation) error {
+	if op.KeyHash == "" {
+		return nil
+	}
+	data, err := json.Marshal(op)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(b.config.Dir, "operations", op.ID+".json"), data, false)
+}
+
+func browserMutation(name string, args map[string]any) bool {
+	return name == "browser_open" || name == "browser_navigate" || name == "browser_interact" || name == "browser_files" && args["action"] != "downloads" || name == "browser_tabs" && args["action"] != "list"
+}
+
+func (b *browserManager) call(ctx context.Context, name string, args map[string]any) (any, error) {
+	if !b.config.Enabled {
+		return nil, toolErr("browser_disabled", "enable WEBCODEX_BROWSER_ENABLED locally")
+	}
+	if err := validateBrowserArgs(name, args); err != nil {
+		return nil, err
+	}
+	if name == "browser_control" {
+		return b.control(args)
+	}
+	keyHash := ""
+	if browserMutation(name, args) {
+		key, err := requiredString(args, "request_key")
+		if err != nil || len(key) > 128 {
+			return nil, toolErr("invalid_arguments", "request_key must contain 1 to 128 characters")
+		}
+		keyHash = commandHash(key)
+	}
+	hash := commandHash(map[string]any{"name": name, "arguments": args})
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, toolErr("disconnected", "browser manager closed")
+	}
+	if keyHash != "" {
+		for _, op := range b.operations {
+			if op.KeyHash == keyHash {
+				if op.Hash != hash {
+					b.mu.Unlock()
+					return nil, toolErr("request_key_conflict", "key was used with different arguments")
+				}
+				b.mu.Unlock()
+				return b.await(ctx, op)
+			}
+		}
+	}
+	for id, op := range b.operations {
+		if op.Status != "running" && time.Since(op.At) > 24*time.Hour {
+			if op.KeyHash != "" {
+				if err := os.Remove(filepath.Join(b.config.Dir, "operations", id+".json")); err != nil {
+					b.mu.Unlock()
+					return nil, toolErr("io_error", "expire browser operation", err)
+				}
+			}
+			delete(b.operations, id)
+			continue
+		}
+		if op.KeyHash == "" && op.Status != "running" {
+			delete(b.operations, id)
+		}
+	}
+	running := 0
+	for _, op := range b.operations {
+		if op.Status == "running" {
+			running++
+		}
+	}
+	if len(b.operations) >= 256 || running >= 32 {
+		b.mu.Unlock()
+		return nil, toolErr("limit_reached", "browser operation limit reached; wait for journal expiry")
+	}
+	opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	op := &browserOperation{ID: browserID("bop_"), KeyHash: keyHash, Hash: hash, Status: "running", At: time.Now().UTC(), done: make(chan struct{}), cancel: cancel}
+	if err := b.saveOperation(op); err != nil {
+		b.mu.Unlock()
+		cancel()
+		return nil, toolErr("io_error", "reserve browser operation", err)
+	}
+	b.operations[op.ID] = op
+	b.mu.Unlock()
+	go func() {
+		defer cancel()
+		result, err := b.execute(opCtx, name, args)
+		b.mu.Lock()
+		op.Status = "completed"
+		if err != nil {
+			op.Status = "failed"
+			op.ErrorCode = "browser_failed"
+			var coded *codedError
+			if errors.As(err, &coded) {
+				op.ErrorCode = coded.code
+			}
+			if opCtx.Err() != nil {
+				op.Status = "cancelled"
+				op.ErrorCode = "cancelled"
+				if keyHash != "" {
+					op.ErrorCode = "outcome_unknown"
+				}
+			}
+		} else if img, ok := result.(browserImage); ok {
+			op.Result, op.image = img.Result, img.Data
+		} else {
+			op.Result, _ = result.(map[string]any)
+		}
+		if err := b.saveOperation(op); err != nil {
+			op.Status = "failed"
+			op.ErrorCode = "outcome_unknown"
+		}
+		log.Printf("[browser operation=%s] %s status=%s error_code=%s", op.ID, name, op.Status, op.ErrorCode)
+		close(op.done)
+		b.mu.Unlock()
+	}()
+	return b.await(ctx, op)
+}
+
+func (b *browserManager) await(ctx context.Context, op *browserOperation) (any, error) {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-op.done:
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.operationResult(op)
+}
+
+func (b *browserManager) operationResult(op *browserOperation) (any, error) {
+	if op.Status == "running" {
+		return map[string]any{"operation_id": op.ID, "status": "running", "truncated": false}, nil
+	}
+	if op.ErrorCode != "" {
+		return nil, toolErr(op.ErrorCode, "browser operation ended: "+op.ID)
+	}
+	if op.image != "" {
+		return browserImage{op.Result, op.image}, nil
+	}
+	return op.Result, nil
+}
+
+func (b *browserManager) control(args map[string]any) (any, error) {
+	action, _ := requiredString(args, "action")
+	if id, _ := optionalString(args, "operation_id"); id != "" {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		op := b.operations[id]
+		if op == nil {
+			return nil, toolErr("unknown_operation", "unknown operation_id")
+		}
+		if action == "cancel" {
+			if op.cancel != nil {
+				op.cancel()
+			}
+			return map[string]any{"operation_id": id, "status": op.Status, "truncated": false}, nil
+		}
+		if action != "status" {
+			return nil, toolErr("invalid_arguments", "operation supports status or cancel")
+		}
+		return b.operationResult(op)
+	}
+	id, err := requiredString(args, "browser_session_id")
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := b.sessions[id]
+	if s == nil {
+		return nil, toolErr("unknown_session", "unknown browser_session_id")
+	}
+	switch action {
+	case "pause":
+		s.paused = true
+		if s.active != nil {
+			s.active()
+		}
+	case "resume":
+		s.paused = false
+	case "waiting_user":
+		s.paused = true
+		if s.active != nil {
+			s.active()
+		}
+	case "cancel":
+		if s.active != nil {
+			s.active()
+		}
+	case "disconnect":
+		s.disconnected = true
+		if s.active != nil {
+			s.active()
+		}
+		s.cancel()
+	case "status":
+	default:
+		return nil, toolErr("invalid_arguments", "unknown control action")
+	}
+	status := "ready"
+	if s.paused {
+		status = "paused"
+	}
+	if action == "waiting_user" {
+		status = "waiting_user"
+	}
+	if s.disconnected {
+		status = "disconnected"
+	}
+	return map[string]any{"browser_session_id": id, "status": status, "truncated": false}, nil
+}
+
+func safeBrowserURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.User = nil
+	return u.String()
+}
+
+func (b *browserManager) checkURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return toolErr("invalid_url", "only HTTP/HTTPS URLs without credentials are allowed")
+	}
+	if !b.config.AllowLocal {
+		host := strings.ToLower(u.Hostname())
+		ip := net.ParseIP(host)
+		if host == "localhost" || !strings.Contains(host, ".") && ip == nil || strings.HasSuffix(host, ".local") || ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast()) {
+			return toolErr("url_not_allowed", "local/intranet access is disabled locally")
+		}
+		if ip == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return toolErr("url_not_allowed", "hostname could not be resolved safely")
+			}
+			for _, address := range addresses {
+				ip := address.IP
+				if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+					return toolErr("url_not_allowed", "hostname resolves to a local address")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (b *browserManager) open(ctx context.Context, args map[string]any) (any, error) {
+	mode, err := requiredString(args, "mode")
+	if err != nil {
+		return nil, err
+	}
+	if mode != "clean" && mode != "persistent" {
+		return nil, toolErr("unsupported_mode", "managed browser supports clean and persistent")
+	}
+	profile := ""
+	clean := mode == "clean"
+	if clean {
+		profile, err = os.MkdirTemp(filepath.Join(b.config.Dir, "profiles"), "clean-")
+	} else {
+		profile = filepath.Join(b.config.Dir, "profiles", "persistent")
+		err = os.MkdirAll(profile, 0o700)
+	}
+	if err != nil {
+		return nil, toolErr("io_error", "create browser profile", err)
+	}
+	b.mu.Lock()
+	active := 0
+	for _, session := range b.sessions {
+		if !session.disconnected {
+			active++
+		}
+	}
+	if active >= 4 {
+		b.mu.Unlock()
+		if clean {
+			_ = os.RemoveAll(profile)
+		}
+		return nil, toolErr("limit_reached", "at most four browser sessions")
+	}
+	for _, existing := range b.sessions {
+		if existing.profile == profile && !existing.disconnected {
+			b.mu.Unlock()
+			return nil, toolErr("profile_in_use", "persistent profile already open")
+		}
+	}
+	options := []chromedp.ExecAllocatorOption{chromedp.NoFirstRun, chromedp.NoDefaultBrowserCheck, chromedp.UserDataDir(profile), chromedp.WindowSize(1280, 900), chromedp.WSURLReadTimeout(10 * time.Second)}
+	if b.config.Executable != "" {
+		options = append(options, chromedp.ExecPath(b.config.Executable))
+	}
+	if b.config.Headless {
+		options = append(options, chromedp.Headless)
+	} else {
+		options = append(options, chromedp.VisibleWindow)
+	}
+	alloc, stopAlloc := chromedp.NewExecAllocator(context.Background(), options...)
+	root, stopRoot := chromedp.NewContext(alloc, chromedp.WithLogf(func(string, ...any) {}), chromedp.WithErrorf(func(string, ...any) {}))
+	s := &browserSession{id: browserID("browser_"), mode: mode, profile: profile, ctx: root, tabs: map[string]*browserTab{}, downloads: map[string]*browserDownload{}}
+	var closeOnce sync.Once
+	s.cancel = func() {
+		closeOnce.Do(func() {
+			shutdown, done := context.WithTimeout(root, 10*time.Second)
+			_ = chromedp.Cancel(shutdown)
+			done()
+			stopRoot()
+			stopAlloc()
+			if clean {
+				_ = os.RemoveAll(profile)
+			}
+		})
+	}
+	b.sessions[s.id] = s
+	b.mu.Unlock()
+	ready := false
+	defer func() {
+		if !ready {
+			b.mu.Lock()
+			s.disconnected = true
+			b.mu.Unlock()
+			s.cancel()
+		}
+	}()
+	stop := context.AfterFunc(ctx, stopRoot)
+	err = chromedp.Do(root)
+	stop()
+	if err != nil {
+		s.cancel()
+		b.mu.Lock()
+		s.disconnected = true
+		b.mu.Unlock()
+		return nil, toolErr("browser_start_failed", "cannot launch visible browser in this desktop session")
+	}
+	tab := &browserTab{id: browserID("tab_"), ctx: root, cancel: func() {}, worlds: map[string]int{}}
+	s.tabs[tab.id] = tab
+	s.selected = tab.id
+	b.trackDownloads(s)
+	if err := chromedp.FromContext(root).Browser.Call(ctx, "Browser.setDownloadBehavior", map[string]any{"behavior": "deny"}, nil); err != nil {
+		s.cancel()
+		return nil, toolErr("browser_failed", "set safe download defaults")
+	}
+	if err := b.setupTab(ctx, tab); err != nil {
+		s.cancel()
+		return nil, err
+	}
+	if raw, _ := optionalString(args, "url"); raw != "" {
+		if err := b.checkURL(raw); err != nil {
+			s.cancel()
+			return nil, err
+		}
+		if err := tab.command(ctx, "Page.navigate", map[string]any{"url": raw}, nil); err != nil {
+			return nil, err
+		}
+	}
+	ready = true
+	return map[string]any{"browser_session_id": s.id, "tab_id": tab.id, "mode": mode, "status": "ready", "truncated": false}, nil
+}
+
+func (t *browserTab) command(ctx context.Context, method string, params, result any) error {
+	if t.ctx.Err() != nil {
+		return toolErr("disconnected", "browser tab closed")
+	}
+	if err := chromedp.FromContext(t.ctx).Target.Call(ctx, method, params, result); err != nil {
+		return toolErr("browser_failed", "browser rejected "+method)
+	}
+	return nil
+}
+
+func (b *browserManager) setupTab(ctx context.Context, t *browserTab) error {
+	events, stop := chromedp.FromContext(t.ctx).Target.Subscribe("Fetch.requestPaused")
+	go func() {
+		defer stop()
+		for {
+			select {
+			case <-t.ctx.Done():
+				return
+			case raw, ok := <-events:
+				if !ok {
+					return
+				}
+				var event struct {
+					ID      string `json:"requestId"`
+					Request struct {
+						URL string `json:"url"`
+					} `json:"request"`
+				}
+				if json.Unmarshal(raw, &event) != nil {
+					continue
+				}
+				requestCtx, cancel := context.WithTimeout(t.ctx, 5*time.Second)
+				if err := b.checkURL(event.Request.URL); err != nil {
+					_ = t.command(requestCtx, "Fetch.failRequest", map[string]any{"requestId": event.ID, "errorReason": "BlockedByClient"}, nil)
+				} else {
+					_ = t.command(requestCtx, "Fetch.continueRequest", map[string]any{"requestId": event.ID}, nil)
+				}
+				cancel()
+			}
+		}
+	}()
+	if err := t.command(ctx, "Fetch.enable", map[string]any{"patterns": []map[string]any{{"urlPattern": "*", "requestStage": "Request"}}}, nil); err != nil {
+		return err
+	}
+	for _, method := range []string{"Page.enable", "Runtime.enable", "Network.enable"} {
+		if err := t.command(ctx, method, map[string]any{}, nil); err != nil {
+			return err
+		}
+	}
+	for _, method := range []string{"Page.frameNavigated", "Page.navigatedWithinDocument", "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Network.loadingFailed", "Network.responseReceived"} {
+		events, stop := chromedp.FromContext(t.ctx).Target.Subscribe(method)
+		go func(method string) {
+			defer stop()
+			for {
+				select {
+				case <-t.ctx.Done():
+					return
+				case raw, ok := <-events:
+					if !ok {
+						return
+					}
+					var event map[string]any
+					if json.Unmarshal(raw, &event) != nil {
+						continue
+					}
+					t.eventMu.Lock()
+					if method == "Page.frameNavigated" || method == "Page.navigatedWithinDocument" {
+						t.snapshot = ""
+						t.worlds = map[string]int{}
+					}
+					if method == "Page.javascriptDialogOpening" {
+						t.dialog = true
+					}
+					if method == "Page.javascriptDialogClosed" {
+						t.dialog = false
+					}
+					response, _ := event["response"].(map[string]any)
+					status, _ := response["status"].(float64)
+					if method == "Runtime.exceptionThrown" || method == "Network.loadingFailed" || method == "Runtime.consoleAPICalled" && (event["type"] == "error" || event["type"] == "warning") || method == "Network.responseReceived" && status >= 400 {
+						if len(t.diagnostics) >= 100 {
+							t.diagnostics = t.diagnostics[1:]
+						}
+						entry := map[string]any{"event": method, "at": time.Now().UTC().Format(timeFormat)}
+						if raw, ok := response["url"].(string); ok {
+							entry["url"] = safeBrowserURL(raw)
+						}
+						if status >= 400 {
+							entry["detail"] = fmt.Sprintf("HTTP %.0f", status)
+						}
+						t.diagnostics = append(t.diagnostics, entry)
+					}
+					t.eventMu.Unlock()
+				}
+			}
+		}(method)
+	}
+	return nil
+}
+
+func (b *browserManager) execute(ctx context.Context, name string, args map[string]any) (any, error) {
+	if name == "browser_open" {
+		return b.open(ctx, args)
+	}
+	id, err := requiredString(args, "browser_session_id")
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	s := b.sessions[id]
+	b.mu.Unlock()
+	if s == nil {
+		return nil, toolErr("unknown_session", "unknown browser_session_id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b.mu.Lock()
+	if s.paused || s.disconnected {
+		b.mu.Unlock()
+		return nil, toolErr("access_paused", "browser session paused or disconnected")
+	}
+	callCtx, cancel := context.WithCancel(ctx)
+	s.active = cancel
+	b.mu.Unlock()
+	defer func() { cancel(); b.mu.Lock(); s.active = nil; b.mu.Unlock() }()
+	tabID, _ := optionalString(args, "tab_id")
+	if tabID == "" {
+		tabID = s.selected
+	}
+	t := s.tabs[tabID]
+	if t == nil {
+		return nil, toolErr("unknown_tab", "tab is not in this browser session")
+	}
+	if name == "browser_tabs" {
+		return b.tabs(callCtx, s, t, args)
+	}
+	t.eventMu.Lock()
+	dialog := t.dialog
+	t.eventMu.Unlock()
+	if dialog && !(name == "browser_interact" && args["action"] == "dialog") {
+		return map[string]any{"browser_session_id": id, "tab_id": tabID, "status": "waiting_user", "reason": "browser_dialog", "truncated": false}, nil
+	}
+	result, err := b.tabAction(callCtx, name, s, t, args)
+	if err != nil {
+		return nil, err
+	}
+	if object, ok := result.(map[string]any); ok {
+		object["browser_session_id"] = id
+		object["tab_id"] = tabID
+		if _, ok := object["status"]; !ok {
+			object["status"] = "completed"
+		}
+		if _, ok := object["truncated"]; !ok {
+			object["truncated"] = false
+		}
+	}
+	return result, nil
+}
+
+func (b *browserManager) tabs(ctx context.Context, s *browserSession, t *browserTab, args map[string]any) (any, error) {
+	action, _ := requiredString(args, "action")
+	if action == "list" {
+		available, err := chromedp.Targets(s.ctx)
+		if err != nil {
+			return nil, toolErr("disconnected", "cannot enumerate tabs")
+		}
+		for _, info := range available {
+			if info.Type != "page" || len(s.tabs) >= 16 {
+				continue
+			}
+			known := false
+			for _, tab := range s.tabs {
+				if chromedp.FromContext(tab.ctx).Target.TargetID == info.TargetID {
+					known = true
+					break
+				}
+			}
+			if known {
+				continue
+			}
+			if info.URL != "about:blank" {
+				if err := b.checkURL(info.URL); err != nil {
+					continue
+				}
+			}
+			child, cancel := chromedp.NewContext(s.ctx, chromedp.WithTargetID(target.ID(info.TargetID)))
+			if err := chromedp.Do(child); err != nil {
+				cancel()
+				continue
+			}
+			newTab := &browserTab{id: browserID("tab_"), ctx: child, cancel: cancel, worlds: map[string]int{}}
+			if err := b.setupTab(ctx, newTab); err != nil {
+				cancel()
+				continue
+			}
+			s.tabs[newTab.id] = newTab
+		}
+	}
+	switch action {
+	case "new":
+		if len(s.tabs) >= 16 {
+			return nil, toolErr("limit_reached", "at most sixteen tabs")
+		}
+		child, cancel := chromedp.NewContext(s.ctx)
+		if err := chromedp.Do(child); err != nil {
+			cancel()
+			return nil, toolErr("browser_failed", "create tab")
+		}
+		t = &browserTab{id: browserID("tab_"), ctx: child, cancel: cancel, worlds: map[string]int{}}
+		if err := b.setupTab(ctx, t); err != nil {
+			cancel()
+			return nil, err
+		}
+		s.tabs[t.id] = t
+		s.selected = t.id
+	case "select":
+		s.selected = t.id
+		if err := t.command(ctx, "Page.bringToFront", map[string]any{}, nil); err != nil {
+			return nil, err
+		}
+	case "close":
+		if len(s.tabs) == 1 {
+			return nil, toolErr("last_tab", "disconnect the session to close its last tab")
+		}
+		if err := chromedp.FromContext(s.ctx).Browser.Call(ctx, "Target.closeTarget", map[string]any{"targetId": chromedp.FromContext(t.ctx).Target.TargetID}, nil); err != nil {
+			return nil, toolErr("browser_failed", "close tab")
+		}
+		delete(s.tabs, t.id)
+		if s.selected == t.id {
+			for id := range s.tabs {
+				s.selected = id
+				break
+			}
+		}
+	case "list":
+	default:
+		return nil, toolErr("invalid_arguments", "unknown tabs action")
+	}
+	list := []map[string]any{}
+	for _, tab := range s.tabs {
+		var tree map[string]any
+		if err := tab.command(ctx, "Page.getFrameTree", map[string]any{}, &tree); err != nil {
+			continue
+		}
+		frame, _ := tree["frameTree"].(map[string]any)
+		f, _ := frame["frame"].(map[string]any)
+		u, _ := f["url"].(string)
+		list = append(list, map[string]any{"tab_id": tab.id, "url": safeBrowserURL(u)})
+	}
+	return map[string]any{"browser_session_id": s.id, "tab_id": s.selected, "tabs": list, "status": "ready", "truncated": false}, nil
+}
+
+func (b *browserManager) Close() {
+	b.mu.Lock()
+	b.closed = true
+	var cancels []context.CancelFunc
+	for _, op := range b.operations {
+		if op.cancel != nil {
+			op.cancel()
+		}
+	}
+	for _, s := range b.sessions {
+		s.disconnected = true
+		cancels = append(cancels, s.cancel)
+	}
+	b.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (b *browserManager) screenshot(ctx context.Context, s *browserSession, t *browserTab, args map[string]any) (any, error) {
+	full, _, err := optionalBool(args, "full_page")
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Data string `json:"data"`
+	}
+	params := map[string]any{"format": "jpeg", "quality": 60, "captureBeyondViewport": full}
+	if full {
+		var metrics struct {
+			Size struct{ Width, Height float64 } `json:"cssContentSize"`
+		}
+		if err := t.command(ctx, "Page.getLayoutMetrics", map[string]any{}, &metrics); err != nil {
+			return nil, err
+		}
+		if metrics.Size.Width*metrics.Size.Height > 50_000_000 {
+			return nil, toolErr("image_too_large", "page exceeds 50 megapixels; use viewport")
+		}
+		params["clip"] = map[string]any{"x": 0, "y": 0, "width": metrics.Size.Width, "height": metrics.Size.Height, "scale": 1}
+	}
+	if err := t.command(ctx, "Page.captureScreenshot", params, &result); err != nil {
+		return nil, err
+	}
+	data, err := base64.StdEncoding.DecodeString(result.Data)
+	if err != nil {
+		return nil, toolErr("browser_failed", "invalid screenshot")
+	}
+	truncated := false
+	budget := min(b.executor.maxResponse/2, 1<<20)
+	for len(base64.StdEncoding.EncodeToString(data)) > budget {
+		img, err := jpeg.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, toolErr("browser_failed", "decode screenshot")
+		}
+		bounds := img.Bounds()
+		width, height := bounds.Dx()*3/4, bounds.Dy()*3/4
+		if width < 64 || height < 64 {
+			return nil, toolErr("image_too_large", "response budget cannot fit screenshot")
+		}
+		resized := image.NewRGBA(image.Rect(0, 0, width, height))
+		for y := range height {
+			for x := range width {
+				resized.Set(x, y, img.At(bounds.Min.X+x*bounds.Dx()/width, bounds.Min.Y+y*bounds.Dy()/height))
+			}
+		}
+		var encoded bytes.Buffer
+		if err := jpeg.Encode(&encoded, resized, &jpeg.Options{Quality: 55}); err != nil {
+			return nil, err
+		}
+		data = encoded.Bytes()
+		truncated = true
+	}
+	metadata := map[string]any{"browser_session_id": s.id, "tab_id": t.id, "status": "completed", "mime_type": "image/jpeg", "truncated": truncated}
+	if save, _, err := optionalBool(args, "save"); err != nil {
+		return nil, err
+	} else if save {
+		path := filepath.Join(b.config.Dir, "artifacts", browserID("image_")+".jpg")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			return nil, toolErr("io_error", "save screenshot", err)
+		}
+		metadata["artifact_path"] = path
+	}
+	return browserImage{metadata, base64.StdEncoding.EncodeToString(data)}, nil
+}

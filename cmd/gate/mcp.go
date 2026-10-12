@@ -152,12 +152,14 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentRequest := body
+	version := "v3"
 	if r.URL.Path == "/mcp/v4" || r.URL.Path == "/mcp/v5" {
-		agentRequest, err = markContract(body, strings.TrimPrefix(r.URL.Path, "/mcp/"))
-		if err != nil {
-			writeRPCError(w, msg.ID, -32602, err.Error())
-			return
-		}
+		version = strings.TrimPrefix(r.URL.Path, "/mcp/")
+	}
+	agentRequest, err = markContract(body, version)
+	if err != nil {
+		writeRPCError(w, msg.ID, -32602, err.Error())
+		return
 	}
 	resp, err := rt.callAgent(r.Context(), agentRequest, s.timeout)
 	if err != nil {

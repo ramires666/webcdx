@@ -42,6 +42,7 @@ type executorConfig struct {
 	MaxLogBytes      int64
 	MaxResponseBytes int
 	Verbose          bool
+	Browser          browserConfig
 }
 
 type nativeExecutor struct {
@@ -53,6 +54,7 @@ type nativeExecutor struct {
 	maxResponse  int
 	verbose      bool
 	execMu       sync.Mutex
+	browser      *browserManager
 
 	mu       sync.Mutex
 	sessions map[string]*processSession
@@ -94,7 +96,12 @@ func newNativeExecutor() (*nativeExecutor, error) {
 			logDir = filepath.Join(cwd, "logs")
 		}
 	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, err
+	}
 	return newNativeExecutorWithConfig(executorConfig{
+		Browser:          browserConfig{Enabled: env("WEBCODEX_BROWSER_ENABLED", "0") == "1", Executable: env("WEBCODEX_BROWSER_PATH", ""), Dir: env("WEBCODEX_BROWSER_DIR", filepath.Join(configDir, "webcodex", "browser")), AllowLocal: env("WEBCODEX_BROWSER_ALLOW_LOCAL", "0") == "1"},
 		AllowedRoots:     splitPathList(env("WEBCODEX_ALLOWED_ROOTS", cwd)),
 		LogDir:           logDir,
 		ProcessTTL:       durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour),
@@ -151,6 +158,10 @@ func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error)
 	if err := e.restoreSessions(); err != nil {
 		return nil, fmt.Errorf("restore command sessions: %w", err)
 	}
+	e.browser, err = newBrowserManager(e, config.Browser)
+	if err != nil {
+		return nil, fmt.Errorf("initialize browser: %w", err)
+	}
 	go e.cleanupLoop()
 	return e, nil
 }
@@ -176,7 +187,11 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (jso
 	case "ping", "notifications/initialized":
 		return rpcResult(message.ID, map[string]any{}), nil
 	case "tools/list":
-		return rpcResult(message.ID, map[string]any{"tools": localTools(version)}), nil
+		tools := localTools(version)
+		if version == "v5" && e.browser.config.Enabled {
+			tools = append(tools, browserToolSchemas()...)
+		}
+		return rpcResult(message.ID, map[string]any{"tools": tools}), nil
 	case "tools/call":
 		var call struct {
 			Name      string         `json:"name"`
@@ -208,6 +223,9 @@ func contractVersion(params json.RawMessage) string {
 
 func (e *nativeExecutor) executeTool(ctx context.Context, version, name string, args map[string]any) (any, error) {
 	if version == "v5" {
+		if strings.HasPrefix(name, "browser_") {
+			return e.browser.call(ctx, name, args)
+		}
 		var result any
 		var err error
 		switch name {
@@ -283,6 +301,10 @@ func rpcError(id json.RawMessage, code int, message string) json.RawMessage {
 }
 
 func toolResult(id json.RawMessage, value any, callErr error) json.RawMessage {
+	if img, ok := value.(browserImage); ok && callErr == nil {
+		encoded, _ := json.Marshal(img.Result)
+		return rpcResult(id, map[string]any{"isError": false, "structuredContent": img.Result, "content": []map[string]any{{"type": "text", "text": string(encoded)}, {"type": "image", "mimeType": "image/jpeg", "data": img.Data}}})
+	}
 	if callErr != nil {
 		code := "operation_failed"
 		var coded *codedError
@@ -449,5 +471,10 @@ func randomSessionID() (string, error) {
 }
 
 func (e *nativeExecutor) Close() {
-	e.closed.Do(func() { close(e.stop) })
+	e.closed.Do(func() {
+		close(e.stop)
+		if e.browser != nil {
+			e.browser.Close()
+		}
+	})
 }
