@@ -168,6 +168,12 @@ func (s *server) routes() http.Handler {
 	})
 
 	// MCP endpoints
+	mux.HandleFunc("GET /mcp/v5", s.handleMCP)
+	mux.HandleFunc("POST /mcp/v5", s.handleMCP)
+	mux.HandleFunc("DELETE /mcp/v5", s.handleMCP)
+	mux.HandleFunc("HEAD /mcp/v5", s.handleMCP)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp/v5", s.handleProtectedResource)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server/mcp/v5", s.handleOAuthServer)
 	mux.HandleFunc("GET /mcp", s.handleMCP)
 	mux.HandleFunc("POST /mcp", s.handleMCP)
 	mux.HandleFunc("DELETE /mcp", s.handleMCP)

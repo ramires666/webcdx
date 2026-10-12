@@ -1,6 +1,9 @@
 package main
 
 func localTools(version string) []mcpToolDefinition {
+	if version == "v5" {
+		return commandToolsV5(localTools("v4"))
+	}
 	tool := func(name, description string, input, output map[string]any, readOnly, destructive, openWorld bool) mcpToolDefinition {
 		return mcpToolDefinition{
 			Name: name, Description: description, InputSchema: input, OutputSchema: output,

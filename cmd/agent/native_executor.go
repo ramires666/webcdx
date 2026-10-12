@@ -52,6 +52,7 @@ type nativeExecutor struct {
 	maxLogBytes  int64
 	maxResponse  int
 	verbose      bool
+	execMu       sync.Mutex
 
 	mu       sync.Mutex
 	sessions map[string]*processSession
@@ -198,7 +199,7 @@ func contractVersion(params json.RawMessage) string {
 	var object map[string]json.RawMessage
 	if json.Unmarshal(params, &object) == nil {
 		var version string
-		if json.Unmarshal(object[contractMarker], &version) == nil && version == "v4" {
+		if json.Unmarshal(object[contractMarker], &version) == nil && (version == "v4" || version == "v5") {
 			return version
 		}
 	}
@@ -206,6 +207,30 @@ func contractVersion(params json.RawMessage) string {
 }
 
 func (e *nativeExecutor) executeTool(ctx context.Context, version, name string, args map[string]any) (any, error) {
+	if version == "v5" {
+		var result any
+		var err error
+		switch name {
+		case "exec_command":
+			result, err = e.execCommandOnce(ctx, args)
+		case "list_commands":
+			return e.listCommands(args)
+		default:
+			result, err = e.executeTool(ctx, "v4", name, args)
+		}
+		if err == nil {
+			if object, ok := result.(map[string]any); ok {
+				if id, ok := object["session_id"].(string); ok {
+					e.mu.Lock()
+					session := e.sessions[id]
+					object["pid"] = session.pid
+					e.mu.Unlock()
+					object["events"] = e.commandEvents(session)
+				}
+			}
+		}
+		return result, err
+	}
 	switch name {
 	case "read_file":
 		return e.readFile(args)

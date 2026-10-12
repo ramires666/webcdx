@@ -152,8 +152,8 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentRequest := body
-	if r.URL.Path == "/mcp/v4" {
-		agentRequest, err = markContract(body, "v4")
+	if r.URL.Path == "/mcp/v4" || r.URL.Path == "/mcp/v5" {
+		agentRequest, err = markContract(body, strings.TrimPrefix(r.URL.Path, "/mcp/"))
 		if err != nil {
 			writeRPCError(w, msg.ID, -32602, err.Error())
 			return
@@ -232,7 +232,7 @@ func (s *server) handleMCPStream(w http.ResponseWriter, r *http.Request, authori
 
 func (s *server) writeMCPUnauthorized(w http.ResponseWriter, r *http.Request) {
 	mcpPath := "/mcp"
-	if r.URL.Path == "/mcp/v2" || r.URL.Path == "/mcp/v3" || r.URL.Path == "/mcp/v4" {
+	if r.URL.Path == "/mcp/v2" || r.URL.Path == "/mcp/v3" || r.URL.Path == "/mcp/v4" || r.URL.Path == "/mcp/v5" {
 		mcpPath = r.URL.Path
 	}
 	w.Header().Set(

@@ -86,6 +86,7 @@ func handleRequest(
 	}
 	defer cancel()
 
+	callCtx = context.WithValue(callCtx, commandRequestID{}, request.ID)
 	response, err := runner.call(callCtx, request.Request)
 	actionResult := formatActionResponse(response, err, time.Since(started))
 	log.Printf("◀ %s (id=%s)", actionResult, request.ID)

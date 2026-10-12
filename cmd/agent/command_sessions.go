@@ -19,6 +19,9 @@ import (
 )
 
 type processSession struct {
+	requestKeyHash  string
+	requestHash     string
+	requestID       string
 	id              string
 	command         string
 	cwd             string
@@ -45,6 +48,9 @@ type processSession struct {
 }
 
 type sessionMetadata struct {
+	RequestKeyHash  string     `json:"request_key_hash,omitempty"`
+	RequestHash     string     `json:"request_hash,omitempty"`
+	RequestID       string     `json:"request_id,omitempty"`
 	ID              string     `json:"session_id"`
 	CWD             string     `json:"cwd"`
 	PID             int        `json:"pid"`
@@ -206,9 +212,21 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 		metadataPath: filepath.Join(sessionDir, "metadata.json"), stdoutPath: stdoutPath, stderrPath: stderrPath,
 		cmd: cmd, stdoutFile: stdoutFile, stderrFile: stderrFile, budget: budget, done: make(chan struct{}),
 	}
+	if identity, ok := ctx.Value(commandIdentity{}).(commandIdentity); ok {
+		session.requestKeyHash, session.requestHash = identity.key, identity.hash
+	}
+	session.requestID, _ = ctx.Value(commandRequestID{}).(string)
+	// Persist the reservation before spawning: a crash must never cause a retry to spawn twice.
+	session.status = "starting"
+	if err := e.persistSession(session); err != nil {
+		stdoutFile.Close()
+		stderrFile.Close()
+		return nil, toolErr("io_error", "reserve command session", err)
+	}
 	e.mu.Lock()
 	e.sessions[id] = session
 	e.mu.Unlock()
+	e.commandEvent(session, "received")
 	if e.verbose {
 		if hasCommand {
 			log.Printf("[session=%s] COMMAND %q cwd=%q", id, command, cwd)
@@ -226,13 +244,16 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 		session.closeDone()
 		e.mu.Unlock()
 		_ = e.persistSession(session)
+		e.commandEvent(session, "start_failed")
 		return e.sessionResult(id, nil, nil, 64<<10, v4, false)
 	}
 	e.mu.Lock()
+	session.status = "running"
 	session.pid = cmd.Process.Pid
 	session.processIdentity, _ = processIdentity(session.pid)
 	log.Printf("[session=%s] START pid=%d cwd=%q timeout=%ds stdout=%q stderr=%q", id, session.pid, cwd, timeoutSeconds, stdoutPath, stderrPath)
 	e.mu.Unlock()
+	e.commandEvent(session, "started")
 	go e.waitProcess(session)
 	go e.commandHeartbeat(session)
 	if err := e.persistSession(session); err != nil {
@@ -325,6 +346,7 @@ func (e *nativeExecutor) waitProcess(session *processSession) {
 	log.Printf("[session=%s] EXIT status=%s exit_code=%v elapsed=%s error=%v", session.id, session.status, exitCodeValue(session.exitCode), session.finishedAt.Sub(session.startedAt).Round(time.Millisecond), err)
 	e.mu.Unlock()
 	_ = e.persistSession(session)
+	e.commandEvent(session, "finished")
 	session.closeDone()
 }
 
@@ -452,6 +474,7 @@ func (e *nativeExecutor) stopSession(id, status string) error {
 	log.Printf("[session=%s] STOP requested status=%s pid=%d", id, status, pid)
 	e.mu.Unlock()
 	_ = e.persistSession(session)
+	e.commandEvent(session, status)
 	if cmd != nil {
 		if err := terminateProcessTree(cmd); err != nil {
 			log.Printf("[session=%s] STOP_FAILED error=%q", id, err.Error())
@@ -642,6 +665,7 @@ func (e *nativeExecutor) persistSession(session *processSession) error {
 	defer session.metadataMu.Unlock()
 	e.mu.Lock()
 	metadata := sessionMetadata{
+		RequestKeyHash: session.requestKeyHash, RequestHash: session.requestHash, RequestID: session.requestID,
 		ID: session.id, CWD: session.cwd, PID: session.pid, ProcessIdentity: session.processIdentity,
 		Status: session.status, StartedAt: session.startedAt, ExitCode: session.exitCode, TimeoutDeadline: session.deadline,
 		StdoutTruncated: session.stdoutTruncated, StderrTruncated: session.stderrTruncated,
@@ -687,6 +711,7 @@ func (e *nativeExecutor) restoreSessions() error {
 			continue
 		}
 		session := &processSession{
+			requestKeyHash: metadata.RequestKeyHash, requestHash: metadata.RequestHash, requestID: metadata.RequestID,
 			id: metadata.ID, cwd: metadata.CWD, pid: metadata.PID, processIdentity: metadata.ProcessIdentity,
 			status: metadata.Status, startedAt: metadata.StartedAt, exitCode: metadata.ExitCode, deadline: metadata.TimeoutDeadline,
 			sessionDir: sessionDir, metadataPath: metadataPath, stdoutPath: filepath.Join(sessionDir, "stdout.log"),
@@ -703,7 +728,10 @@ func (e *nativeExecutor) restoreSessions() error {
 			go e.commandHeartbeat(session)
 			continue
 		}
-		if session.status == "running" {
+		if session.status == "starting" {
+			session.status = "outcome_unknown"
+			session.finishedAt = time.Now().UTC()
+		} else if session.status == "running" {
 			session.status = "orphaned"
 			session.finishedAt = time.Now().UTC()
 		}
@@ -732,6 +760,7 @@ func (e *nativeExecutor) monitorRestored(session *processSession) {
 				log.Printf("[session=%s] EXIT status=%s exit_code=unknown (restored process)", session.id, session.status)
 				e.mu.Unlock()
 				_ = e.persistSession(session)
+				e.commandEvent(session, "finished")
 				session.closeDone()
 				return
 			}
