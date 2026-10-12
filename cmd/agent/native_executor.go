@@ -100,8 +100,9 @@ func newNativeExecutor() (*nativeExecutor, error) {
 	if err != nil {
 		return nil, err
 	}
+	browserDir := filepath.Join(configDir, "webcodex", "browser", commandHash(map[string]string{"gate": env("WEBCODEX_GATE_URL", ""), "agent": env("WEBCODEX_AGENT_TOKEN", "")})[:16])
 	return newNativeExecutorWithConfig(executorConfig{
-		Browser:          browserConfig{Enabled: env("WEBCODEX_BROWSER_ENABLED", "0") == "1", Executable: env("WEBCODEX_BROWSER_PATH", ""), Dir: env("WEBCODEX_BROWSER_DIR", filepath.Join(configDir, "webcodex", "browser")), AllowLocal: env("WEBCODEX_BROWSER_ALLOW_LOCAL", "0") == "1", Personal: env("WEBCODEX_BROWSER_PERSONAL_ENABLED", "0") == "1", DownloadDir: env("WEBCODEX_BROWSER_DOWNLOAD_DIR", "")},
+		Browser:          browserConfig{Enabled: env("WEBCODEX_BROWSER_ENABLED", "0") == "1", Executable: env("WEBCODEX_BROWSER_PATH", ""), Dir: env("WEBCODEX_BROWSER_DIR", browserDir), AllowLocal: env("WEBCODEX_BROWSER_ALLOW_LOCAL", "0") == "1", Personal: env("WEBCODEX_BROWSER_PERSONAL_ENABLED", "0") == "1", DownloadDir: env("WEBCODEX_BROWSER_DOWNLOAD_DIR", "")},
 		AllowedRoots:     splitPathList(env("WEBCODEX_ALLOWED_ROOTS", cwd)),
 		LogDir:           logDir,
 		ProcessTTL:       durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour),
@@ -178,11 +179,15 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (jso
 	version := contractVersion(message.Params)
 	switch message.Method {
 	case "initialize":
+		instructions := protocol.ExecutionInstructions
+		if version == "v5" {
+			instructions += protocol.V5Instructions
+		}
 		return rpcResult(message.ID, map[string]any{
 			"protocolVersion": "2025-06-18",
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "local-workspace", "title": "Local Workspace", "version": "1.0.0"},
-			"instructions":    protocol.ExecutionInstructions,
+			"instructions":    instructions,
 		}), nil
 	case "ping", "notifications/initialized":
 		return rpcResult(message.ID, map[string]any{}), nil
@@ -241,7 +246,17 @@ func (e *nativeExecutor) executeTool(ctx context.Context, version, name string, 
 				if id, ok := object["session_id"].(string); ok {
 					e.mu.Lock()
 					session := e.sessions[id]
+					if session == nil {
+						e.mu.Unlock()
+						return nil, toolErr("unknown_session", "command session expired")
+					}
 					object["pid"] = session.pid
+					if session.status == "outcome_unknown" {
+						object["status"] = "outcome_unknown"
+					}
+					if session.status == "starting" {
+						object["status"] = "starting"
+					}
 					e.mu.Unlock()
 					object["events"] = e.commandEvents(session)
 				}

@@ -36,14 +36,19 @@ export WEBCODEX_LOG_DIR="/var/log/webcodex-agent"
 
 | Поле | Значение |
 | --- | --- |
-| Server URL | `https://<ваш-домен>/mcp/v4` |
+| Server URL | `https://<ваш-домен>/mcp/v5` |
 | Authorization URL | `https://<ваш-домен>/oauth/authorize` |
 | Token URL | `https://<ваш-домен>/oauth/token` |
 | Client ID | значение из `/admin` |
 | Client Secret | значение из `/admin` |
 | OAuth | Authorization Code + PKCE S256 |
 
-Это MCP endpoint, а не OpenAPI schema. После подключения начните новый чат и убедитесь, что доступны одиннадцать инструментов: `read_file`, `write_file`, `list_directory`, `search_files`, `exec_command`, `poll_command`, `cancel_command`, `edit_file`, `find_files`, `move_path`, `delete_path`.
+Это MCP endpoint, а не OpenAPI schema. После подключения начните новый чат:
+v5 предоставляет двенадцать инструментов (одиннадцать операций v4 плюс
+`list_commands`), а при `WEBCODEX_BROWSER_ENABLED=1` — ещё десять браузерных.
+Tool policy может скрывать часть списка. `exec_command` v5 требует `request_key`.
+Для личных вкладок и установки расширения следуйте [инструкции браузера](BROWSER_GUIDE.ru.md).
+Для отката остаются `/mcp/v4` и `/mcp/v3`.
 
 ## Диагностика
 
@@ -63,4 +68,4 @@ export WEBCODEX_LOG_DIR="/var/log/webcodex-agent"
 - `path is outside WEBCODEX_ALLOWED_ROOTS`: добавьте нужный абсолютный корень и перезапустите agent.
 - Долгая команда: используйте `session_id` и раздельные offsets с `poll_command`; полный вывод остаётся в `stdout_log_path` и `stderr_log_path`.
 - Потерян секрет: выполните ротацию в `/admin`; старые токены перестанут работать.
-- После смены инструментов всё ещё виден старый список: создайте новый connector на `/mcp/v4` и начните новый чат.
+- После смены инструментов всё ещё виден старый список: создайте новый connector на `/mcp/v5` и начните новый чат.

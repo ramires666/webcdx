@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -137,5 +138,65 @@ func TestExpiredRequestCannotEnterQueue(t *testing.T) {
 	})
 	if err == nil || len(runtimeState.queue) != 0 {
 		t.Fatalf("expired request queued: err=%v len=%d", err, len(runtimeState.queue))
+	}
+}
+
+func TestMCPV5RoutingCannotBeSpoofedOrRunAsNotification(t *testing.T) {
+	srv, cleanup := setupTestServer(t)
+	defer cleanup()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := srv.store.CreateAgent(ctx, Agent{ID: "v5-contract", Name: "V5", Enabled: true, AgentTokenHash: hashSecret("agent"), OAuthClientID: "v5-client"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.CreateAccessToken(ctx, AccessToken{TokenHash: hashSecret("client"), AgentID: "v5-contract", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	rt := srv.runtimeFor("v5-contract")
+	_, stream, _ := rt.activateAgentStream(ctx)
+	defer rt.deactivateAgentStream(stream)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case request := <-rt.queue:
+				var message struct {
+					Params map[string]any `json:"params"`
+				}
+				_ = json.Unmarshal(request.Request, &message)
+				response, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"contract": message.Params["_webcodex_contract"], "tools": []any{}}})
+				rt.mu.Lock()
+				ch := rt.pending[request.ID]
+				rt.mu.Unlock()
+				if ch != nil {
+					ch <- protocol.AgentResponse{ID: request.ID, Response: response}
+				}
+			}
+		}
+	}()
+	for _, version := range []string{"v3", "v4", "v5"} {
+		req := httptest.NewRequest("POST", "/mcp/"+version, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_webcodex_contract":"v5"}}`))
+		req.Header.Set("Authorization", "Bearer client")
+		recorder := httptest.NewRecorder()
+		srv.routes().ServeHTTP(recorder, req)
+		if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"contract":"`+version+`"`) {
+			t.Fatalf("contract route %s: %s", version, recorder.Body.String())
+		}
+	}
+	req := httptest.NewRequest("POST", "/mcp/v3", strings.NewReader(`{"jsonrpc":"2.0","method":"tools/call","params":{"_webcodex_contract":"v5","name":"browser_open","arguments":{"mode":"clean","request_key":"notification"}}}`))
+	req.Header.Set("Authorization", "Bearer client")
+	recorder := httptest.NewRecorder()
+	srv.routes().ServeHTTP(recorder, req)
+	if !strings.Contains(recorder.Body.String(), "tool requests require an id") {
+		t.Fatalf("notification bypassed tool validation: %s", recorder.Body.String())
+	}
+	if len(rt.queue) != 0 {
+		t.Fatal("tool notification reached agent queue")
+	}
+	unauthorized := httptest.NewRecorder()
+	srv.routes().ServeHTTP(unauthorized, httptest.NewRequest("POST", "/mcp/v5", strings.NewReader(`{}`)))
+	if unauthorized.Code != 401 || !strings.Contains(unauthorized.Header().Get("WWW-Authenticate"), "/mcp/v5") {
+		t.Fatal("v5 OAuth challenge missing")
 	}
 }

@@ -94,6 +94,10 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("mcp request agent=%s method=%q id=%s bytes=%d", agent.ID, msg.Method, string(msg.ID), len(body))
 
 	if msg.Method == "initialize" {
+		instructions := protocol.ExecutionInstructions
+		if r.URL.Path == "/mcp/v5" {
+			instructions += protocol.V5Instructions
+		}
 		writeJSON(w, map[string]any{
 			"jsonrpc": "2.0",
 			"id":      msg.ID,
@@ -109,7 +113,7 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 					"title":   "Local Workspace",
 					"version": "1.0.0",
 				},
-				"instructions": protocol.ExecutionInstructions,
+				"instructions": instructions,
 			},
 		})
 		log.Printf("mcp response ok agent=%s method=%q id=%s local=true elapsed=%s", agent.ID, msg.Method, string(msg.ID), time.Since(started))

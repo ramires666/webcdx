@@ -177,6 +177,9 @@ func browserMutation(name string, args map[string]any) bool {
 }
 
 func (b *browserManager) call(ctx context.Context, name string, args map[string]any) (any, error) {
+	if ctx.Err() != nil {
+		return nil, toolErr("cancelled", "browser request already expired")
+	}
 	if !b.config.Enabled {
 		return nil, toolErr("browser_disabled", "enable WEBCODEX_BROWSER_ENABLED locally")
 	}
@@ -212,6 +215,9 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 			}
 		}
 	}
+	completedReads := 0
+	oldestReadID := ""
+	var oldestReadAt time.Time
 	for id, op := range b.operations {
 		if op.Status != "running" && time.Since(op.At) > 24*time.Hour {
 			if op.KeyHash != "" {
@@ -224,8 +230,15 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 			continue
 		}
 		if op.KeyHash == "" && op.Status != "running" {
-			delete(b.operations, id)
+			completedReads++
+			if oldestReadID == "" || op.At.Before(oldestReadAt) {
+				oldestReadID = id
+				oldestReadAt = op.At
+			}
 		}
+	}
+	if completedReads >= 32 {
+		delete(b.operations, oldestReadID)
 	}
 	running := 0
 	for _, op := range b.operations {
@@ -487,14 +500,14 @@ func (b *browserManager) open(ctx context.Context, args map[string]any) (any, er
 			return nil, toolErr("profile_in_use", "persistent profile already open")
 		}
 	}
-	options := []chromedp.ExecAllocatorOption{chromedp.NoFirstRun, chromedp.NoDefaultBrowserCheck, chromedp.UserDataDir(profile), chromedp.WindowSize(1280, 900), chromedp.WSURLReadTimeout(10 * time.Second)}
+	options := []chromedp.ExecAllocatorOption{chromedp.NoFirstRun, chromedp.NoDefaultBrowserCheck, chromedp.UserDataDir(profile), chromedp.WindowSize(1280, 900), chromedp.WSURLReadTimeout(10 * time.Second), chromedp.Flag("disable-background-timer-throttling", true), chromedp.Flag("disable-renderer-backgrounding", true), chromedp.Flag("disable-backgrounding-occluded-windows", true)}
 	if b.config.Executable != "" {
 		options = append(options, chromedp.ExecPath(b.config.Executable))
 	}
 	if b.config.Headless {
 		options = append(options, chromedp.Headless)
 	} else {
-		options = append(options, chromedp.VisibleWindow)
+		options = append(options, chromedp.VisibleWindow, chromedp.Flag("start-maximized", false))
 	}
 	alloc, stopAlloc := chromedp.NewExecAllocator(context.Background(), options...)
 	root, stopRoot := chromedp.NewContext(alloc, chromedp.WithLogf(func(string, ...any) {}), chromedp.WithErrorf(func(string, ...any) {}))
@@ -906,6 +919,11 @@ func (b *browserManager) screenshot(ctx context.Context, s *browserSession, t *b
 		truncated = true
 	}
 	metadata := map[string]any{"browser_session_id": s.id, "tab_id": t.id, "status": "completed", "mime_type": "image/jpeg", "truncated": truncated}
+	dimensions, err := jpeg.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, toolErr("browser_failed", "decode screenshot dimensions")
+	}
+	metadata["image_width"], metadata["image_height"] = dimensions.Width, dimensions.Height
 	if save, _, err := optionalBool(args, "save"); err != nil {
 		return nil, err
 	} else if save {

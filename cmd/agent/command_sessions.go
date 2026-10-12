@@ -502,6 +502,12 @@ func (e *nativeExecutor) sessionResult(id string, stdoutOffset, stderrOffset *in
 	stdoutCapped, stderrCapped := session.stdoutTruncated, session.stderrTruncated
 	e.mu.Unlock()
 	durationEnd := time.Now().UTC()
+	if status == "outcome_unknown" {
+		status = "orphaned"
+	}
+	if status == "starting" {
+		status = "running"
+	}
 	if !finishedAt.IsZero() {
 		durationEnd = finishedAt
 	}

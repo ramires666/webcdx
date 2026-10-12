@@ -24,6 +24,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		"events":    map[string]any{"type": "array", "items": object(map[string]any{"event": str(), "at": str(), "url": str(), "detail": str()}, "event", "at")},
 		"mime_type": str(), "artifact_path": str(), "path": str(), "download_id": str(), "bytes": integer(0, 1<<30),
 		"viewport_width": integer(1, 100000), "viewport_height": integer(1, 100000),
+		"image_width": integer(1, 100000), "image_height": integer(1, 100000),
 		"downloads":     map[string]any{"type": "array", "items": object(map[string]any{"download_id": str(), "status": str(), "bytes": integer(0, 1<<30)}, "download_id", "status", "bytes")},
 		"accessibility": map[string]any{"type": "array", "items": object(map[string]any{"node_id": str(), "role": str(), "name": str(), "children": map[string]any{"type": []string{"array", "null"}, "items": str()}}, "node_id", "role", "name", "children")},
 	}, "status", "truncated")

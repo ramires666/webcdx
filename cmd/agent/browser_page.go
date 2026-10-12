@@ -248,18 +248,21 @@ func (b *browserManager) interact(ctx context.Context, s *browserSession, t *bro
 		if width != viewport.Width || height != viewport.Height || x >= width || y >= height || x < 0 || y < 0 {
 			return nil, toolErr("viewport_changed", "coordinates do not match viewport")
 		}
+		endX, endY := x, y
+		if action == "drag" {
+			endX, err = optionalInt(args, "end_x", -1, 0, width-1)
+			if err != nil || endX < 0 {
+				return nil, toolErr("invalid_arguments", "end_x required")
+			}
+			endY, err = optionalInt(args, "end_y", -1, 0, height-1)
+			if err != nil || endY < 0 {
+				return nil, toolErr("invalid_arguments", "end_y required")
+			}
+		}
 		if err := t.command(ctx, "Input.dispatchMouseEvent", map[string]any{"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}, nil); err != nil {
 			return nil, err
 		}
 		if action == "drag" {
-			endX, err := optionalInt(args, "end_x", -1, 0, width-1)
-			if err != nil || endX < 0 {
-				return nil, toolErr("invalid_arguments", "end_x required")
-			}
-			endY, err := optionalInt(args, "end_y", -1, 0, height-1)
-			if err != nil || endY < 0 {
-				return nil, toolErr("invalid_arguments", "end_y required")
-			}
 			for i := 1; i <= 10; i++ {
 				if err := t.command(ctx, "Input.dispatchMouseEvent", map[string]any{"type": "mouseMoved", "x": x + (endX-x)*i/10, "y": y + (endY-y)*i/10, "buttons": 1}, nil); err != nil {
 					return nil, err
@@ -290,7 +293,20 @@ func (b *browserManager) interact(ctx context.Context, s *browserSession, t *bro
 	script := ""
 	switch action {
 	case "click":
-		script = `if(el.disabled)throw Error('disabled');el.scrollIntoView({block:'center'});el.click();`
+		if err := t.command(ctx, "Page.bringToFront", map[string]any{}, nil); err != nil {
+			return nil, err
+		}
+		x, y, err := b.elementPoint(ctx, t, frame, locator)
+		if err != nil {
+			return nil, err
+		}
+		if err := t.command(ctx, "Input.dispatchMouseEvent", map[string]any{"type": "mouseMoved", "x": x, "y": y}, nil); err != nil {
+			return nil, err
+		}
+		if err := t.command(ctx, "Input.dispatchMouseEvent", map[string]any{"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}, nil); err != nil {
+			return nil, err
+		}
+		return map[string]any{}, t.command(ctx, "Input.dispatchMouseEvent", map[string]any{"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}, nil)
 	case "fill":
 		if info.Password {
 			return map[string]any{"status": "waiting_user", "reason": "password_entry"}, nil
@@ -316,35 +332,55 @@ func (b *browserManager) interact(ctx context.Context, s *browserSession, t *bro
 		}
 		return map[string]any{}, t.command(ctx, "Input.dispatchKeyEvent", map[string]any{"type": "keyUp", "key": key, "windowsVirtualKeyCode": code}, nil)
 	case "hover":
-		var rect struct{ X, Y float64 }
-		if err := b.eval(ctx, t, frame, `(()=>{`+locator+`el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return {X:r.x+r.width/2,Y:r.y+r.height/2}})()`, &rect); err != nil {
+		x, y, err := b.elementPoint(ctx, t, frame, locator)
+		if err != nil {
 			return nil, err
 		}
-		if frame != "" {
-			var owner struct {
-				ID int `json:"backendNodeId"`
-			}
-			if err := t.command(ctx, "DOM.getFrameOwner", map[string]any{"frameId": frame}, &owner); err != nil {
-				return nil, err
-			}
-			var box struct {
-				Model struct {
-					Content []float64 `json:"content"`
-				} `json:"model"`
-			}
-			if err := t.command(ctx, "DOM.getBoxModel", map[string]any{"backendNodeId": owner.ID}, &box); err != nil {
-				return nil, err
-			}
-			if len(box.Model.Content) >= 2 {
-				rect.X += box.Model.Content[0]
-				rect.Y += box.Model.Content[1]
-			}
-		}
-		return map[string]any{}, t.command(ctx, "Input.dispatchMouseEvent", map[string]any{"type": "mouseMoved", "x": rect.X, "y": rect.Y}, nil)
+		return map[string]any{}, t.command(ctx, "Input.dispatchMouseEvent", map[string]any{"type": "mouseMoved", "x": x, "y": y}, nil)
 	default:
 		return nil, toolErr("invalid_arguments", "unknown interaction")
 	}
 	return map[string]any{}, b.eval(ctx, t, frame, `(()=>{`+locator+script+`return true})()`, nil)
+}
+
+func (b *browserManager) elementPoint(ctx context.Context, t *browserTab, frame, locator string) (float64, float64, error) {
+	if frame != "" {
+		var owner struct {
+			ID int `json:"backendNodeId"`
+		}
+		if err := t.command(ctx, "DOM.getFrameOwner", map[string]any{"frameId": frame}, &owner); err != nil {
+			return 0, 0, err
+		}
+		if err := t.command(ctx, "DOM.scrollIntoViewIfNeeded", map[string]any{"backendNodeId": owner.ID}, nil); err != nil {
+			return 0, 0, err
+		}
+	}
+	var point struct{ X, Y float64 }
+	if err := b.eval(ctx, t, frame, `(async()=>{`+locator+`if(el.disabled)throw Error('disabled');el.scrollIntoView({block:'center'});await Promise.race([new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))),new Promise(resolve=>setTimeout(resolve,200))]);const r=el.getBoundingClientRect();if(!r.width||!r.height)throw Error('hidden');const x=r.x+r.width/2,y=r.y+r.height/2;let hit=document.elementFromPoint(x,y);while(hit?.shadowRoot){const inner=hit.shadowRoot.elementFromPoint(x,y);if(!inner||inner===hit)break;hit=inner}let covered=true;for(let node=hit;node;node=node.getRootNode()?.host){if(node===el||el.contains(node)){covered=false;break}}if(covered)throw Error('covered');return {X:x,Y:y}})()`, &point); err != nil {
+		return 0, 0, err
+	}
+	if frame != "" {
+		var owner struct {
+			ID int `json:"backendNodeId"`
+		}
+		if err := t.command(ctx, "DOM.getFrameOwner", map[string]any{"frameId": frame}, &owner); err != nil {
+			return 0, 0, err
+		}
+		var box struct {
+			Model struct {
+				Content []float64 `json:"content"`
+			} `json:"model"`
+		}
+		if err := t.command(ctx, "DOM.getBoxModel", map[string]any{"backendNodeId": owner.ID}, &box); err != nil {
+			return 0, 0, err
+		}
+		if len(box.Model.Content) < 2 {
+			return 0, 0, toolErr("browser_failed", "iframe geometry unavailable")
+		}
+		point.X += box.Model.Content[0]
+		point.Y += box.Model.Content[1]
+	}
+	return point.X, point.Y, nil
 }
 
 func (b *browserManager) wait(ctx context.Context, t *browserTab, args map[string]any) (any, error) {

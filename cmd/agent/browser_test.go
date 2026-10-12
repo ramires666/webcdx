@@ -41,6 +41,43 @@ func TestBrowserContractAndURLScope(t *testing.T) {
 	}
 }
 
+func TestBrowserArtifactsExpireWithoutDeletingUserFiles(t *testing.T) {
+	e, root := testExecutor(t)
+	b, err := newBrowserManager(e, browserConfig{Enabled: true, Dir: filepath.Join(root, "browser")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	dir := filepath.Join(b.config.Dir, "artifacts")
+	old := filepath.Join(dir, "image_000000000000000000000000.jpg")
+	fresh := filepath.Join(dir, "image_111111111111111111111111.jpg")
+	other := filepath.Join(dir, "report.txt")
+	for _, path := range []string{old, fresh, other} {
+		if err := os.WriteFile(path, []byte("image"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := time.Now().Add(-25 * time.Hour)
+	for _, path := range []string{old, other} {
+		if err := os.Chtimes(path, before, before); err != nil {
+			t.Fatal(err)
+		}
+	}
+	size, err := b.cleanArtifacts()
+	if err != nil || size != 5 {
+		t.Fatalf("artifact budget: %d %v", size, err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("expired owned artifact retained")
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatal("unrelated file was deleted")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("fresh artifact was deleted")
+	}
+}
+
 func TestBrowserManagedEndToEnd(t *testing.T) {
 	if os.Getenv("WEBCODEX_BROWSER_TEST") != "1" {
 		t.Skip("set WEBCODEX_BROWSER_TEST=1 to exercise installed Chrome")
@@ -48,6 +85,7 @@ func TestBrowserManagedEndToEnd(t *testing.T) {
 	e, root := testExecutor(t)
 	var submits atomic.Int32
 	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		switch r.URL.Path {
 		case "/submit":
 			submits.Add(1)
@@ -63,7 +101,7 @@ func TestBrowserManagedEndToEnd(t *testing.T) {
 				fmt.Fprint(w, "private account")
 			}
 		case "/frame":
-			fmt.Fprint(w, `<button id="inside">Frame button</button>`)
+			fmt.Fprint(w, `<button id="inside" onclick="this.textContent='Frame clicked'">Frame button</button>`)
 		case "/download":
 			w.Header().Set("Content-Disposition", `attachment; filename="report.txt"`)
 			fmt.Fprint(w, "test report")
@@ -122,6 +160,8 @@ func TestBrowserManagedEndToEnd(t *testing.T) {
 	if !strings.Contains(cross["text"].(string), "Frame button") {
 		t.Fatal("cross-site iframe unreadable")
 	}
+	call("browser_interact", args(map[string]any{"frame_id": frames[2]["frame_id"], "action": "click", "selector": "#inside", "request_key": "cross-frame-click"}))
+	call("browser_wait", args(map[string]any{"frame_id": frames[2]["frame_id"], "condition": "text", "text": "Frame clicked"}))
 	call("browser_interact", args(map[string]any{"action": "fill", "selector": "#name", "text": "Alice", "request_key": "fill"}))
 	file := filepath.Join(root, "upload.txt")
 	if err := os.WriteFile(file, []byte("upload contents"), 0o600); err != nil {
@@ -189,4 +229,27 @@ func TestBrowserManagedEndToEnd(t *testing.T) {
 	if !strings.Contains(private["text"].(string), "private account") {
 		t.Fatal("persistent login lost after reopening")
 	}
+	waiting, err := b.call(ctx, "browser_wait", args(map[string]any{"condition": "text", "text": "never-appears", "timeout_seconds": float64(25)}))
+	if err != nil || waiting.(map[string]any)["status"] != "running" {
+		t.Fatalf("long wait: %v %v", waiting, err)
+	}
+	opID := waiting.(map[string]any)["operation_id"].(string)
+	if _, err := b.control(map[string]any{"action": "cancel", "operation_id": opID}); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	done := b.operations[opID].done
+	b.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("browser cancel did not finish")
+	}
+	if _, err := b.control(map[string]any{"action": "status", "operation_id": opID}); err == nil {
+		t.Fatal("cancelled wait reported completion")
+	}
+	rootTab := second["tab_id"]
+	call("browser_tabs", args(map[string]any{"action": "new", "request_key": "new-tab"}))
+	call("browser_tabs", args(map[string]any{"action": "close", "tab_id": rootTab, "request_key": "close-first-tab"}))
+	call("browser_navigate", args(map[string]any{"action": "url", "url": site.URL + "/private", "request_key": "remaining-tab"}))
 }

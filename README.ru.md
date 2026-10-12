@@ -14,6 +14,10 @@ MCP-клиент ── HTTPS + OAuth ──> Gate ── исходящий NDJ
 
 `/mcp/v4` публикует ровно одиннадцать инструментов. На время миграции `/mcp/v3` сохраняет прежний контракт из семи инструментов.
 
+`/mcp/v5` добавляет `list_commands` и `request_key` для устойчивого Retry.
+При локальном `WEBCODEX_BROWSER_ENABLED=1` доступны ещё десять инструментов
+для clean/persistent/personal-браузера. [Настройка браузера](BROWSER_GUIDE.ru.md).
+
 | Инструмент | Операция |
 | --- | --- |
 | `read_file` | Чтение UTF-8 файла или диапазона строк. |
@@ -51,7 +55,7 @@ go build -o bin/webcodex-gate.exe ./cmd/gate
 docker compose up -d --build
 ```
 
-Текущий endpoint коннектора — `/mcp/v4`; `/mcp/v3` сохранён для отката. Остальные основные endpoint: `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, `/healthz`. Gate должен работать за HTTPS. OAuth требует PKCE S256 и известный callback ChatGPT. Срок access token задаёт `WEBCODEX_ACCESS_TOKEN_TTL`, по умолчанию 24 часа.
+Текущий endpoint коннектора — `/mcp/v5`; v3/v4 сохранены для отката. Остальные основные endpoint: `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, `/healthz`. Gate должен работать за HTTPS. OAuth требует PKCE S256 и известный callback ChatGPT. Срок access token задаёт `WEBCODEX_ACCESS_TOKEN_TTL`, по умолчанию 24 часа.
 
 Создайте agent в `/admin` и сразу сохраните одноразово показанные agent token и OAuth secret. В SQLite сохраняются только SHA-256 хеши.
 
@@ -135,4 +139,9 @@ Gate и агент обновляются вместе; списки и схем
 
 Запускайте agent под отдельной непривилегированной учётной записью. В Windows выдайте ей NTFS-права только на рабочие каталоги и каталог логов. В Linux настройте `ReadWritePaths` в `deploy/webcodex-agent.service`; unit уже включает `NoNewPrivileges`, `PrivateTmp` и `ProtectSystem`. Если сборкам не нужны загрузки, ограничьте исходящую сеть средствами ОС или контейнера.
 
-Перед обновлением сохраните SQLite, бинарники, service-файлы и command-логи. Сначала разверните Gate с v3/v4, затем замените agent. Создайте новый connector на `/mcp/v4` и начните новый чат. Для отката переключите connector на `/mcp/v3` и верните предыдущий agent binary.
+Перед обновлением сохраните SQLite, бинарники, service-файлы и command-логи.
+Сначала разверните Gate, затем замените agent и при необходимости установите
+расширение. Создайте новый connector на `/mcp/v5` и начните новый чат:
+до tool policy — 12 инструментов без браузера, 22 с браузером.
+Для отката выключите браузер, переключитесь на `/mcp/v4` и верните agent binary;
+личные/постоянные профили сохраните.

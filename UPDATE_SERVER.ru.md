@@ -22,7 +22,9 @@ echo "Пароль admin: $ADMIN_PASSWORD"
 Проверьте MCP v4:
 
 ```bash
-curl -fsS https://codex.grom.world/.well-known/oauth-protected-resource/mcp/v4
+curl -fsS https://codex.grom.world/.well-known/oauth-protected-resource/mcp/v5
 ```
 
-Затем откройте `https://codex.grom.world/admin`, войдите как `admin` с показанным паролем и создайте нового agent. Внесите его token в `start-agent-thunderfull.bat`, перезапустите agent и создайте в ChatGPT connector с адресом `https://codex.grom.world/mcp/v4`.
+Затем откройте `https://codex.grom.world/admin`, войдите как `admin` с показанным паролем и создайте нового agent. Внесите его token в `start-agent-thunderfull.bat`, обновите/перезапустите agent и создайте connector с адресом `https://codex.grom.world/mcp/v5`.
+Браузер включается локально; инструкции режимов и расширения:
+[BROWSER_GUIDE.ru.md](BROWSER_GUIDE.ru.md). Сначала обновляется Gate, затем agent.

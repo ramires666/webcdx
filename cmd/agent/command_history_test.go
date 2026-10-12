@@ -92,4 +92,8 @@ func TestCommandReservationHasUnknownOutcomeAfterCrash(t *testing.T) {
 	if err != nil || result.(map[string]any)["status"] != "outcome_unknown" || result.(map[string]any)["session_id"] != id {
 		t.Fatalf("ambiguous launch must never repeat: %v %v", result, err)
 	}
+	legacy, err := restored.pollCommand(map[string]any{"session_id": id}, true)
+	if err != nil || legacy.(map[string]any)["status"] != "orphaned" {
+		t.Fatalf("legacy polling broke its status contract: %v %v", legacy, err)
+	}
 }

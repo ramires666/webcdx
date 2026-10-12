@@ -5,6 +5,7 @@ const childSessions = new Map();
 const urlChecks = new Map();
 let port, paused = false, localPaused = false, allowLocal = false, allowNew = false, serial = Promise.resolve(), ready, readyResolve, readyReject;
 const methods = new Set(['Page.enable','Runtime.enable','Network.enable','Page.navigate','Page.getFrameTree','Page.createIsolatedWorld','Runtime.evaluate','Page.reload','Page.getNavigationHistory','Page.navigateToHistoryEntry','Page.bringToFront','Page.captureScreenshot','Page.getLayoutMetrics','Page.handleJavaScriptDialog','Input.dispatchMouseEvent','Input.dispatchKeyEvent','DOM.getFrameOwner','DOM.getBoxModel','DOM.setFileInputFiles','Accessibility.getFullAXTree']);
+methods.add('DOM.scrollIntoViewIfNeeded');
 
 function localHost(host) {
   return host === 'localhost' || !host.includes('.') || host.endsWith('.local') || /^(127|10)\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || host.startsWith('[');

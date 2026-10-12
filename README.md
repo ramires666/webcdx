@@ -14,6 +14,10 @@ MCP client ── HTTPS + OAuth ──> Gate ── outbound NDJSON stream ─�
 
 `/mcp/v4` exposes exactly eleven tools. `/mcp/v3` remains available with the original seven-tool contract during migration.
 
+`/mcp/v5` adds `list_commands`, safe Retry keys and, when enabled locally,
+ten browser tools with clean/persistent/personal modes. See
+[browser setup and verification](BROWSER_GUIDE.ru.md). v3/v4 remain compatible.
+
 | Tool | Operation |
 | --- | --- |
 | `read_file` | Read a UTF-8 file or line range. |
@@ -51,7 +55,7 @@ Copy `.env.example` to `.env`, set a strong admin password, then start the publi
 docker compose up -d --build
 ```
 
-The current connector endpoint is `/mcp/v4`; `/mcp/v3` is retained for rollback. The other important endpoints are `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, and `/healthz`. Put the gate behind HTTPS. OAuth requires PKCE S256 and a recognized ChatGPT callback URI. Access tokens expire after `WEBCODEX_ACCESS_TOKEN_TTL` (24 hours by default).
+The current connector endpoint is `/mcp/v5`; v3/v4 are retained for rollback. The other important endpoints are `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, and `/healthz`. Put the gate behind HTTPS. OAuth requires PKCE S256 and a recognized ChatGPT callback URI. Access tokens expire after `WEBCODEX_ACCESS_TOKEN_TTL` (24 hours by default).
 
 Create an agent in `/admin`; copy its one-time agent token and OAuth client secret immediately. Only their SHA-256 hashes are persisted.
 
@@ -130,4 +134,4 @@ Update Gate and agent before using v5.
 
 Run the agent under a dedicated unprivileged account. On Windows, grant that account NTFS access only to the intended workspaces and log directory. On Linux, update `ReadWritePaths` in `deploy/webcodex-agent.service` to match the configured roots; the unit also enables `NoNewPrivileges`, `PrivateTmp`, and `ProtectSystem`. Restrict outbound network access at the OS or container layer when builds do not need downloads.
 
-Back up SQLite, binaries, service files, and command logs before deployment. Deploy Gate first with v3/v4 enabled, then replace the agent binary. Create a fresh connector at `/mcp/v4` and start a new conversation so the eleven-tool schema is not read from cache. Roll back by reconnecting to `/mcp/v3` and restoring the prior agent binary.
+Back up SQLite, binaries, service files, and command logs before deployment. Deploy Gate first, then replace the agent binary and install the browser extension if needed. Create a fresh connector at `/mcp/v5` and start a new conversation. v5 has twelve tools with browser disabled, twenty-two with browser enabled, before policy filtering. Roll back by disabling browser locally, reconnecting to `/mcp/v4` and restoring the prior agent binary; preserve personal/persistent profiles.
