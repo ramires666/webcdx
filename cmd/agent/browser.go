@@ -70,6 +70,7 @@ type browserTab struct {
 	blocked                 bool
 	personal                *browserBridge
 	nativeTabID             int
+	personalReady           bool
 	frameContexts           map[string]context.Context
 }
 
@@ -586,6 +587,9 @@ func (t *browserTab) command(ctx context.Context, method string, params, result 
 
 func (b *browserManager) setupTab(ctx context.Context, t *browserTab) error {
 	if t.personal != nil {
+		if t.personalReady {
+			return nil
+		}
 		t.personal.mu.Lock()
 		t.personal.attached[t.nativeTabID] = t
 		t.personal.mu.Unlock()
@@ -594,6 +598,7 @@ func (b *browserManager) setupTab(ctx context.Context, t *browserTab) error {
 				return err
 			}
 		}
+		t.personalReady = true
 		return nil
 	}
 	events, stop := chromedp.FromContext(t.ctx).Target.Subscribe("Fetch.requestPaused")
@@ -709,6 +714,9 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 	s.active = cancel
 	b.mu.Unlock()
 	defer func() { cancel(); b.mu.Lock(); s.active = nil; b.mu.Unlock() }()
+	if s.personal != nil {
+		b.syncPersonalTabs(s)
+	}
 	tabID, _ := optionalString(args, "tab_id")
 	if tabID == "" {
 		tabID = s.selected
@@ -719,6 +727,11 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 	}
 	if name == "browser_tabs" {
 		return b.tabs(callCtx, s, t, args)
+	}
+	if t.personal != nil {
+		if err := b.setupTab(callCtx, t); err != nil {
+			return nil, err
+		}
 	}
 	t.eventMu.Lock()
 	dialog := t.dialog

@@ -16,55 +16,113 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 		b.mu.Unlock()
 		return nil, toolErr("waiting_user", "connect a tab using the WebCodex extension")
 	}
-	for _, session := range b.sessions {
-		if session.personal != nil && !session.disconnected {
-			b.mu.Unlock()
-			return nil, toolErr("profile_in_use", "personal session already attached")
-		}
-	}
 	link.mu.Lock()
-	approved := append([]browserPersonalTab{}, link.tabs...)
+	available := len(link.tabs)
 	paused := link.paused
 	link.mu.Unlock()
-	if len(approved) == 0 || paused {
+	if available == 0 && !paused {
+		b.mu.Unlock()
+		if err := link.call(ctx, 0, "WebCodex.prepare", map[string]any{}, nil); err != nil {
+			return nil, toolErr("waiting_user", "enable permanent access or connect a website tab in the extension")
+		}
+		link.mu.Lock()
+		available = len(link.tabs)
+		link.mu.Unlock()
+		if available == 0 {
+			return nil, toolErr("waiting_user", "open a permitted website in the connected browser")
+		}
+		return b.openPersonal(ctx, args)
+	}
+	if available == 0 || paused {
 		b.mu.Unlock()
 		return nil, toolErr("waiting_user", "select and unpause a tab locally in the extension")
 	}
-	root, cancel := context.WithCancel(context.Background())
-	s := &browserSession{id: browserID("browser_"), mode: "personal", ctx: root, personal: link, tabs: map[string]*browserTab{}}
-	s.cancel = func() { cancel(); _ = link.send(browserBridgeMessage{Kind: "control", Action: "detach"}) }
-	b.sessions[s.id] = s
+	var s *browserSession
+	for _, existing := range b.sessions {
+		if existing.personal == link && !existing.disconnected {
+			s = existing
+			break
+		}
+	}
+	if s == nil {
+		root, cancel := context.WithCancel(context.Background())
+		s = &browserSession{id: browserID("browser_"), mode: "personal", ctx: root, personal: link, tabs: map[string]*browserTab{}}
+		s.cancel = func() { cancel(); _ = link.send(browserBridgeMessage{Kind: "control", Action: "detach"}) }
+		b.sessions[s.id] = s
+	}
 	b.mu.Unlock()
-	for _, approved := range approved {
-		tabCtx, tabCancel := context.WithCancel(root)
-		t := &browserTab{id: browserID("tab_"), ctx: tabCtx, cancel: tabCancel, personal: link, nativeTabID: approved.ID, worlds: map[string]int{}}
-		if err := b.setupTab(ctx, t); err != nil {
-			s.cancel()
-			b.mu.Lock()
-			s.disconnected = true
-			b.mu.Unlock()
-			return nil, err
-		}
-		s.tabs[t.id] = t
-		if s.selected == "" {
-			s.selected = t.id
-		}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b.syncPersonalTabs(s)
+	if s.selected == "" {
+		return nil, toolErr("waiting_user", "open a permitted website in the connected browser")
 	}
 	if raw, _ := optionalString(args, "url"); raw != "" {
 		if err := b.checkURL(raw); err != nil {
 			return nil, err
 		}
-		if err := s.tabs[s.selected].command(ctx, "Page.navigate", map[string]any{"url": raw}, nil); err != nil {
+		t := s.tabs[s.selected]
+		if err := b.setupTab(ctx, t); err != nil {
+			return nil, err
+		}
+		if err := t.command(ctx, "Page.navigate", map[string]any{"url": raw}, nil); err != nil {
 			return nil, err
 		}
 	}
 	return map[string]any{"browser_session_id": s.id, "tab_id": s.selected, "mode": "personal", "status": "ready", "truncated": false}, nil
 }
 
+// Catalog permitted tabs without attaching debuggers or reading page contents.
+// The extension attaches a debugger only when a tool actually uses that tab.
+func (b *browserManager) syncPersonalTabs(s *browserSession) []browserPersonalTab {
+	s.personal.mu.Lock()
+	defer s.personal.mu.Unlock()
+	approved := append([]browserPersonalTab{}, s.personal.tabs...)
+	byNativeID := make(map[int]*browserTab, len(s.tabs))
+	for _, tab := range s.tabs {
+		byNativeID[tab.nativeTabID] = tab
+	}
+	valid := make(map[int]bool, len(approved))
+	for _, native := range approved {
+		valid[native.ID] = true
+		if tab := byNativeID[native.ID]; tab != nil && tab.ctx.Err() == nil {
+			continue
+		}
+		child, cancel := context.WithCancel(s.ctx)
+		tab := &browserTab{id: browserID("tab_"), ctx: child, cancel: cancel, personal: s.personal, nativeTabID: native.ID, worlds: map[string]int{}}
+		s.tabs[tab.id] = tab
+		s.personal.attached[native.ID] = tab
+	}
+	for id, tab := range s.tabs {
+		if !valid[tab.nativeTabID] || tab.ctx.Err() != nil {
+			tab.cancel()
+			delete(s.tabs, id)
+			if s.personal.attached[tab.nativeTabID] == tab {
+				delete(s.personal.attached, tab.nativeTabID)
+			}
+		}
+	}
+	if s.tabs[s.selected] == nil {
+		s.selected = ""
+		for _, native := range approved {
+			for id, tab := range s.tabs {
+				if tab.nativeTabID == native.ID {
+					s.selected = id
+					return approved
+				}
+			}
+		}
+	}
+	return approved
+}
+
 func (b *browserManager) personalTabs(ctx context.Context, s *browserSession, t *browserTab, args map[string]any) (any, error) {
 	action, _ := requiredString(args, "action")
 	switch action {
 	case "new":
+		if len(s.tabs) >= browserPersonalTabLimit {
+			return nil, toolErr("limit_reached", "personal browser tab limit reached")
+		}
 		s.personal.mu.Lock()
 		allowed := s.personal.allowNew
 		s.personal.mu.Unlock()
@@ -84,6 +142,9 @@ func (b *browserManager) personalTabs(ctx context.Context, s *browserSession, t 
 		s.tabs[tab.id] = tab
 		s.selected = tab.id
 	case "select":
+		if err := b.setupTab(ctx, t); err != nil {
+			return nil, err
+		}
 		if err := t.command(ctx, "Page.bringToFront", map[string]any{}, nil); err != nil {
 			return nil, err
 		}
@@ -104,42 +165,25 @@ func (b *browserManager) personalTabs(ctx context.Context, s *browserSession, t 
 			}
 		}
 	case "list":
-		s.personal.mu.Lock()
-		approved := append([]browserPersonalTab{}, s.personal.tabs...)
-		s.personal.mu.Unlock()
-		for _, native := range approved {
-			known := false
-			for _, tab := range s.tabs {
-				if tab.nativeTabID == native.ID {
-					known = true
-					break
-				}
-			}
-			if known || len(s.tabs) >= 16 {
-				continue
-			}
-			child, cancel := context.WithCancel(s.ctx)
-			tab := &browserTab{id: browserID("tab_"), ctx: child, cancel: cancel, personal: s.personal, nativeTabID: native.ID, worlds: map[string]int{}}
-			if err := b.setupTab(ctx, tab); err != nil {
-				cancel()
-				continue
-			}
-			s.tabs[tab.id] = tab
-		}
 	default:
 		return nil, toolErr("invalid_arguments", "unknown tabs action")
 	}
+	s.personal.mu.Lock()
+	urls := make(map[int]string, len(s.personal.tabs))
+	for _, native := range s.personal.tabs {
+		urls[native.ID] = native.URL
+	}
+	s.personal.mu.Unlock()
 	list := []map[string]any{}
 	for id, tab := range s.tabs {
 		if tab.ctx.Err() != nil {
 			delete(s.tabs, id)
 			continue
 		}
-		frame, err := b.pageFrame(ctx, tab, "")
-		if err != nil {
+		url, ok := urls[tab.nativeTabID]
+		if !ok {
 			continue
 		}
-		url, _ := frame["url"].(string)
 		list = append(list, map[string]any{"tab_id": id, "url": safeBrowserURL(url)})
 	}
 	return map[string]any{"browser_session_id": s.id, "tab_id": s.selected, "status": "ready", "tabs": list, "truncated": false}, nil
@@ -149,7 +193,7 @@ func (b *browserManager) recordBrowserEvent(t *browserTab, method string, event 
 	t.eventMu.Lock()
 	defer t.eventMu.Unlock()
 	switch method {
-	case "Page.frameNavigated", "Page.navigatedWithinDocument":
+	case "Page.frameNavigated", "Page.navigatedWithinDocument", "WebCodex.detached":
 		t.snapshot = ""
 		t.worlds = map[string]int{}
 	case "Page.javascriptDialogOpening":

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"unsafe"
@@ -23,7 +24,13 @@ func browserListenIPC(dir string) (*browserIPCListener, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	name := `\\.\pipe\webcodex-browser-` + commandHash(user.User.Sid.String())[:16]
+	bridgeDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, "", err
+	}
+	// Keep the regular user bridge exclusive while isolating test/config directories.
+	identity := user.User.Sid.String() + "|" + strings.ToLower(filepath.Clean(bridgeDir))
+	name := `\\.\pipe\webcodex-browser-` + commandHash(identity)[:24]
 	listener := &browserIPCListener{name: name}
 	if err := listener.create(); err != nil {
 		return nil, "", err

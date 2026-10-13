@@ -1,9 +1,14 @@
 const HOST = 'org.webcodex.browser';
+const ACCESS_KEY = 'webcodexPersonalAccess';
+const RECONNECT_ALARM = 'webcodex-reconnect';
+const PERSONAL_TAB_LIMIT = 128;
 const attached = new Map();
+const available = new Map();
 const downloads = new Map();
 const childSessions = new Map();
 const urlChecks = new Map();
-let port, paused = false, localPaused = false, allowLocal = false, allowNew = false, serial = Promise.resolve(), ready, readyResolve, readyReject;
+let port, paused = false, localPaused = false, allowLocal = false, allowNew = false, continuous = false, connected = false;
+let serial = Promise.resolve(), scopeSerial = Promise.resolve(), settingsWrites = Promise.resolve(), ready, reconnectTimer, reconnectDelay = 2000, accessEpoch = 0;
 const methods = new Set(['Page.enable','Runtime.enable','Network.enable','Page.navigate','Page.getFrameTree','Page.createIsolatedWorld','Runtime.evaluate','Page.reload','Page.getNavigationHistory','Page.navigateToHistoryEntry','Page.bringToFront','Page.captureScreenshot','Page.getLayoutMetrics','Page.handleJavaScriptDialog','Input.dispatchMouseEvent','Input.dispatchKeyEvent','DOM.getFrameOwner','DOM.getBoxModel','DOM.setFileInputFiles','Accessibility.getFullAXTree']);
 methods.add('DOM.scrollIntoViewIfNeeded');
 
@@ -20,41 +25,116 @@ function post(message) {
   if (JSON.stringify(message).length > 900000) throw Error('Native response exceeds limit');
   port.postMessage(message);
 }
-async function scopeUpdate() {
+function saveAccess() {
+  const access = {continuous, localPaused, allowNew};
+  settingsWrites = settingsWrites.catch(() => {}).then(() => chrome.storage.local.set({[ACCESS_KEY]:access}));
+  return settingsWrites;
+}
+async function setPaused(value, locally = false) {
+  if (locally) { localPaused = value; await saveAccess(); }
+  paused = value || localPaused;
+  accessEpoch++;
+  for (const tabId of attached.keys()) {
+    try { await chrome.debugger.sendCommand({tabId},paused ? 'Fetch.disable' : 'Fetch.enable',paused ? {} : {patterns:[{urlPattern:'*',requestStage:'Request'}]}); } catch {}
+  }
+  await scopeUpdate();
+}
+async function publishScope() {
+  const epoch = accessEpoch;
   const tabs = [];
-  for (const [id, scope] of attached) { try { const tab = await chrome.tabs.get(id); if (permitted(tab.url,scope,scope.created)) tabs.push({tab_id:id,url:tab.url}); } catch {} }
-  if (port) post({kind:'scope',tabs,paused,local_paused:localPaused,allow_new:allowNew});
-  await chrome.action.setBadgeText({text:attached.size ? paused ? 'PAUSE' : 'ON' : ''});
+  if (continuous) {
+    const candidates = await chrome.tabs.query({});
+    candidates.sort((a,b) => Number(b.active)-Number(a.active) || (b.lastAccessed || 0)-(a.lastAccessed || 0));
+    for (const tab of candidates) {
+      const scope = attached.get(tab.id) || {publicWeb:true,created:false};
+      if (tabs.length < PERSONAL_TAB_LIMIT && permitted(tab.url,scope,scope.created)) tabs.push({tab_id:tab.id,url:tab.url});
+    }
+  } else {
+    for (const [id, scope] of attached) { try { const tab = await chrome.tabs.get(id); if (permitted(tab.url,scope,scope.created)) tabs.push({tab_id:id,url:tab.url}); } catch {} }
+  }
+  if (epoch !== accessEpoch) return;
+  available.clear();
+  for (const tab of tabs) available.set(tab.tab_id,tab.url);
+  if (port && connected) post({kind:'scope',tabs,paused,local_paused:localPaused,allow_new:allowNew});
+  await chrome.action.setBadgeText({text:paused ? 'PAUSE' : continuous ? connected ? 'AUTO' : 'WAIT' : attached.size ? 'ON' : ''});
   await chrome.action.setBadgeBackgroundColor({color:paused ? '#b45309' : '#0369a1'});
 }
-async function disconnect() {
-  paused = true;
+function scopeUpdate() {
+  scopeSerial = scopeSerial.catch(() => {}).then(publishScope);
+  return scopeSerial;
+}
+async function releaseAttachments() {
+  accessEpoch++;
   const ids = [...attached.keys()]; attached.clear();
   for (const id of downloads.keys()) { try { await chrome.downloads.cancel(id); } catch {} }
   downloads.clear();
   childSessions.clear();
+  for (const resolve of urlChecks.values()) resolve(false);
+  urlChecks.clear();
   for (const tabId of ids) { try { await chrome.debugger.sendCommand({tabId},'Fetch.disable'); } catch {} try { await chrome.debugger.detach({tabId}); } catch {} }
   await scopeUpdate();
 }
+async function disconnect() {
+  continuous = false; localPaused = false; paused = true;
+  clearTimeout(reconnectTimer); reconnectTimer = undefined;
+  await saveAccess();
+  await chrome.alarms.clear(RECONNECT_ALARM);
+  await releaseAttachments();
+  const oldPort = port; port = undefined; connected = false;
+  oldPort?.disconnect();
+}
+function scheduleReconnect() {
+  if (!continuous || localPaused || reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = undefined;
+    startContinuous().catch(() => {});
+  },reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2,30000);
+}
+async function startContinuous() {
+  await settingsLoaded;
+  if (!continuous || localPaused) return;
+  const alarm = await chrome.alarms.get(RECONNECT_ALARM);
+  if (!alarm) await chrome.alarms.create(RECONNECT_ALARM,{periodInMinutes:0.5});
+  try { await connect(); await scopeUpdate(); }
+  catch { scheduleReconnect(); }
+}
 function connect() {
   if (port) return ready;
-  ready = new Promise((resolve,reject) => { readyResolve=resolve; readyReject=reject; });
-  const timeout = setTimeout(() => readyReject(Error('Native bridge did not connect within 5 seconds')),5000);
-  port = chrome.runtime.connectNative(HOST);
-  port.onDisconnect.addListener(() => { clearTimeout(timeout); readyReject(Error(chrome.runtime.lastError?.message || 'Native bridge disconnected')); port = undefined; disconnect(); });
-  port.onMessage.addListener(message => {
+  let resolveReady, rejectReady;
+  ready = new Promise((resolve,reject) => { resolveReady=resolve; rejectReady=reject; });
+  const nativePort = chrome.runtime.connectNative(HOST);
+  port = nativePort; connected = false;
+  const timeout = setTimeout(() => {
+    rejectReady(Error('Native bridge did not connect within 5 seconds'));
+    nativePort.disconnect();
+  },5000);
+  nativePort.onDisconnect.addListener(() => {
+    const failure = chrome.runtime.lastError?.message || 'Native bridge disconnected';
+    clearTimeout(timeout); rejectReady(Error(failure));
+    if (port !== nativePort) return;
+    port = undefined; connected = false; paused = localPaused || !continuous;
+    releaseAttachments().catch(() => {}).finally(scheduleReconnect);
+  });
+  nativePort.onMessage.addListener(message => {
+    if (port !== nativePort) return;
     if (message.kind === 'url_result') { const resolve = urlChecks.get(message.id); if(resolve){urlChecks.delete(message.id);resolve(!!message.allowed)} return; }
-    if (message.kind === 'hello') { clearTimeout(timeout); allowLocal = !!message.allow_local; readyResolve(); scopeUpdate(); return; }
+    if (message.kind === 'hello') {
+      clearTimeout(timeout); clearTimeout(reconnectTimer); reconnectTimer = undefined; reconnectDelay = 2000;
+      allowLocal = !!message.allow_local; connected = true; paused = localPaused;
+      resolveReady(); scopeUpdate().catch(() => {}); return;
+    }
     if (message.kind === 'control') {
-      if (message.action === 'detach') disconnect();
-      if (message.action === 'pause') { paused = true; scopeUpdate(); }
-      if (message.action === 'resume' && !localPaused) { paused = false; scopeUpdate(); }
+      if (message.action === 'detach') { paused = localPaused || !continuous; releaseAttachments().catch(() => {}); }
+      if (message.action === 'pause') setPaused(true).catch(() => {});
+      if (message.action === 'resume' && !localPaused) setPaused(false).catch(() => {});
       return;
     }
     if (message.kind !== 'command') return;
     serial = serial.then(async () => {
       let result, error;
-      try { result = await execute(message); } catch (failure) { error = failure.message; }
+      try { if (port !== nativePort) throw Error('Native bridge disconnected'); result = await execute(message); } catch (failure) { error = failure.message; }
+      if (port !== nativePort) return;
       try { post({kind:'response',id:message.id,result:result ?? {},error}); }
       catch { try { post({kind:'response',id:message.id,error:'Response exceeds native message limit'}); } catch {} }
     }).catch(() => {});
@@ -62,25 +142,42 @@ function connect() {
   return ready;
 }
 async function attach(tab, scope) {
-  if (attached.size >= 16) throw Error('Tab limit reached');
+  if (attached.size >= PERSONAL_TAB_LIMIT) throw Error('Tab limit reached');
+  if (paused || localPaused) throw Error('Local control paused');
   if (!permitted(tab.url,scope,scope.created)) throw Error('Tab URL is outside the selected scope');
   if (attached.has(tab.id)) return;
+  const epoch = accessEpoch;
   await chrome.debugger.attach({tabId:tab.id},'1.3');
+  if (epoch !== accessEpoch || paused || localPaused) { await chrome.debugger.detach({tabId:tab.id}); throw Error('Local access changed'); }
   attached.set(tab.id,scope);
   try {
     await chrome.debugger.sendCommand({tabId:tab.id},'Fetch.enable',{patterns:[{urlPattern:'*',requestStage:'Request'}]});
-    await chrome.debugger.sendCommand({tabId:tab.id},'Page.enable');
+    for (const method of ['Page.enable','Runtime.enable','Network.enable']) await chrome.debugger.sendCommand({tabId:tab.id},method);
     await chrome.debugger.sendCommand({tabId:tab.id},'Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true});
     await scopeUpdate();
   } catch (error) { attached.delete(tab.id); await chrome.debugger.detach({tabId:tab.id}); throw error; }
 }
 async function execute(message) {
-  if (paused) throw Error('Local control paused');
+  if (paused || localPaused) throw Error('Local control paused');
+  const method = message.method, params = message.params || {};
+  if (!methods.has(method) && !['WebCodex.prepare','WebCodex.newTab','WebCodex.closeTab','WebCodex.enableDownloads','WebCodex.frames','WebCodex.downloads'].includes(method)) throw Error('CDP method is not permitted');
+  if (method === 'WebCodex.prepare') {
+    if (!continuous || !connected) throw Error('Enable permanent access locally');
+    await scopeUpdate();
+    if (!available.size) {
+      const tab = await chrome.tabs.create({url:'about:blank'});
+      await attach(tab,{publicWeb:true,created:true});
+    }
+    return {};
+  }
+  let tab = await chrome.tabs.get(message.tab_id);
+  if (!attached.has(tab.id) && continuous && connected && available.has(tab.id)) {
+    await attach(tab,{origin:new URL(tab.url).origin,publicWeb:true,created:false});
+    tab = await chrome.tabs.get(message.tab_id);
+  }
   const scope = attached.get(message.tab_id);
   if (!scope) throw Error('Tab is not locally attached');
-  const tab = await chrome.tabs.get(message.tab_id);
   if (!permitted(tab.url,scope,scope.created)) { await chrome.debugger.detach({tabId:tab.id}); attached.delete(tab.id); await scopeUpdate(); throw Error('Tab left permitted scope'); }
-  const method = message.method, params = message.params || {};
   if (method === 'WebCodex.newTab') {
     if (!allowNew) throw Error('New tabs are not locally permitted');
     const child = await chrome.tabs.create({url:'about:blank'});
@@ -112,19 +209,36 @@ async function execute(message) {
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (sender.id !== chrome.runtime.id || sender.tab) return false;
   (async () => {
+    await settingsLoaded;
     if (message.type === 'attach') {
+      if (continuous) await disconnect();
+      localPaused = false; paused = false; allowNew = !!message.allowNew;
+      await saveAccess();
       await connect();
       const [tab] = await chrome.tabs.query({active:true,currentWindow:true});
-      const url = new URL(tab.url); allowNew = !!message.allowNew; paused = false;
+      if (!tab) throw Error('Откройте вкладку сайта');
+      const url = new URL(tab.url);
       await attach(tab,{origin:url.origin,publicWeb:!!message.publicWeb,created:false});
-    } else if (message.type === 'pause') { localPaused = true; paused = true; await scopeUpdate(); }
-    else if (message.type === 'resume') { localPaused = false; paused = false; await scopeUpdate(); }
+    } else if (message.type === 'continuous') {
+      if (message.enabled) {
+        continuous = true; localPaused = false; paused = false; allowNew = !!message.allowNew; accessEpoch++;
+        await saveAccess();
+        await releaseAttachments();
+        await startContinuous();
+      } else { await disconnect(); }
+    } else if (message.type === 'options') { allowNew = !!message.allowNew; await saveAccess(); await scopeUpdate(); }
+    else if (message.type === 'pause') { await setPaused(true,true); }
+    else if (message.type === 'resume') { await setPaused(false,true); if (continuous) await startContinuous(); }
     else if (message.type === 'disconnect') { await disconnect(); }
-    return {count:attached.size,paused};
+    return {count:available.size,paused,continuous,allowNew,connected};
   })().then(reply,error => reply({error:error.message}));
   return true;
 });
-chrome.debugger.onDetach.addListener(async source => { attached.delete(source.tabId); childSessions.delete(source.tabId); await scopeUpdate(); });
+chrome.debugger.onDetach.addListener(source => {
+  attached.delete(source.tabId); childSessions.delete(source.tabId);
+  if (connected) { try { post({kind:'event',tab_id:source.tabId,method:'WebCodex.detached',result:{}}); } catch {} }
+  scopeUpdate().catch(() => {});
+});
 chrome.debugger.onEvent.addListener(async (source,method,event) => {
   const scope = attached.get(source.tabId); if (!scope) return;
   if (method === 'Target.attachedToTarget' && event.targetInfo.type === 'iframe') {
@@ -157,10 +271,28 @@ chrome.debugger.onEvent.addListener(async (source,method,event) => {
   try { post({kind:'event',tab_id:source.tabId,method,result:sanitized}); } catch {}
 });
 chrome.tabs.onCreated.addListener(async tab => {
+  if (continuous) { await scopeUpdate(); return; }
   const scope = attached.get(tab.openerTabId);
   if (!scope || !allowNew || paused) return;
   try { await attach(tab,{...scope,created:true}); } catch {}
 });
+chrome.tabs.onUpdated.addListener((id,change) => {
+  if (continuous && (change.url || change.status === 'complete')) scopeUpdate().catch(() => {});
+});
+chrome.tabs.onRemoved.addListener(id => {
+  attached.delete(id); available.delete(id); childSessions.delete(id);
+  scopeUpdate().catch(() => {});
+});
+chrome.tabs.onActivated.addListener(() => { if (continuous) scopeUpdate().catch(() => {}); });
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === RECONNECT_ALARM) startContinuous().catch(() => {}); });
+chrome.runtime.onStartup.addListener(() => { startContinuous().catch(() => {}); });
+chrome.runtime.onInstalled.addListener(() => { startContinuous().catch(() => {}); });
+const settingsLoaded = chrome.storage.local.get(ACCESS_KEY).then(values => {
+  const access = values[ACCESS_KEY] || {};
+  continuous = access.continuous === true; localPaused = access.localPaused === true;
+  allowNew = access.allowNew === true; paused = localPaused;
+});
+settingsLoaded.then(() => startContinuous()).catch(() => {});
 chrome.downloads.onDeterminingFilename.addListener((item,suggest) => {
   for (const scope of attached.values()) {
     if (!scope.downloadSession || paused || !item.referrer || !permitted(item.referrer,scope) || !permitted(item.url,scope)) continue;

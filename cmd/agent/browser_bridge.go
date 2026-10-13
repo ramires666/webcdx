@@ -17,6 +17,7 @@ import (
 const browserExtensionID = "pmobmihkpbblajdanleplliihfmcdmpp"
 const browserNativeHostName = "org.webcodex.browser"
 const browserBridgeMax = 1 << 20
+const browserPersonalTabLimit = 128
 
 type browserBridgeDescriptor struct {
 	Endpoint    string `json:"endpoint"`
@@ -175,7 +176,7 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 			}
 			link.mu.Unlock()
 		case "scope":
-			if len(message.Tabs) > 16 {
+			if len(message.Tabs) > browserPersonalTabLimit {
 				return
 			}
 			valid := []browserPersonalTab{}

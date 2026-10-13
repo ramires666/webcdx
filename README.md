@@ -18,6 +18,12 @@ MCP client ── HTTPS + OAuth ──> Gate ── outbound NDJSON stream ─�
 ten browser tools with clean/persistent/personal modes. See
 [browser setup and verification](BROWSER_GUIDE.ru.md). v3/v4 remain compatible.
 
+For your signed-in Chrome/Edge profile, enable **permanent access** once in the
+WebCodex Local Browser extension. It reconnects automatically after browser or
+agent restarts and makes website tabs available without per-tab approval.
+Local pause persists; Disconnect disables the saved grant. Tab control attaches
+on demand, and personal sessions can be reused across chats.
+
 | Tool | Operation |
 | --- | --- |
 | `read_file` | Read a UTF-8 file or line range. |

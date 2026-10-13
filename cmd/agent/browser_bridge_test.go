@@ -37,6 +37,65 @@ func TestNativeBrowserFraming(t *testing.T) {
 	}
 }
 
+func TestPersonalCatalogIsLazyAndReusableAcrossChats(t *testing.T) {
+	link := &browserBridge{attached: map[int]*browserTab{}}
+	for id := 1; id <= 40; id++ {
+		link.tabs = append(link.tabs, browserPersonalTab{id, "https://example.com/?token=hidden#secret"})
+	}
+	b := &browserManager{bridge: link, sessions: map[string]*browserSession{}}
+	ctx := context.Background()
+	opened, err := b.openPersonal(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := opened.(map[string]any)["browser_session_id"].(string)
+	session := b.sessions[id]
+	oldID := session.selected
+	oldTab := session.tabs[oldID]
+	if len(session.tabs) != 40 {
+		t.Fatalf("personal catalog has %d tabs, want 40", len(session.tabs))
+	}
+	for _, tab := range session.tabs {
+		defer tab.cancel()
+		if tab.personalReady {
+			t.Fatal("opening personal eagerly initialized a tab")
+		}
+	}
+	reopened, err := b.openPersonal(ctx, map[string]any{})
+	if err != nil || reopened.(map[string]any)["browser_session_id"] != id {
+		t.Fatalf("new chat could not reuse personal session: %v %v", reopened, err)
+	}
+	listed, err := b.execute(ctx, "browser_tabs", map[string]any{"browser_session_id": id, "action": "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tabs := listed.(map[string]any)["tabs"].([]map[string]any)
+	if len(tabs) != 40 {
+		t.Fatalf("list has %d tabs, want 40", len(tabs))
+	}
+	for _, tab := range tabs {
+		if tab["url"] != "https://example.com/" {
+			t.Fatalf("tab catalog leaked query or fragment: %v", tab)
+		}
+	}
+	// Remove the selected tab and make another website available without a local click.
+	link.tabs = append(link.tabs[1:], browserPersonalTab{41, "https://other.example/"})
+	listed, err = b.execute(ctx, "browser_tabs", map[string]any{"browser_session_id": id, "action": "list"})
+	if err != nil || len(listed.(map[string]any)["tabs"].([]map[string]any)) != 40 {
+		t.Fatalf("catalog did not refresh: %v %v", listed, err)
+	}
+	if oldTab.ctx.Err() == nil || session.tabs[oldID] != nil || session.selected == oldID {
+		t.Fatal("closed tab kept its context or selection")
+	}
+	if _, err := b.execute(ctx, "browser_snapshot", map[string]any{"browser_session_id": id, "tab_id": oldID}); err == nil {
+		t.Fatal("removed personal tab could still be used")
+	}
+	link.paused = true
+	if _, err := b.openPersonal(ctx, map[string]any{}); err == nil {
+		t.Fatal("reopening personal bypassed local pause")
+	}
+}
+
 func TestPersonalBrowserIPCAndRevocation(t *testing.T) {
 	e, root := testExecutor(t)
 	var actual *browserTab
@@ -118,7 +177,7 @@ func TestPersonalBrowserIPCAndRevocation(t *testing.T) {
 	if !scanner.Scan() {
 		t.Fatal("no bridge hello")
 	}
-	if err := encoder.Encode(browserBridgeMessage{Kind: "scope", Tabs: []browserPersonalTab{{7, approvedURL}}}); err != nil {
+	if err := encoder.Encode(browserBridgeMessage{Kind: "scope", Tabs: []browserPersonalTab{}}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -137,7 +196,11 @@ func TestPersonalBrowserIPCAndRevocation(t *testing.T) {
 			if message.Method == "Page.getFrameTree" {
 				data = json.RawMessage(`{"frameTree":{"frame":{"id":"frame","url":"http://localhost/test"}}}`)
 			}
-			if message.Method == "WebCodex.frames" {
+			if message.Method == "WebCodex.prepare" {
+				if err := encoder.Encode(browserBridgeMessage{Kind: "scope", Tabs: []browserPersonalTab{{7, approvedURL}}}); err != nil {
+					return
+				}
+			} else if message.Method == "WebCodex.frames" {
 				data = json.RawMessage(`[]`)
 				if actual != nil {
 					frames, err := actual.frames(ctx)
@@ -165,12 +228,7 @@ func TestPersonalBrowserIPCAndRevocation(t *testing.T) {
 		b.mu.Lock()
 		link := b.bridge
 		b.mu.Unlock()
-		ready := false
-		if link != nil {
-			link.mu.Lock()
-			ready = len(link.tabs) > 0
-			link.mu.Unlock()
-		}
+		ready := link != nil
 		if ready {
 			break
 		}
