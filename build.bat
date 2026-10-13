@@ -1,4 +1,6 @@
 @echo off
+setlocal
+cd /d "%~dp0"
 chcp 65001 > nul
 
 echo ========================================================
@@ -23,7 +25,7 @@ if %errorlevel% neq 0 (
         echo.
         echo Restart terminal or this script after installation.
         echo.
-        pause
+        if /i not "%~1"=="--no-pause" pause
         exit /b 1
     )
 )
@@ -37,8 +39,8 @@ echo [1/2] Building webcodex-agent.exe ...
 go build -ldflags="-s -w" -o webcodex-agent.exe ./cmd/agent
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to compile webcodex-agent.exe
-    pause
-    exit /b %errorlevel%
+    if /i not "%~1"=="--no-pause" pause
+    exit /b 1
 )
 echo [SUCCESS] Created webcodex-agent.exe
 
@@ -49,8 +51,8 @@ if not exist "bin" mkdir "bin"
 go build -ldflags="-s -w" -o bin\webcodex-gate.exe ./cmd/gate
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to compile bin\webcodex-gate.exe
-    pause
-    exit /b %errorlevel%
+    if /i not "%~1"=="--no-pause" pause
+    exit /b 1
 )
 echo [SUCCESS] Created bin\webcodex-gate.exe
 
@@ -75,5 +77,6 @@ echo  2. Run start-agent-*.bat alongside webcodex-agent.exe
 echo  3. Connect parameters in ChatGPT settings / custom GPT
 echo ========================================================
 echo.
-pause
+if /i not "%~1"=="--no-pause" pause
+exit /b 0
 

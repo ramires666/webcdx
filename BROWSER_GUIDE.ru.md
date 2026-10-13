@@ -11,10 +11,10 @@
 работают браузер и agent. Администраторские права не нужны:
 
 ```powershell
-./bin/webcodex-agent.exe --install-browser-host
+./webcodex-agent.exe --install-browser-host
 $env:WEBCODEX_BROWSER_ENABLED='1'
 $env:WEBCODEX_BROWSER_PERSONAL_ENABLED='1'
-# Затем запустите этот же ./bin/webcodex-agent.exe с обычными Gate URL и токеном.
+# Затем запустите этот же ./webcodex-agent.exe с обычными Gate URL и токеном.
 ```
 
 Linux: `./webcodex-agent --install-browser-host`; регистрация создаётся

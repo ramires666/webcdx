@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
+cd "$(dirname "$0")"
 
 echo "========================================================"
 echo "  WebCodex: Сборка компонентов (Agent + Gate)"

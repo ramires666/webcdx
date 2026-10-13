@@ -1,6 +1,10 @@
 .git
 .gitignore
 bin
+backups
+logs
+start-agent-*.bat
+*.exe
 dev-data
 data
 third_party
