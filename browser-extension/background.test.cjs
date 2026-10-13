@@ -20,7 +20,7 @@ async function environment(options = {}) {
     storage:{local:{get:async key=>({[key]:storage[key]}),set:async values=>Object.assign(storage,structuredClone(values))}},
     alarms:{onAlarm:event(),get:async key=>alarms.get(key),create:async(key,value)=>alarms.set(key,value),clear:async key=>alarms.delete(key)},
     tabs:{get:async id=>{if(!tabs.has(id))throw Error('Tab closed');return tabs.get(id)},query:async query=>[...tabs.values()].filter(tab=>!query.active||tab.active),
-      onCreated:event(),onUpdated:event(),onRemoved:event(),onActivated:event(),remove:async id=>tabs.delete(id),create:async({url})=>{const tab={id:100+tabs.size,url};tabs.set(tab.id,tab);return tab}},
+      onCreated:event(),onUpdated:event(),onRemoved:event(),onActivated:event(),remove:async id=>tabs.delete(id),create:async({url})=>{const tab=options.pendingCreate?{id:100+tabs.size,url:'',pendingUrl:url}:{id:100+tabs.size,url};tabs.set(tab.id,tab);return tab}},
     debugger:{onDetach:event(),onEvent:event(),attach:async source=>{debuggerAttaches.push(source.tabId);if(options.attach)await options.attach()},detach:async()=>{},sendCommand:async(source,method,params)=>{commands.push({source,method,params});return {ok:true}}},
     downloads:{onDeterminingFilename:event(),onChanged:event(),cancel:async()=>{}}};
   const context = vm.createContext({chrome,URL,Map,Set,Promise,crypto:crypto.webcrypto,
@@ -230,4 +230,25 @@ test('personal can start on demand when Chrome only has its internal new-tab pag
   await e.run(`execute({tab_id:${id},method:'Page.navigate',params:{url:'https://example.com/'}})`);
   assert.equal(e.commands.at(-1).method,'Page.navigate');
   assert.equal(e.debuggerAttaches.includes(7),false);
+});
+
+test('new personal tabs attach while Chrome has only a pending URL',async()=>{
+  const e=await environment({manual:false,pendingCreate:true,storage:{webcodexPersonalAccess:{continuous:true,allowNew:true}}});
+  const result=await e.run(`execute({tab_id:7,method:'WebCodex.newTab'})`);
+  assert.equal(result.url,'about:blank');
+  assert.equal(e.run(`available.has(${result.tab_id})`),true);
+  assert.equal(e.run(`attached.get(${result.tab_id}).created`),true);
+  await e.run(`execute({tab_id:${result.tab_id},method:'Page.enable'})`);
+  await e.run(`execute({tab_id:${result.tab_id},method:'Page.navigate',params:{url:'https://www.google.com/'}})`);
+  await e.run(`execute({tab_id:${result.tab_id},method:'WebCodex.closeTab'})`);
+  assert.equal(e.tabs.has(result.tab_id),false);
+  assert.equal(e.tabs.has(7),true);
+});
+
+test('failed attachment closes only the tab created for the failed request',async()=>{
+  const e=await environment({pendingCreate:true,attach:async()=>{throw Error('Debugger rejected tab')}});
+  e.run('allowNew=true');
+  await assert.rejects(e.run(`execute({tab_id:7,method:'WebCodex.newTab'})`));
+  assert.equal(e.tabs.size,1);
+  assert.equal(e.tabs.has(7),true);
 });

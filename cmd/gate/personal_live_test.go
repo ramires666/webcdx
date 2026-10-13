@@ -103,6 +103,33 @@ func TestInstalledPersonalBrowserLive(t *testing.T) {
 		t.Fatal("personal snapshot returned no page frames")
 	}
 	t.Logf("REAL PERSONAL SNAPSHOT OK: %d frames; page contents were not exported", len(frames))
+	if os.Getenv("WEBCODEX_PERSONAL_LIVE_MUTATIONS") != "1" {
+		return
+	}
+	created, code := call("browser_tabs", map[string]any{"browser_session_id": id, "action": "new", "request_key": "personal-live-new"})
+	if code != "" || created == nil || created["status"] == "waiting_user" {
+		t.Fatalf("creating a personal task tab failed: %s (new-tab permission must be enabled)", code)
+	}
+	newTab := created["tab_id"].(string)
+	defer func() {
+		_, code := call("browser_tabs", map[string]any{"browser_session_id": id, "tab_id": newTab, "action": "close", "request_key": "personal-live-close"})
+		if code != "" {
+			t.Errorf("closing only the personal test tab failed: %s", code)
+		}
+	}()
+	_, code = call("browser_navigate", map[string]any{"browser_session_id": id, "tab_id": newTab, "action": "url", "url": "https://www.google.com/", "request_key": "personal-live-google"})
+	if code != "" {
+		t.Fatalf("navigating the new personal task tab failed: %s", code)
+	}
+	_, code = call("browser_wait", map[string]any{"browser_session_id": id, "tab_id": newTab, "condition": "load", "timeout_seconds": 15})
+	if code != "" {
+		t.Fatalf("loading Google in the personal task tab failed: %s", code)
+	}
+	snapshot, code = call("browser_snapshot", map[string]any{"browser_session_id": id, "tab_id": newTab})
+	if code != "" || snapshot == nil {
+		t.Fatalf("reading the new personal task tab failed: %s", code)
+	}
+	t.Log("REAL PERSONAL NEW TAB OK: created, navigated to Google, read; cleanup closes only the test tab")
 }
 
 func callPersonalLiveOperation(t *testing.T, endpoint, token, operationID string) (map[string]any, string) {

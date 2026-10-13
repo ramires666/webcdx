@@ -20,6 +20,17 @@ function permitted(raw, scope, blank = false) {
   try { const url = new URL(raw); return ['http:','https:'].includes(url.protocol) && !url.username && !url.password && (allowLocal || !localHost(url.hostname)) && (scope.publicWeb || url.origin === scope.origin); }
   catch { return false; }
 }
+function tabURL(tab) { return tab.url || tab.pendingUrl || ''; }
+async function createTaskTab(scope) {
+  const child = await chrome.tabs.create({url:'about:blank'});
+  try { await attach(child,{...scope,created:true}); }
+  catch (error) {
+    // This tab was created by this call; preserve every existing user tab.
+    try { await chrome.tabs.remove(child.id); } catch {}
+    throw error;
+  }
+  return {tab_id:child.id,url:tabURL(child)};
+}
 function post(message) {
   if (!port) throw Error('Native bridge disconnected');
   if (JSON.stringify(message).length > 900000) throw Error('Native response exceeds limit');
@@ -47,10 +58,11 @@ async function publishScope() {
     candidates.sort((a,b) => Number(b.active)-Number(a.active) || (b.lastAccessed || 0)-(a.lastAccessed || 0));
     for (const tab of candidates) {
       const scope = attached.get(tab.id) || {publicWeb:true,created:false};
-      if (tabs.length < PERSONAL_TAB_LIMIT && permitted(tab.url,scope,scope.created)) tabs.push({tab_id:tab.id,url:tab.url});
+      const url = tabURL(tab);
+      if (tabs.length < PERSONAL_TAB_LIMIT && permitted(url,scope,scope.created)) tabs.push({tab_id:tab.id,url});
     }
   } else {
-    for (const [id, scope] of attached) { try { const tab = await chrome.tabs.get(id); if (permitted(tab.url,scope,scope.created)) tabs.push({tab_id:id,url:tab.url}); } catch {} }
+    for (const [id, scope] of attached) { try { const tab = await chrome.tabs.get(id); const url = tabURL(tab); if (permitted(url,scope,scope.created)) tabs.push({tab_id:id,url}); } catch {} }
   }
   if (epoch !== accessEpoch) return;
   available.clear();
@@ -144,7 +156,7 @@ function connect() {
 async function attach(tab, scope) {
   if (attached.size >= PERSONAL_TAB_LIMIT) throw Error('Tab limit reached');
   if (paused || localPaused) throw Error('Local control paused');
-  if (!permitted(tab.url,scope,scope.created)) throw Error('Tab URL is outside the selected scope');
+  if (!permitted(tabURL(tab),scope,scope.created)) throw Error('Tab URL is outside the selected scope');
   if (attached.has(tab.id)) return;
   const epoch = accessEpoch;
   await chrome.debugger.attach({tabId:tab.id},'1.3');
@@ -165,24 +177,21 @@ async function execute(message) {
     if (!continuous || !connected) throw Error('Enable permanent access locally');
     await scopeUpdate();
     if (!available.size) {
-      const tab = await chrome.tabs.create({url:'about:blank'});
-      await attach(tab,{publicWeb:true,created:true});
+      await createTaskTab({publicWeb:true});
     }
     return {};
   }
   let tab = await chrome.tabs.get(message.tab_id);
   if (!attached.has(tab.id) && continuous && connected && available.has(tab.id)) {
-    await attach(tab,{origin:new URL(tab.url).origin,publicWeb:true,created:false});
+    await attach(tab,{origin:new URL(tabURL(tab)).origin,publicWeb:true,created:false});
     tab = await chrome.tabs.get(message.tab_id);
   }
   const scope = attached.get(message.tab_id);
   if (!scope) throw Error('Tab is not locally attached');
-  if (!permitted(tab.url,scope,scope.created)) { await chrome.debugger.detach({tabId:tab.id}); attached.delete(tab.id); await scopeUpdate(); throw Error('Tab left permitted scope'); }
+  if (!permitted(tabURL(tab),scope,scope.created)) { await chrome.debugger.detach({tabId:tab.id}); attached.delete(tab.id); await scopeUpdate(); throw Error('Tab left permitted scope'); }
   if (method === 'WebCodex.newTab') {
     if (!allowNew) throw Error('New tabs are not locally permitted');
-    const child = await chrome.tabs.create({url:'about:blank'});
-    await attach(child,{...scope,created:true});
-    return {tab_id:child.id,url:child.url};
+    return createTaskTab(scope);
   }
   if (method === 'WebCodex.closeTab') {
     if (!scope.created) throw Error('Only tabs created for this task can be closed');
@@ -217,7 +226,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       await connect();
       const [tab] = await chrome.tabs.query({active:true,currentWindow:true});
       if (!tab) throw Error('Откройте вкладку сайта');
-      const url = new URL(tab.url);
+      const url = new URL(tabURL(tab));
       await attach(tab,{origin:url.origin,publicWeb:!!message.publicWeb,created:false});
     } else if (message.type === 'continuous') {
       if (message.enabled) {
@@ -261,7 +270,7 @@ chrome.debugger.onEvent.addListener(async (source,method,event) => {
   }
   if (['Page.frameNavigated','Page.navigatedWithinDocument'].includes(method)) {
     const tab = await chrome.tabs.get(source.tabId);
-    if (!permitted(tab.url,scope,scope.created)) { attached.delete(tab.id); try { await chrome.debugger.detach({tabId:tab.id}); } catch {} }
+    if (!permitted(tabURL(tab),scope,scope.created)) { attached.delete(tab.id); try { await chrome.debugger.detach({tabId:tab.id}); } catch {} }
     await scopeUpdate();
   }
   if (!['Page.frameNavigated','Page.navigatedWithinDocument','Page.javascriptDialogOpening','Page.javascriptDialogClosed','Runtime.exceptionThrown','Runtime.consoleAPICalled','Network.loadingFailed','Network.responseReceived'].includes(method)) return;
