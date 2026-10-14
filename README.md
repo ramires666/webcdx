@@ -126,17 +126,25 @@ Each command session is stored under `<log-dir>/<session-id>/` with `metadata.js
 
 ## Execution visibility
 
-The agent console shows command/argv, cwd, session ID, PID, timeout, log paths,
-and incoming stdout/stderr by default. Output chunks are quoted to escape
-terminal control characters. Active processes emit `RUNNING` every 10 seconds;
-completion emits `EXIT` with status and exit code, independently of polling.
-Start failures, stop requests and disk log limits are also reported.
-Console output continues after the disk log budget is exhausted.
+The agent console defaults to short Russian action summaries: files being read,
+folders being inspected, file creation/edits and browser actions. File contents,
+protocol chatter, repeated command polling and internal IDs are hidden.
+Successful `write_file`/`edit_file` operations show only changed lines in two
+columns, before and after, with line numbers. Previews show at most 40 rows and
+shorten long lines; files over 20,000 total lines or more than 256 inserted/deleted
+lines receive a short notice instead. Shell changes are described by the command,
+without automatic file comparison.
 
-Set `WEBCODEX_VERBOSE=0` to hide commands and output while retaining lifecycle
-events. Environment values and stdin are not automatically logged, but commands
-and program output can contain secrets. Restored processes report status and
-elapsed time; use `poll_command` for their output. Their exit code may be unknown.
+Commands retain disk stdout/stderr logs. The console reports running status every
+10 seconds, completion, nonzero exit codes, start/stop failures and disk log limits.
+Failures include a bounded stderr excerpt when available. File and browser errors
+remain visible as short action-specific warnings.
+
+Set `WEBCODEX_DEBUG=1` for request/session/operation IDs, PID, timing, log paths and
+escaped stdout/stderr chunks. `WEBCODEX_VERBOSE=1` remains a fallback; an explicit
+`WEBCODEX_DEBUG=0` overrides it. Terminal control characters are escaped. Environment
+values and stdin are not automatically logged; commands, changed text and stderr
+may contain secrets. Restored processes may have unknown exit codes.
 
 `exec_command` now yields after 1 second by default (at most 3 seconds even if
 a longer wait is requested); the process continues in

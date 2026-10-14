@@ -80,11 +80,11 @@ func TestCommandLogging(t *testing.T) {
 		"cwd":  root, "env": map[string]any{"GO_WANT_V4_HELPER": "1"}, "yield_time_ms": 5000,
 	})
 	text = readConsole()[len(text):]
-	if strings.Contains(text, "ARGV") || strings.Contains(text, "stdout:") || strings.Contains(text, "stderr:") || !strings.Contains(text, quiet["session_id"].(string)) || !strings.Contains(text, "EXIT") {
-		t.Fatalf("quiet mode must keep lifecycle only: %s", text)
+	if strings.Contains(text, "ARGV") || strings.Contains(text, "stdout:") || strings.Contains(text, "stderr:") || strings.Contains(text, quiet["session_id"].(string)) || !strings.Contains(text, "Команда завершилась с ошибкой: код 7") {
+		t.Fatalf("normal mode must show a brief outcome without IDs: %s", text)
 	}
 	failed := callToolV4(t, executor, "exec_command", map[string]any{"argv": []any{filepath.Join(root, "missing-executable")}, "cwd": root})
-	if failed["status"] != "failed" || !strings.Contains(readConsole(), "START_FAILED") {
+	if failed["status"] != "failed" || !strings.Contains(readConsole(), "Не удалось запустить команду") {
 		t.Fatalf("missing start failure: %v", failed)
 	}
 }

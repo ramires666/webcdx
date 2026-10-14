@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"webcodex/internal/protocol"
@@ -35,7 +36,7 @@ func streamOnce(ctx context.Context, client *http.Client, gateURL, token string,
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("stream status %s", resp.Status)
 	}
-	log.Printf("agent connected to gate")
+	log.Printf("Агент подключён. Жду действий модели.")
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
@@ -47,11 +48,11 @@ func streamOnce(ctx context.Context, client *http.Client, gateURL, token string,
 
 		var request protocol.AgentRequest
 		if err := json.Unmarshal(line, &request); err != nil {
-			log.Printf("bad stream json: %v", err)
+			log.Printf("Ошибка: Gate прислал некорректный запрос")
 			continue
 		}
 		if !request.Deadline.IsZero() && !time.Now().Before(request.Deadline) {
-			log.Printf("rejecting expired request id=%s", request.ID)
+			log.Printf("Действие пропущено: время ожидания истекло")
 			continue
 		}
 		go handleRequest(ctx, client, gateURL, token, runner, request)
@@ -73,11 +74,17 @@ func handleRequest(
 ) {
 	started := time.Now()
 	if !request.Deadline.IsZero() && !started.Before(request.Deadline) {
-		log.Printf("rejecting expired request id=%s", request.ID)
+		log.Printf("Действие пропущено: время ожидания истекло")
 		return
 	}
 	actionDesc := formatActionRequest(request.Request)
-	log.Printf("▶ %s (id=%s, bytes=%d)", actionDesc, request.ID, len(request.Request))
+	executor, _ := runner.(*nativeExecutor)
+	debug := executor != nil && executor.verbose
+	if debug {
+		log.Printf("▶ %s (id=%s, bytes=%d)", actionDesc, request.ID, len(request.Request))
+	} else if actionDesc != "" {
+		log.Print("▶ " + strings.TrimSpace(actionDesc))
+	}
 
 	callCtx := ctx
 	cancel := func() {}
@@ -88,8 +95,16 @@ func handleRequest(
 
 	callCtx = context.WithValue(callCtx, commandRequestID{}, request.ID)
 	response, err := runner.call(callCtx, request.Request)
-	actionResult := formatActionResponse(response, err, time.Since(started))
-	log.Printf("◀ %s (id=%s)", actionResult, request.ID)
+	actionResult := formatActionResponse(response, err)
+	if debug {
+		log.Printf("◀ %s (id=%s, elapsed=%s)", actionResult, request.ID, time.Since(started).Round(time.Millisecond))
+	} else if actionResult != "" {
+		if actionDesc == "" {
+			log.Printf("⚠ %s", actionResult)
+		} else {
+			log.Printf("⚠ %s — %s", actionResult, strings.TrimSpace(actionDesc))
+		}
+	}
 	result := protocol.AgentResponse{ID: request.ID, Response: response}
 	if err != nil {
 		result.Error = err.Error()
@@ -98,7 +113,7 @@ func handleRequest(
 		return
 	}
 	if err := sendResult(ctx, client, gateURL, token, result); err != nil {
-		log.Printf("send result: %v", err)
+		log.Printf("Не удалось передать результат модели: %s", compactString(err.Error(), 180))
 	}
 }
 

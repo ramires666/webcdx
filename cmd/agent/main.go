@@ -13,6 +13,9 @@ import (
 )
 
 func main() {
+	if env("WEBCODEX_DEBUG", env("WEBCODEX_VERBOSE", "0")) == "0" {
+		log.SetFlags(0)
+	}
 	if nativeHostInvocation(os.Args) {
 		if err := runBrowserNativeHost(os.Args[1]); err != nil {
 			log.Printf("native browser host: %v", err)
@@ -41,7 +44,7 @@ func main() {
 		if err == nil {
 			break
 		}
-		log.Printf("load agent defaults: %v", err)
+		log.Printf("Не удалось получить настройки агента; пробую снова: %s", compactString(err.Error(), 180))
 		select {
 		case <-ctx.Done():
 			return
@@ -56,11 +59,15 @@ func main() {
 		log.Fatalf("initialize local executor: %v", err)
 	}
 	defer executor.Close()
-	log.Printf("agent ready: verbose=%t log_dir=%q; WEBCODEX_VERBOSE=0 hides commands and output", executor.verbose, executor.logDir)
+	if executor.verbose {
+		log.Printf("agent ready: debug=true log_dir=%q", executor.logDir)
+	} else {
+		log.Print("Агент готов. Подробная диагностика: WEBCODEX_DEBUG=1.")
+	}
 
 	for ctx.Err() == nil {
 		if err := streamOnce(ctx, client, gateURL, token, executor); err != nil && ctx.Err() == nil {
-			log.Printf("stream: %v", err)
+			log.Printf("⚠ Связь с Gate прервана; переподключаюсь. %s", compactString(err.Error(), 120))
 			timer := time.NewTimer(time.Second)
 			select {
 			case <-ctx.Done():

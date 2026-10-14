@@ -83,7 +83,11 @@ func (e *nativeExecutor) commandEvent(session *processSession, event string) {
 		}
 	}
 	if err != nil {
-		log.Printf("[session=%s] EVENT_LOG_FAILED error=%q", session.id, err.Error())
+		if e.verbose {
+			log.Printf("[session=%s] EVENT_LOG_FAILED error=%q", session.id, err.Error())
+		} else {
+			log.Printf("⚠ Не удалось сохранить события команды: %s", compactString(err.Error(), 180))
+		}
 	}
 }
 

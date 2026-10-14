@@ -109,7 +109,7 @@ func newNativeExecutor(roots string) (*nativeExecutor, error) {
 		ProcessTTL:       durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour),
 		MaxLogBytes:      int64Env("WEBCODEX_MAX_LOG_BYTES", defaultLogMax),
 		MaxResponseBytes: intEnv("WEBCODEX_MAX_RESPONSE_BYTES", defaultResponseMax),
-		Verbose:          env("WEBCODEX_VERBOSE", "1") != "0",
+		Verbose:          env("WEBCODEX_DEBUG", env("WEBCODEX_VERBOSE", "0")) != "0",
 	})
 }
 

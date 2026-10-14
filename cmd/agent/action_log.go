@@ -3,95 +3,102 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
-	"time"
+	"unicode"
 )
 
-// formatActionRequest parses an incoming JSON-RPC request and returns a human-readable action description.
 func formatActionRequest(raw []byte) string {
 	var msg struct {
-		Method string          `json:"method"`
-		Params json.RawMessage `json:"params"`
-	}
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		return "📦 [mcp] Входящий запрос (не удалось распарсить JSON)"
-	}
-
-	switch msg.Method {
-	case "initialize":
-		return "🔌 [mcp] Инициализация сессии ChatGPT ➔ Agent"
-	case "notifications/initialized":
-		return "✨ [mcp] Сессия готова"
-	case "tools/list":
-		return "📋 [mcp] Запрос доступных инструментов агента"
-	case "ping":
-		return "🏓 [mcp] Ping"
-	case "tools/call":
-		var call struct {
+		Method string `json:"method"`
+		Params struct {
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
-		}
-		if err := json.Unmarshal(msg.Params, &call); err != nil {
-			return "🔧 [tool] Вызов инструмента"
-		}
-		return describeToolCall(call.Name, call.Arguments)
-	default:
-		if msg.Method != "" {
-			return fmt.Sprintf("📨 [mcp] Метод: %s", msg.Method)
-		}
-		return "📦 [mcp] Входящий запрос"
+		} `json:"params"`
 	}
+	if json.Unmarshal(raw, &msg) != nil {
+		return "Получен некорректный запрос"
+	}
+	if msg.Method != "tools/call" {
+		return ""
+	}
+	return describeToolCall(msg.Params.Name, msg.Params.Arguments)
 }
 
-// describeToolCall produces a concise, readable summary of a specific tool invocation.
 func describeToolCall(name string, args map[string]any) string {
-	if args == nil {
-		args = map[string]any{}
-	}
-
+	text := func(key string) string { value, _ := args[key].(string); return compactString(value, 180) }
 	switch name {
 	case "exec_command":
-		cwd, _ := args["cwd"].(string)
-		if cwd != "" {
-			return fmt.Sprintf("⚡ [exec_command] cwd: %s", cwd)
-		}
-		return "⚡ [exec_command]"
+		return "Запускаю команду в " + text("cwd")
 	case "read_file":
-		path := getPathArg(args)
-		return fmt.Sprintf("📖 [read_file] %s", path)
-	case "write_file", "edit_file", "delete_path":
-		path := getPathArg(args)
-		return fmt.Sprintf("💾 [%s] %s", name, path)
+		return "Читаю файл " + text("path")
+	case "write_file":
+		if args["if_absent"] == true {
+			return "Создаю файл " + text("path")
+		}
+		return "Записываю файл " + text("path")
+	case "edit_file":
+		return "Правлю файл " + text("path")
+	case "delete_path":
+		return "Удаляю " + text("path")
 	case "list_directory":
-		path := getPathArg(args)
-		return fmt.Sprintf("📁 [list_directory] %s", path)
-	case "search_files", "find_files":
-		path := getPathArg(args)
-		return fmt.Sprintf("🔍 [%s] %s", name, path)
+		return "Читаю содержимое папки " + text("path")
+	case "search_files":
+		return "Ищу «" + text("pattern") + "» в " + text("path")
+	case "find_files":
+		return "Ищу файлы в " + text("path")
 	case "move_path":
-		source, _ := args["source"].(string)
-		destination, _ := args["destination"].(string)
-		return fmt.Sprintf("📦 [move_path] %s → %s", source, destination)
-	case "poll_command", "cancel_command":
-		sessionID, _ := args["session_id"].(string)
-		return fmt.Sprintf("⚙️ [%s] %s", name, sessionID)
+		return "Перемещаю " + text("source") + " → " + text("destination")
+	case "list_allowed_roots":
+		return "Проверяю доступные каталоги"
+	case "poll_command", "list_commands", "cancel_command":
+		return ""
+	case "browser_open":
+		return "Открываю браузер " + consoleURL(text("url"))
+	case "browser_navigate":
+		if target := text("url"); target != "" {
+			return "Открываю страницу " + consoleURL(target)
+		}
+		if label := map[string]string{"back": "Возвращаюсь на предыдущую страницу", "forward": "Перехожу на следующую страницу", "reload": "Обновляю страницу"}[text("action")]; label != "" {
+			return label
+		}
+		return "Перехожу на страницу браузера"
+	case "browser_snapshot":
+		return "Читаю страницу браузера"
+	case "browser_screenshot":
+		return "Делаю снимок страницы"
+	case "browser_tabs":
+		return "Работаю с вкладками браузера"
+	case "browser_interact":
+		labels := map[string]string{"click": "Нажимаю элемент", "fill": "Заполняю поле", "select": "Выбираю значение", "hover": "Навожу указатель", "press": "Нажимаю клавишу", "scroll": "Прокручиваю страницу", "drag": "Перетаскиваю элемент", "coordinates": "Нажимаю на странице", "dialog": "Отвечаю на диалог"}
+		label := labels[text("action")]
+		if label == "" {
+			label = "Работаю со страницей"
+		}
+		return label + " " + text("selector") + " " + text("name")
+	case "browser_wait":
+		return "Жду загрузку или элемент страницы"
+	case "browser_files":
+		return "Работаю с файлами браузера " + text("path")
+	case "browser_diagnostics":
+		return "Проверяю ошибки страницы"
+	case "browser_control":
+		return map[string]string{"pause": "Приостанавливаю браузер", "resume": "Продолжаю работу в браузере", "cancel": "Отменяю действие браузера", "disconnect": "Отключаю управление браузером", "waiting_user": "Браузер ждёт действия пользователя"}[text("action")]
 	default:
-		return fmt.Sprintf("🔧 [%s]", name)
+		return "Выполняю действие " + compactString(name, 80)
 	}
 }
 
-// formatActionResponse parses the agent response and returns a short readable summary of the result.
-func formatActionResponse(raw []byte, callErr error, elapsed time.Duration) string {
+func formatActionResponse(raw []byte, callErr error) string {
 	if callErr != nil {
-		return fmt.Sprintf("❌ Ошибка выполнения за %s: %v", elapsed.Round(time.Millisecond), callErr)
+		return "Ошибка: " + compactString(callErr.Error(), 180)
 	}
-
 	var msg struct {
 		Result struct {
 			IsError    bool           `json:"isError"`
 			Structured map[string]any `json:"structuredContent"`
 			Content    []struct {
-				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"content"`
 		} `json:"result"`
@@ -99,69 +106,127 @@ func formatActionResponse(raw []byte, callErr error, elapsed time.Duration) stri
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		return fmt.Sprintf("✅ Завершено за %s (%d байт)", elapsed.Round(time.Millisecond), len(raw))
+	if json.Unmarshal(raw, &msg) != nil {
+		return "Ошибка: не удалось прочитать ответ"
 	}
-
-	if msg.Error != nil && msg.Error.Message != "" {
-		return fmt.Sprintf("❌ Ошибка за %s: %s", elapsed.Round(time.Millisecond), compactString(msg.Error.Message, 80))
+	if msg.Error != nil {
+		return "Ошибка: " + compactString(msg.Error.Message, 180)
 	}
-
+	data := msg.Result.Structured
 	if msg.Result.IsError {
-		errorText := "сбой выполнения"
-		if len(msg.Result.Content) > 0 && msg.Result.Content[0].Text != "" {
-			errorText = msg.Result.Content[0].Text
+		if detail, ok := data["error"].(map[string]any); ok {
+			return "Ошибка: " + readableError(detail)
 		}
-		return fmt.Sprintf("⚠️ Завершено с предупреждением/ошибкой за %s: %s", elapsed.Round(time.Millisecond), compactString(errorText, 90))
-	}
-	if status, ok := msg.Result.Structured["status"].(string); ok {
-		if browserID, ok := msg.Result.Structured["browser_session_id"].(string); ok {
-			return fmt.Sprintf("Браузер: session=%s status=%s (ответ за %s)", browserID, status, elapsed.Round(time.Millisecond))
+		if len(msg.Result.Content) > 0 {
+			return "Ошибка: " + compactString(msg.Result.Content[0].Text, 180)
 		}
-		if operationID, ok := msg.Result.Structured["operation_id"].(string); ok {
-			return fmt.Sprintf("Браузер: operation=%s status=%s (ответ за %s)", operationID, status, elapsed.Round(time.Millisecond))
+		return "Ошибка выполнения"
+	}
+	if problems, ok := data["errors"].([]any); ok && len(problems) > 0 {
+		return fmt.Sprintf("Не удалось обработать часть файлов (%d): %s", len(problems), compactString(fmt.Sprint(problems[0]), 150))
+	}
+	if code, _ := data["error_code"].(string); code != "" {
+		return "Браузер: " + readableError(map[string]any{"code": code})
+	}
+	status, _ := data["status"].(string)
+	// Process lifecycle is printed once by the executor, independently of client polling.
+	if _, process := data["session_id"]; process && status != "outcome_unknown" && status != "orphaned" {
+		return ""
+	}
+	switch status {
+	case "failed":
+		return "Действие завершилось с ошибкой"
+	case "timed_out":
+		return "Превышено время ожидания"
+	case "cancelled":
+		return "Действие отменено"
+	case "orphaned", "outcome_unknown":
+		return "Результат неизвестен; проверьте состояние перед повтором"
+	case "waiting_user", "paused":
+		return "Браузер ждёт действия пользователя"
+	case "exited":
+		if code, ok := data["exit_code"].(float64); ok && code != 0 {
+			return fmt.Sprintf("Команда завершилась с ошибкой: код %d", int(code))
 		}
-		sessionID, _ := msg.Result.Structured["session_id"].(string)
-		exitCode := msg.Result.Structured["exit_code"]
-		label := "Статус процесса"
-		if status == "running" {
-			label = "Процесс ещё выполняется"
-		} else if status == "failed" || status == "timed_out" || status == "orphaned" || status == "exited" && exitCode != nil && exitCode != float64(0) {
-			label = "Процесс завершился с ошибкой"
-		}
-		return fmt.Sprintf("%s: session=%s status=%s exit_code=%v (ответ за %s)", label, sessionID, status, exitCode, elapsed.Round(time.Millisecond))
 	}
-
-	details := []string{}
-	if path, ok := msg.Result.Structured["path"].(string); ok && path != "" {
-		details = append(details, "path="+path)
-	}
-	for _, field := range []string{"bytes_written", "size", "line_count"} {
-		if value, ok := msg.Result.Structured[field].(float64); ok {
-			details = append(details, fmt.Sprintf("%s=%d", field, int64(value)))
-			break
-		}
-	}
-	detail := ""
-	if len(details) > 0 {
-		detail = ", " + strings.Join(details, ", ")
-	}
-	return fmt.Sprintf("✅ Успешно за %s%s", elapsed.Round(time.Millisecond), detail)
+	return ""
 }
 
-func getPathArg(args map[string]any) string {
-	value, _ := args["path"].(string)
-	return value
+func consoleURL(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return ""
+	}
+	parsed.User, parsed.RawQuery, parsed.Fragment = nil, "", ""
+	return parsed.String()
+}
+
+func readableError(detail map[string]any) string {
+	code, _ := detail["code"].(string)
+	labels := map[string]string{
+		"access_denied": "доступ запрещён", "permission_denied": "доступ запрещён", "not_found": "файл или папка не найдены", "outside_allowed_roots": "путь вне разрешённых каталогов",
+		"stale_hash": "файл изменился; нужно перечитать его", "text_not_found": "заменяемый текст не найден", "ambiguous_match": "найдено несколько совпадений текста",
+		"already_exists": "файл уже существует", "binary_file": "двоичный файл нельзя прочитать как текст", "browser_disabled": "браузинг отключён", "cancelled": "действие отменено",
+		"outcome_unknown": "результат неизвестен; проверьте состояние перед повтором", "waiting_user": "требуется действие пользователя",
+		"timeout": "превышено время ожидания", "element_not_found": "элемент страницы не найден", "ambiguous_locator": "на странице несколько подходящих элементов", "stale_snapshot": "страница изменилась; нужно перечитать её", "browser_disconnected": "браузер отключён", "paused": "работа браузера приостановлена", "not_directory": "путь не является папкой", "not_empty": "папка не пуста", "too_large": "превышен допустимый размер", "invalid_arguments": "неверные параметры действия",
+	}
+	if label := labels[code]; label != "" {
+		return label
+	}
+	message, _ := detail["message"].(string)
+	if message == "" || strings.HasPrefix(message, "browser operation ended:") {
+		message = "не удалось выполнить действие"
+	}
+	return compactString(message, 180)
+}
+
+func commandLabel(session *processSession) string {
+	if session.command != "" {
+		return compactString(session.command, 100)
+	}
+	if session.cmd != nil {
+		return compactString(strings.Join(session.cmd.Args, " "), 100)
+	}
+	return "в " + compactString(session.cwd, 100)
+}
+
+func commandOutcome(status string, code *int) string {
+	switch status {
+	case "failed":
+		return "⚠ Команда завершилась с ошибкой"
+	case "timed_out":
+		return "⚠ Команда остановлена: превышено время ожидания"
+	case "cancelled":
+		return "Команда отменена"
+	case "orphaned", "outcome_unknown":
+		return "⚠ Результат команды неизвестен"
+	}
+	if code == nil {
+		return "Команда завершилась; код завершения неизвестен"
+	}
+	if *code != 0 {
+		return fmt.Sprintf("⚠ Команда завершилась с ошибкой: код %d", *code)
+	}
+	return "✓ Команда завершена"
 }
 
 func compactString(s string, maxLen int) string {
-	s = strings.ReplaceAll(s, "\r\n", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.TrimSpace(s)
-	runes := []rune(s)
+	s = strings.Join(strings.Fields(s), " ")
+	runes := []rune(consoleText(s))
 	if len(runes) > maxLen {
 		return string(runes[:maxLen]) + "..."
 	}
-	return s
+	return string(runes)
+}
+
+func consoleText(s string) string {
+	var safe strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			safe.WriteString(strings.Trim(strconv.QuoteRune(r), "'"))
+		} else {
+			safe.WriteRune(r)
+		}
+	}
+	return safe.String()
 }

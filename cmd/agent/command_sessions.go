@@ -85,7 +85,11 @@ func (w *cappedStreamWriter) Write(data []byte) (int, error) {
 	part := data
 	if int64(len(part)) > w.budget.remaining {
 		if !w.budget.stdoutTruncated && !w.budget.stderrTruncated {
-			log.Printf("[session=%s] LOG_LIMIT reached; further output is not saved to disk", w.sessionID)
+			if w.verbose {
+				log.Printf("[session=%s] LOG_LIMIT reached; further output is not saved to disk", w.sessionID)
+			} else {
+				log.Printf("⚠ Достигнут лимит журнала команды; дальнейший вывод не сохраняется")
+			}
 		}
 		part = part[:max(0, int(w.budget.remaining))]
 		if w.stderr {
@@ -234,8 +238,19 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 			log.Printf("[session=%s] ARGV %q cwd=%q", id, cmd.Args, cwd)
 		}
 	}
+	if !e.verbose {
+		label := command
+		if !hasCommand {
+			label = strings.Join(cmd.Args, " ")
+		}
+		log.Printf("▶ Команда: %s", compactString(label, 180))
+	}
 	if err := cmd.Start(); err != nil {
-		log.Printf("[session=%s] START_FAILED error=%q", id, err.Error())
+		if e.verbose {
+			log.Printf("[session=%s] START_FAILED error=%q", id, err.Error())
+		} else {
+			log.Printf("⚠ Не удалось запустить команду: %s", compactString(err.Error(), 180))
+		}
 		stdoutFile.Close()
 		stderrFile.Close()
 		e.mu.Lock()
@@ -251,7 +266,9 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 	session.status = "running"
 	session.pid = cmd.Process.Pid
 	session.processIdentity, _ = processIdentity(session.pid)
-	log.Printf("[session=%s] START pid=%d cwd=%q timeout=%ds stdout=%q stderr=%q", id, session.pid, cwd, timeoutSeconds, stdoutPath, stderrPath)
+	if e.verbose {
+		log.Printf("[session=%s] START pid=%d cwd=%q timeout=%ds stdout=%q stderr=%q", id, session.pid, cwd, timeoutSeconds, stdoutPath, stderrPath)
+	}
 	e.mu.Unlock()
 	e.commandEvent(session, "started")
 	go e.waitProcess(session)
@@ -343,10 +360,23 @@ func (e *nativeExecutor) waitProcess(session *processSession) {
 		session.budget.mu.Unlock()
 	}
 	session.finishedAt = time.Now().UTC()
-	log.Printf("[session=%s] EXIT status=%s exit_code=%v elapsed=%s error=%v", session.id, session.status, exitCodeValue(session.exitCode), session.finishedAt.Sub(session.startedAt).Round(time.Millisecond), err)
+	if e.verbose {
+		log.Printf("[session=%s] EXIT status=%s exit_code=%v elapsed=%s error=%v", session.id, session.status, exitCodeValue(session.exitCode), session.finishedAt.Sub(session.startedAt).Round(time.Millisecond), err)
+	} else {
+		log.Printf("%s — %s", commandOutcome(session.status, session.exitCode), commandLabel(session))
+	}
 	e.mu.Unlock()
 	_ = e.persistSession(session)
 	e.commandEvent(session, "finished")
+	if !e.verbose && err != nil {
+		if file, openErr := os.Open(session.stderrPath); openErr == nil {
+			detail, _ := io.ReadAll(io.LimitReader(file, 1024))
+			file.Close()
+			if strings.TrimSpace(string(detail)) != "" {
+				log.Printf("  Причина: %s", compactString(string(detail), 180))
+			}
+		}
+	}
 	session.closeDone()
 }
 
@@ -365,7 +395,11 @@ func (e *nativeExecutor) commandHeartbeat(session *processSession) {
 		case <-ticker.C:
 			e.mu.Lock()
 			if session.status == "running" {
-				log.Printf("[session=%s] RUNNING pid=%d elapsed=%s", session.id, session.pid, time.Since(session.startedAt).Round(time.Second))
+				if e.verbose {
+					log.Printf("[session=%s] RUNNING pid=%d elapsed=%s", session.id, session.pid, time.Since(session.startedAt).Round(time.Second))
+				} else {
+					log.Printf("… Команда ещё выполняется: %s", commandLabel(session))
+				}
 			}
 			e.mu.Unlock()
 		case <-session.done:
@@ -471,19 +505,31 @@ func (e *nativeExecutor) stopSession(id, status string) error {
 		return toolErr("process_identity_mismatch", "process identity no longer matches the persisted session")
 	}
 	session.status = status
-	log.Printf("[session=%s] STOP requested status=%s pid=%d", id, status, pid)
+	if e.verbose {
+		log.Printf("[session=%s] STOP requested status=%s pid=%d", id, status, pid)
+	} else {
+		log.Printf("Останавливаю команду: %s", commandLabel(session))
+	}
 	e.mu.Unlock()
 	_ = e.persistSession(session)
 	e.commandEvent(session, status)
 	if cmd != nil {
 		if err := terminateProcessTree(cmd); err != nil {
-			log.Printf("[session=%s] STOP_FAILED error=%q", id, err.Error())
+			if e.verbose {
+				log.Printf("[session=%s] STOP_FAILED error=%q", id, err.Error())
+			} else {
+				log.Printf("⚠ Не удалось остановить команду: %s", compactString(err.Error(), 180))
+			}
 			return toolErr("cancel_failed", "terminate process tree", err)
 		}
 		return nil
 	}
 	if err := terminatePIDTree(pid); err != nil {
-		log.Printf("[session=%s] STOP_FAILED error=%q", id, err.Error())
+		if e.verbose {
+			log.Printf("[session=%s] STOP_FAILED error=%q", id, err.Error())
+		} else {
+			log.Printf("⚠ Не удалось остановить команду: %s", compactString(err.Error(), 180))
+		}
 		return toolErr("cancel_failed", "terminate restored process tree", err)
 	}
 	return nil
@@ -729,7 +775,11 @@ func (e *nativeExecutor) restoreSessions() error {
 		}
 		if session.status == "running" && processAliveWithIdentity(session.pid, session.processIdentity) {
 			e.sessions[session.id] = session
-			log.Printf("[session=%s] RESTORED pid=%d", session.id, session.pid)
+			if e.verbose {
+				log.Printf("[session=%s] RESTORED pid=%d", session.id, session.pid)
+			} else {
+				log.Printf("Продолжаю наблюдение за командой в %s", compactString(session.cwd, 180))
+			}
 			go e.monitorRestored(session)
 			go e.commandHeartbeat(session)
 			continue
@@ -763,7 +813,11 @@ func (e *nativeExecutor) monitorRestored(session *processSession) {
 					session.status = "exited"
 				}
 				session.finishedAt = time.Now().UTC()
-				log.Printf("[session=%s] EXIT status=%s exit_code=unknown (restored process)", session.id, session.status)
+				if e.verbose {
+					log.Printf("[session=%s] EXIT status=%s exit_code=unknown (restored process)", session.id, session.status)
+				} else {
+					log.Printf("%s — %s", commandOutcome(session.status, nil), commandLabel(session))
+				}
 				e.mu.Unlock()
 				_ = e.persistSession(session)
 				e.commandEvent(session, "finished")

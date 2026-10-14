@@ -288,7 +288,11 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 			op.Status = "failed"
 			op.ErrorCode = "outcome_unknown"
 		}
-		log.Printf("[browser operation=%s] %s status=%s error_code=%s", op.ID, name, op.Status, op.ErrorCode)
+		if b.executor.verbose {
+			log.Printf("[browser operation=%s] %s status=%s error_code=%s", op.ID, name, op.Status, op.ErrorCode)
+		} else if op.Status == "failed" || op.ErrorCode != "" {
+			log.Printf("⚠ %s: %s", strings.TrimSpace(describeToolCall(name, args)), readableError(map[string]any{"code": op.ErrorCode}))
+		}
 		close(op.done)
 		b.mu.Unlock()
 	}()

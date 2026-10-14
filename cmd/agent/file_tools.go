@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -128,6 +129,10 @@ func (e *nativeExecutor) writeFile(args map[string]any, requirePrecondition bool
 		}
 	}
 	data := []byte(content)
+	before, _, previewErr := readRegularFile(path, maxReadBytes)
+	_, inspectErr := os.Lstat(path)
+	previewOK := previewErr == nil && !isBinary(before) || errors.Is(inspectErr, os.ErrNotExist)
+	_, parentErr := os.Stat(filepath.Dir(path))
 	if createOnly {
 		err = atomicCreate(path, data)
 	} else {
@@ -135,6 +140,14 @@ func (e *nativeExecutor) writeFile(args map[string]any, requirePrecondition bool
 	}
 	if err != nil {
 		return nil, err
+	}
+	if errors.Is(parentErr, os.ErrNotExist) {
+		log.Printf("✓ Создана папка %s", compactString(filepath.Dir(path), 180))
+	}
+	if previewOK {
+		logFileChange(path, before, data)
+	} else {
+		log.Printf("✓ Сохранён файл %s; сравнение недоступно", compactString(path, 180))
 	}
 	return map[string]any{"path": path, "bytes_written": len(data), "sha256": hashBytes(data)}, nil
 }
@@ -217,6 +230,7 @@ func (e *nativeExecutor) editFile(args map[string]any) (any, error) {
 	if err := atomicWrite(path, newData, false); err != nil {
 		return nil, err
 	}
+	logFileChange(path, data, newData)
 	return map[string]any{
 		"path": path, "old_sha256": oldHash, "new_sha256": hashBytes(newData),
 		"replacements": replacements, "bytes_written": len(newData),
