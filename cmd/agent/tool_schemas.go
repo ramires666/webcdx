@@ -133,7 +133,10 @@ func localTools(version string) []mcpToolDefinition {
 		tool("poll_command", "Read new output and status from a command session. Pass the returned next offsets to avoid repeating output. Keep monitoring running sessions and give the user progress updates about every 10 to 20 seconds, then report terminal status and exit_code.", v3PollInput, v3SessionOutput, true, false, false),
 		tool("cancel_command", "Terminate a command session and its process tree.", cancelInput, v3SessionOutput, false, true, false),
 	}
+	rootInfo := object(map[string]any{"path": stringField("Configured root path."), "available": booleanField("Whether this root is accessible to file tools; restart after mounting an unavailable drive.")}, "path", "available")
+	rootsTool := tool("list_allowed_roots", "Report the effective file roots on this computer, including local environment overrides. These roots do not restrict shell commands.", object(map[string]any{}, []string{}...), object(map[string]any{"roots": array(rootInfo), "unrestricted": booleanField("Whether all paths are allowed.")}, "roots", "unrestricted"), true, false, false)
 	if version != "v4" {
+		tools = append(tools, rootsTool)
 		for index := range tools {
 			tools[index].OutputSchema = map[string]any{"type": "object", "additionalProperties": true}
 		}
@@ -191,5 +194,6 @@ func localTools(version string) []mcpToolDefinition {
 		tool("find_files", "Find files and directories recursively by basename.", findInput, findOutput, true, false, false),
 		tool("move_path", "Rename a regular file or empty directory without overwriting.", moveInput, moveOutput, false, true, false),
 		tool("delete_path", "Delete a regular file or empty directory.", deleteInput, deleteOutput, false, true, false),
+		rootsTool,
 	)
 }

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"webcodex/internal/protocol"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -33,6 +35,8 @@ func newStore(path string) (*store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	// Keep foreign-key enforcement and other connection-local PRAGMAs on every query.
+	db.SetMaxOpenConns(1)
 
 	if err := db.Ping(); err != nil {
 		db.Close()
@@ -69,23 +73,29 @@ func (s *store) migrate(ctx context.Context) error {
 			name TEXT NOT NULL,
 			enabled INTEGER NOT NULL DEFAULT 1,
 			agent_token_hash TEXT NOT NULL UNIQUE,
-			oauth_client_id TEXT NOT NULL UNIQUE,
-			oauth_client_secret_hash TEXT NOT NULL,
+			allowed_roots TEXT NOT NULL DEFAULT 'C:\projects;W:\',
 			allowed_tools TEXT NOT NULL DEFAULT '',
 			denied_tools TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			last_seen_at DATETIME
 		);`,
-		`CREATE TABLE IF NOT EXISTS access_tokens (
-			token_hash TEXT PRIMARY KEY,
-			agent_id TEXT NOT NULL,
-			expires_at DATETIME NOT NULL,
-			created_at DATETIME NOT NULL,
-			FOREIGN KEY(agent_id) REFERENCES agents(id) ON DELETE CASCADE
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_access_tokens_agent ON access_tokens(agent_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_access_tokens_expires ON access_tokens(expires_at);`,
+		`CREATE TABLE IF NOT EXISTS mcp_clients (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+            oauth_client_id TEXT NOT NULL UNIQUE, oauth_client_secret_hash TEXT NOT NULL,
+            created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL
+        );`,
+		`CREATE TABLE IF NOT EXISTS mcp_access_tokens (
+            token_hash TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+            expires_at DATETIME NOT NULL, created_at DATETIME NOT NULL
+        );`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_tokens_client ON mcp_access_tokens(client_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_tokens_expires ON mcp_access_tokens(expires_at);`,
+		`CREATE TABLE IF NOT EXISTS mcp_client_agents (
+            client_id TEXT NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+            PRIMARY KEY (client_id, agent_id)
+        );`,
 	}
 
 	for _, stmt := range statements {
@@ -93,11 +103,14 @@ func (s *store) migrate(ctx context.Context) error {
 			return fmt.Errorf("database migration failed: %w", err)
 		}
 	}
-	return nil
+	return s.migrateLegacyClients(ctx)
 }
 
 func (s *store) CreateAgent(ctx context.Context, agent Agent) error {
 	now := time.Now().UTC()
+	if agent.AllowedRoots == "" {
+		agent.AllowedRoots = protocol.DefaultAllowedRoots
+	}
 	if agent.CreatedAt.IsZero() {
 		agent.CreatedAt = now
 	}
@@ -114,15 +127,14 @@ func (s *store) CreateAgent(ctx context.Context, agent Agent) error {
 		ctx,
 		`INSERT INTO agents (
 			id, name, enabled, agent_token_hash,
-			oauth_client_id, oauth_client_secret_hash,
+			allowed_roots,
 			allowed_tools, denied_tools, created_at, updated_at, last_seen_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		agent.ID,
 		agent.Name,
 		enabledInt,
 		agent.AgentTokenHash,
-		agent.OAuthClientID,
-		agent.OAuthClientSecretHash,
+		agent.AllowedRoots,
 		agent.AllowedTools,
 		agent.DeniedTools,
 		agent.CreatedAt.UTC().Format(time.RFC3339Nano),
@@ -139,7 +151,7 @@ func (s *store) ListAgents(ctx context.Context) ([]Agent, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
 		`SELECT id, name, enabled, agent_token_hash,
-		        oauth_client_id, oauth_client_secret_hash,
+		        allowed_roots,
 		        allowed_tools, denied_tools, created_at, updated_at, last_seen_at
 		 FROM agents ORDER BY name ASC, id ASC`,
 	)
@@ -160,8 +172,7 @@ func (s *store) ListAgents(ctx context.Context) ([]Agent, error) {
 			&a.Name,
 			&enabledInt,
 			&a.AgentTokenHash,
-			&a.OAuthClientID,
-			&a.OAuthClientSecretHash,
+			&a.AllowedRoots,
 			&a.AllowedTools,
 			&a.DeniedTools,
 			&createdAtStr,
@@ -189,7 +200,7 @@ func (s *store) GetAgent(ctx context.Context, id string) (*Agent, error) {
 	row := s.db.QueryRowContext(
 		ctx,
 		`SELECT id, name, enabled, agent_token_hash,
-		        oauth_client_id, oauth_client_secret_hash,
+		        allowed_roots,
 		        allowed_tools, denied_tools, created_at, updated_at, last_seen_at
 		 FROM agents WHERE id = ? LIMIT 1`,
 		id,
@@ -201,81 +212,12 @@ func (s *store) FindAgentByAgentTokenHash(ctx context.Context, hash string) (*Ag
 	row := s.db.QueryRowContext(
 		ctx,
 		`SELECT id, name, enabled, agent_token_hash,
-		        oauth_client_id, oauth_client_secret_hash,
+		        allowed_roots,
 		        allowed_tools, denied_tools, created_at, updated_at, last_seen_at
 		 FROM agents WHERE agent_token_hash = ? LIMIT 1`,
 		hash,
 	)
 	return scanAgent(row)
-}
-
-func (s *store) FindAgentByOAuthClientID(ctx context.Context, clientID string) (*Agent, error) {
-	row := s.db.QueryRowContext(
-		ctx,
-		`SELECT id, name, enabled, agent_token_hash,
-		        oauth_client_id, oauth_client_secret_hash,
-		        allowed_tools, denied_tools, created_at, updated_at, last_seen_at
-		 FROM agents WHERE oauth_client_id = ? LIMIT 1`,
-		clientID,
-	)
-	return scanAgent(row)
-}
-
-func (s *store) FindAgentByAccessTokenHash(ctx context.Context, hash string) (*Agent, *AccessToken, error) {
-	row := s.db.QueryRowContext(
-		ctx,
-		`SELECT a.id, a.name, a.enabled, a.agent_token_hash,
-		        a.oauth_client_id, a.oauth_client_secret_hash,
-		        a.allowed_tools, a.denied_tools, a.created_at, a.updated_at, a.last_seen_at,
-		        t.token_hash, t.agent_id, t.expires_at, t.created_at
-		 FROM access_tokens t
-		 JOIN agents a ON a.id = t.agent_id
-		 WHERE t.token_hash = ? LIMIT 1`,
-		hash,
-	)
-
-	var a Agent
-	var t AccessToken
-	var enabledInt int
-	var aCreatedAtStr, aUpdatedAtStr string
-	var aLastSeenStr sql.NullString
-	var tExpiresAtStr, tCreatedAtStr string
-
-	if err := row.Scan(
-		&a.ID,
-		&a.Name,
-		&enabledInt,
-		&a.AgentTokenHash,
-		&a.OAuthClientID,
-		&a.OAuthClientSecretHash,
-		&a.AllowedTools,
-		&a.DeniedTools,
-		&aCreatedAtStr,
-		&aUpdatedAtStr,
-		&aLastSeenStr,
-		&t.TokenHash,
-		&t.AgentID,
-		&tExpiresAtStr,
-		&tCreatedAtStr,
-	); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil, errAccessTokenNotFound
-		}
-		return nil, nil, fmt.Errorf("find agent by access token hash: %w", err)
-	}
-
-	a.Enabled = enabledInt == 1
-	a.CreatedAt = parseDBTime(aCreatedAtStr)
-	a.UpdatedAt = parseDBTime(aUpdatedAtStr)
-	if aLastSeenStr.Valid && aLastSeenStr.String != "" {
-		lastSeen := parseDBTime(aLastSeenStr.String)
-		a.LastSeenAt = &lastSeen
-	}
-
-	t.ExpiresAt = parseDBTime(tExpiresAtStr)
-	t.CreatedAt = parseDBTime(tCreatedAtStr)
-
-	return &a, &t, nil
 }
 
 func (s *store) SetAgentEnabled(ctx context.Context, id string, enabled bool) error {
@@ -315,28 +257,6 @@ func (s *store) UpdateAgentTokenHash(ctx context.Context, id string, tokenHash s
 	)
 	if err != nil {
 		return fmt.Errorf("update agent token hash: %w", err)
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
-		return errAgentNotFound
-	}
-	return nil
-}
-
-func (s *store) UpdateOAuthSecretHash(ctx context.Context, id string, secretHash string) error {
-	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := s.db.ExecContext(
-		ctx,
-		`UPDATE agents SET oauth_client_secret_hash = ?, updated_at = ? WHERE id = ?`,
-		secretHash,
-		nowStr,
-		id,
-	)
-	if err != nil {
-		return fmt.Errorf("update oauth secret hash: %w", err)
 	}
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
@@ -393,9 +313,9 @@ func (s *store) CreateAccessToken(ctx context.Context, token AccessToken) error 
 	}
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO access_tokens (token_hash, agent_id, expires_at, created_at) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO mcp_access_tokens (token_hash, client_id, expires_at, created_at) VALUES (?, ?, ?, ?)`,
 		token.TokenHash,
-		token.AgentID,
+		token.ClientID,
 		token.ExpiresAt.UTC().Format(time.RFC3339Nano),
 		token.CreatedAt.UTC().Format(time.RFC3339Nano),
 	)
@@ -405,8 +325,8 @@ func (s *store) CreateAccessToken(ctx context.Context, token AccessToken) error 
 	return nil
 }
 
-func (s *store) RevokeAccessTokens(ctx context.Context, agentID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM access_tokens WHERE agent_id = ?`, agentID)
+func (s *store) RevokeAccessTokens(ctx context.Context, clientID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mcp_access_tokens WHERE client_id = ?`, clientID)
 	if err != nil {
 		return fmt.Errorf("revoke access tokens: %w", err)
 	}
@@ -416,7 +336,7 @@ func (s *store) RevokeAccessTokens(ctx context.Context, agentID string) error {
 func (s *store) DeleteExpiredAccessTokens(ctx context.Context, now time.Time) error {
 	_, err := s.db.ExecContext(
 		ctx,
-		`DELETE FROM access_tokens WHERE expires_at <= ?`,
+		`DELETE FROM mcp_access_tokens WHERE expires_at <= ?`,
 		now.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -449,8 +369,7 @@ func scanAgent(row *sql.Row) (*Agent, error) {
 		&a.Name,
 		&enabledInt,
 		&a.AgentTokenHash,
-		&a.OAuthClientID,
-		&a.OAuthClientSecretHash,
+		&a.AllowedRoots,
 		&a.AllowedTools,
 		&a.DeniedTools,
 		&createdAtStr,

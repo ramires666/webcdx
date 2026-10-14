@@ -143,7 +143,7 @@
     <p style="text-align:center"><a href="/admin/agents/{{.Agent.ID}}/commands" style="color:#38bdf8">Мониторинг команд и журналы</a></p>
     <div class="container">
         <a href="/admin" class="back-link">&larr; Вернуться к списку агентов</a>
-        
+
         <header>
             <div>
                 <h1>{{.Agent.Name}} <span style="font-family: monospace; font-size: 0.9rem; color: var(--text-secondary);">({{.Agent.ID}})</span></h1>
@@ -167,13 +167,6 @@
                     <div class="meta-value-row">
                         <span class="meta-value" id="val-agent-id">{{.Agent.ID}}</span>
                         <button class="btn btn-copy" onclick="copyText('val-agent-id', this)">📋</button>
-                    </div>
-                </div>
-                <div class="meta-item">
-                    <div class="meta-label">OAuth Client ID</div>
-                    <div class="meta-value-row">
-                        <span class="meta-value" id="val-client-id">{{.Agent.OAuthClientID}}</span>
-                        <button class="btn btn-copy" onclick="copyText('val-client-id', this)">📋</button>
                     </div>
                 </div>
                 <div class="meta-item">
@@ -202,21 +195,24 @@
                     <button type="submit" class="btn btn-secondary">Ротировать Agent Token</button>
                 </form>
 
-                <form action="/admin/agents/{{.Agent.ID}}/rotate-oauth-secret" method="POST" style="display:inline;" onsubmit="return confirm('Вы уверены? Все выданные MCP токены доступа для ChatGPT будут отозваны.');">
-                    <input type="hidden" name="csrf" value="{{.CSRF}}">
-                    <button type="submit" class="btn btn-secondary">Ротировать OAuth Secret</button>
-                </form>
-
-                <form action="/admin/agents/{{.Agent.ID}}/revoke-access" method="POST" style="display:inline;" onsubmit="return confirm('Отозвать все активные сессии ChatGPT для этого агента?');">
-                    <input type="hidden" name="csrf" value="{{.CSRF}}">
-                    <button type="submit" class="btn btn-secondary">Отозвать MCP сессии</button>
-                </form>
-
                 <form action="/admin/agents/{{.Agent.ID}}/delete" method="POST" style="display:inline;" onsubmit="return confirm('Удалить агента полностью? Это действие необратимо.');">
                     <input type="hidden" name="csrf" value="{{.CSRF}}">
                     <button type="submit" class="btn btn-danger">Удалить агента</button>
                 </form>
             </div>
+        </section>
+
+        <section class="card">
+            <h2>Разрешённые каталоги</h2>
+            <form action="/admin/agents/{{.Agent.ID}}/roots" method="POST">
+                <input type="hidden" name="csrf" value="{{.CSRF}}">
+                <div class="form-group">
+                    <label for="allowed_roots">Абсолютные пути через точку с запятой (Windows) или двоеточие (Linux)</label>
+                    <input type="text" id="allowed_roots" name="allowed_roots" value="{{.Agent.AllowedRoots}}" required>
+                </div>
+                <button type="submit" class="btn">Сохранить каталоги</button>
+            </form>
+            <div class="notice" style="margin-top:1rem;">Настройки Gate применяются при запуске агента. WEBCODEX_ALLOWED_ROOTS в локальном .bat или .ps1 имеет приоритет. Через MCP вызовите list_allowed_roots, чтобы увидеть действующие пути. Недоступный диск не открывает доступ; после его подключения перезапустите агент.</div>
         </section>
 
         <section class="card">
@@ -246,23 +242,13 @@
             <div class="notice">Запустите эти команды на рабочем компьютере, где установлен webcodex-agent.exe:</div>
             <pre id="code-agent-run">$env:WEBCODEX_GATE_URL = "{{.PublicURL}}"
 $env:WEBCODEX_AGENT_TOKEN = "&lt;ВАШ_AGENT_TOKEN&gt;"
-$env:WEBCODEX_ALLOWED_ROOTS = "C:\projects;D:\work"
+$env:WEBCODEX_ALLOWED_ROOTS = {{psQuote .Agent.AllowedRoots}}
+$env:WEBCODEX_BROWSER_ENABLED = "1"
 $env:WEBCODEX_LOG_DIR = "$PSScriptRoot\logs"
 .\webcodex-agent.exe</pre>
         </section>
 
-        <section class="card">
-            <div class="code-block-header">
-                <h2>Настройка ChatGPT MCP Connector</h2>
-                <button class="btn btn-copy" onclick="copyCode('code-chatgpt-run', this)">📋 Скопировать</button>
-            </div>
-            <div class="notice">Используйте эти параметры при добавлении Custom MCP / Action в ChatGPT:</div>
-            <pre id="code-chatgpt-run">Server URL:        {{.PublicURL}}/mcp/v5
-Authorization URL: {{.PublicURL}}/oauth/authorize
-Token URL:         {{.PublicURL}}/oauth/token
-Client ID:         {{.Agent.OAuthClientID}}
-Client Secret:     [Получен при создании или ротации]</pre>
-        </section>
+
     </div>
 
     <script>

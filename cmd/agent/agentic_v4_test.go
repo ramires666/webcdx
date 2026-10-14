@@ -60,7 +60,7 @@ func TestV4ToolContract(t *testing.T) {
 	if err := json.Unmarshal(response, &listed); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"read_file", "write_file", "list_directory", "search_files", "exec_command", "poll_command", "cancel_command", "edit_file", "find_files", "move_path", "delete_path"}
+	want := []string{"read_file", "write_file", "list_directory", "search_files", "exec_command", "poll_command", "cancel_command", "edit_file", "find_files", "move_path", "delete_path", "list_allowed_roots"}
 	if len(listed.Result.Tools) != len(want) {
 		t.Fatalf("tool count = %d, want %d", len(listed.Result.Tools), len(want))
 	}
@@ -71,7 +71,7 @@ func TestV4ToolContract(t *testing.T) {
 		if tool.InputSchema["additionalProperties"] != false || tool.OutputSchema["additionalProperties"] != false {
 			t.Fatalf("tool %s has open schema: input=%v output=%v", tool.Name, tool.InputSchema, tool.OutputSchema)
 		}
-		readOnly := tool.Name == "read_file" || tool.Name == "list_directory" || tool.Name == "search_files" || tool.Name == "poll_command" || tool.Name == "find_files"
+		readOnly := tool.Name == "list_allowed_roots" || tool.Name == "read_file" || tool.Name == "list_directory" || tool.Name == "search_files" || tool.Name == "poll_command" || tool.Name == "find_files"
 		if tool.Annotations["readOnlyHint"] != readOnly {
 			t.Fatalf("tool %s annotations: %v", tool.Name, tool.Annotations)
 		}

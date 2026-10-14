@@ -46,15 +46,16 @@ type executorConfig struct {
 }
 
 type nativeExecutor struct {
-	allowedRoots []string
-	allowAll     bool
-	logDir       string
-	processTTL   time.Duration
-	maxLogBytes  int64
-	maxResponse  int
-	verbose      bool
-	execMu       sync.Mutex
-	browser      *browserManager
+	allowedRoots     []string
+	unavailableRoots []string
+	allowAll         bool
+	logDir           string
+	processTTL       time.Duration
+	maxLogBytes      int64
+	maxResponse      int
+	verbose          bool
+	execMu           sync.Mutex
+	browser          *browserManager
 
 	mu       sync.Mutex
 	sessions map[string]*processSession
@@ -83,7 +84,7 @@ func toolErr(code, message string, cause ...error) error {
 	return &codedError{code: code, message: message, cause: err}
 }
 
-func newNativeExecutor() (*nativeExecutor, error) {
+func newNativeExecutor(roots string) (*nativeExecutor, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("get startup directory: %w", err)
@@ -103,7 +104,7 @@ func newNativeExecutor() (*nativeExecutor, error) {
 	browserDir := filepath.Join(configDir, "webcodex", "browser", commandHash(map[string]string{"gate": env("WEBCODEX_GATE_URL", ""), "agent": env("WEBCODEX_AGENT_TOKEN", "")})[:16])
 	return newNativeExecutorWithConfig(executorConfig{
 		Browser:          browserConfig{Enabled: env("WEBCODEX_BROWSER_ENABLED", "0") == "1", Executable: env("WEBCODEX_BROWSER_PATH", ""), Dir: env("WEBCODEX_BROWSER_DIR", browserDir), AllowLocal: env("WEBCODEX_BROWSER_ALLOW_LOCAL", "0") == "1", Personal: env("WEBCODEX_BROWSER_PERSONAL_ENABLED", "0") == "1", DownloadDir: env("WEBCODEX_BROWSER_DOWNLOAD_DIR", "")},
-		AllowedRoots:     splitPathList(env("WEBCODEX_ALLOWED_ROOTS", cwd)),
+		AllowedRoots:     splitPathList(roots),
 		LogDir:           logDir,
 		ProcessTTL:       durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour),
 		MaxLogBytes:      int64Env("WEBCODEX_MAX_LOG_BYTES", defaultLogMax),
@@ -151,6 +152,11 @@ func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error)
 			return nil, fmt.Errorf("allowed root must be absolute: %q", root)
 		}
 		resolved, err := filepath.EvalSymlinks(filepath.Clean(root))
+		if errors.Is(err, os.ErrNotExist) {
+			// shortcut: absent drives grant no access, restart after mounting to enable them.
+			e.unavailableRoots = append(e.unavailableRoots, filepath.Clean(root))
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("resolve allowed root %q: %w", root, err)
 		}
@@ -265,6 +271,19 @@ func (e *nativeExecutor) executeTool(ctx context.Context, version, name string, 
 		return result, err
 	}
 	switch name {
+	case "list_allowed_roots":
+		if err := onlyArgs(args); err != nil {
+			return nil, err
+		}
+		roots := []map[string]any{}
+		for _, root := range e.allowedRoots {
+			info, err := os.Stat(root)
+			roots = append(roots, map[string]any{"path": root, "available": err == nil && info.IsDir()})
+		}
+		for _, root := range e.unavailableRoots {
+			roots = append(roots, map[string]any{"path": root, "available": false})
+		}
+		return map[string]any{"roots": roots, "unrestricted": e.allowAll}, nil
 	case "read_file":
 		return e.readFile(args)
 	case "write_file":

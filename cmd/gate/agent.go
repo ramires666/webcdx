@@ -14,6 +14,16 @@ import (
 
 const maxAgentResultBytes = 2 << 20
 
+func (s *server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
+	agent, _, err := s.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, protocol.AgentConfig{AllowedRoots: agent.AllowedRoots})
+}
+
 // handleAgentStream manages the long-lived outbound NDJSON stream for a connected agent worker.
 func (s *server) handleAgentStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

@@ -17,13 +17,13 @@ func TestInitializeMetadataAndBodyLimit(t *testing.T) {
 	srv, cleanup := setupTestServer(t)
 	defer cleanup()
 	token := "wc_mcp_contract"
-	if err := srv.store.CreateAgent(context.Background(), Agent{
-		ID: "contract", Name: "Contract", Enabled: true, AgentTokenHash: hashSecret("agent"), OAuthClientID: "contract-client",
-	}); err != nil {
+	if err := createTestAgent(srv.store, context.Background(), Agent{
+		ID: "contract", Name: "Contract", Enabled: true, AgentTokenHash: hashSecret("agent"),
+	}, "contract-client", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.store.CreateAccessToken(context.Background(), AccessToken{
-		TokenHash: hashSecret(token), AgentID: "contract", ExpiresAt: time.Now().Add(time.Hour),
+		TokenHash: hashSecret(token), ClientID: "contract", ExpiresAt: time.Now().Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -129,9 +129,9 @@ func TestAllowedOAuthRedirect(t *testing.T) {
 func TestOAuthRequiresKnownRedirectAndS256(t *testing.T) {
 	srv, cleanup := setupTestServer(t)
 	defer cleanup()
-	if err := srv.store.CreateAgent(context.Background(), Agent{
-		ID: "oauth-security", Name: "OAuth", Enabled: true, AgentTokenHash: hashSecret("agent"), OAuthClientID: "oauth-security-client",
-	}); err != nil {
+	if err := createTestAgent(srv.store, context.Background(), Agent{
+		ID: "oauth-security", Name: "OAuth", Enabled: true, AgentTokenHash: hashSecret("agent"),
+	}, "oauth-security-client", ""); err != nil {
 		t.Fatal(err)
 	}
 	base := "/oauth/authorize?client_id=oauth-security-client&response_type=code&code_challenge=abc&code_challenge_method=S256&redirect_uri="
@@ -182,10 +182,10 @@ func TestMCPV5RoutingCannotBeSpoofedOrRunAsNotification(t *testing.T) {
 	defer cleanup()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := srv.store.CreateAgent(ctx, Agent{ID: "v5-contract", Name: "V5", Enabled: true, AgentTokenHash: hashSecret("agent"), OAuthClientID: "v5-client"}); err != nil {
+	if err := createTestAgent(srv.store, ctx, Agent{ID: "v5-contract", Name: "V5", Enabled: true, AgentTokenHash: hashSecret("agent")}, "v5-client", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.store.CreateAccessToken(ctx, AccessToken{TokenHash: hashSecret("client"), AgentID: "v5-contract", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := srv.store.CreateAccessToken(ctx, AccessToken{TokenHash: hashSecret("client"), ClientID: "v5-contract", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	rt := srv.runtimeFor("v5-contract")
@@ -201,7 +201,7 @@ func TestMCPV5RoutingCannotBeSpoofedOrRunAsNotification(t *testing.T) {
 					Params map[string]any `json:"params"`
 				}
 				_ = json.Unmarshal(request.Request, &message)
-				response, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"contract": message.Params["_webcodex_contract"], "tools": []any{}}})
+				response, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"tools": []any{map[string]any{"name": "test_contract", "description": message.Params["_webcodex_contract"], "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}}}}})
 				rt.mu.Lock()
 				ch := rt.pending[request.ID]
 				rt.mu.Unlock()
@@ -216,7 +216,7 @@ func TestMCPV5RoutingCannotBeSpoofedOrRunAsNotification(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer client")
 		recorder := httptest.NewRecorder()
 		srv.routes().ServeHTTP(recorder, req)
-		if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"contract":"`+version+`"`) {
+		if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"description":"`+version+`"`) {
 			t.Fatalf("contract route %s: %s", version, recorder.Body.String())
 		}
 	}

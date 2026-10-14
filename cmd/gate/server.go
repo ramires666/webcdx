@@ -207,6 +207,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /oauth/authorize", s.handleAuthorize)
 	mux.HandleFunc("POST /oauth/token", s.handleToken)
 
+	mux.HandleFunc("GET /agent/config", s.handleAgentConfig)
 	// Agent connection endpoints
 	mux.HandleFunc("GET /agent/stream", s.handleAgentStream)
 	mux.HandleFunc("POST /agent/result", s.handleAgentResult)
@@ -232,10 +233,16 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/agents/{id}", s.adminAuth(s.handleAdminAgent))
 	mux.HandleFunc("POST /admin/agents/{id}/toggle", s.adminAuth(s.handleAdminToggleAgent))
 	mux.HandleFunc("POST /admin/agents/{id}/rotate-agent-token", s.adminAuth(s.handleAdminRotateAgentToken))
-	mux.HandleFunc("POST /admin/agents/{id}/rotate-oauth-secret", s.adminAuth(s.handleAdminRotateOAuthSecret))
-	mux.HandleFunc("POST /admin/agents/{id}/revoke-access", s.adminAuth(s.handleAdminRevokeAccess))
 	mux.HandleFunc("POST /admin/agents/{id}/policy", s.adminAuth(s.handleAdminPolicy))
 	mux.HandleFunc("POST /admin/agents/{id}/delete", s.adminAuth(s.handleAdminDeleteAgent))
 
+	mux.HandleFunc("POST /admin/agents/{id}/roots", s.adminAuth(s.handleAdminRoots))
+	mux.HandleFunc("POST /admin/mcp-clients", s.adminAuth(s.handleAdminCreateMCPClient))
+	mux.HandleFunc("GET /admin/mcp-clients/{id}", s.adminAuth(s.handleAdminMCPClient))
+	mux.HandleFunc("POST /admin/mcp-clients/{id}/agents", s.adminAuth(s.handleAdminMCPAgents))
+	mux.HandleFunc("POST /admin/mcp-clients/{id}/toggle", s.adminAuth(s.handleAdminToggleMCPClient))
+	mux.HandleFunc("POST /admin/mcp-clients/{id}/rotate-oauth-secret", s.adminAuth(s.handleAdminRotateOAuthSecret))
+	mux.HandleFunc("POST /admin/mcp-clients/{id}/revoke-access", s.adminAuth(s.handleAdminRevokeAccess))
+	mux.HandleFunc("POST /admin/mcp-clients/{id}/delete", s.adminAuth(s.handleAdminDeleteMCPClient))
 	return withCORS(mux)
 }

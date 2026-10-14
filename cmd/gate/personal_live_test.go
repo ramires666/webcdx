@@ -23,10 +23,10 @@ func TestInstalledPersonalBrowserLive(t *testing.T) {
 	srv, cleanup := setupTestServer(t)
 	defer cleanup()
 	const agentID, agentToken, accessToken = "personal-live-test", "wc_agent_personal_live_test", "wc_mcp_personal_live_test"
-	if err := srv.store.CreateAgent(context.Background(), Agent{ID: agentID, Name: "Personal live test", Enabled: true, AgentTokenHash: hashSecret(agentToken), OAuthClientID: "personal-live-client"}); err != nil {
+	if err := createTestAgent(srv.store, context.Background(), Agent{ID: agentID, Name: "Personal live test", Enabled: true, AgentTokenHash: hashSecret(agentToken)}, "personal-live-client", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.store.CreateAccessToken(context.Background(), AccessToken{TokenHash: hashSecret(accessToken), AgentID: agentID, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := srv.store.CreateAccessToken(context.Background(), AccessToken{TokenHash: hashSecret(accessToken), ClientID: agentID, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	gate := httptest.NewServer(srv.routes())

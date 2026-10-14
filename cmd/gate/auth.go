@@ -40,29 +40,23 @@ func (s *server) authenticateAgent(r *http.Request) (*Agent, *agentRuntime, erro
 	return agent, rt, nil
 }
 
-// authenticateMCP authenticates an incoming MCP client request by its issued access token.
-func (s *server) authenticateMCP(r *http.Request) (*Agent, *agentRuntime, error) {
+// authenticateMCP authenticates an independent MCP registration.
+func (s *server) authenticateMCP(r *http.Request) (*MCPClient, error) {
 	token := bearerToken(r)
 	if token == "" {
-		return nil, nil, errors.New("missing bearer token")
+		return nil, errors.New("missing bearer token")
 	}
-
-	hash := hashSecret(token)
-	agent, accessToken, err := s.store.FindAgentByAccessTokenHash(r.Context(), hash)
+	client, accessToken, err := s.store.FindMCPClientByAccessTokenHash(r.Context(), hashSecret(token))
 	if err != nil {
-		return nil, nil, errors.New("invalid access token")
+		return nil, errors.New("invalid access token")
 	}
-
 	if time.Now().UTC().After(accessToken.ExpiresAt) {
-		return nil, nil, errors.New("access token expired")
+		return nil, errors.New("access token expired")
 	}
-
-	if !agent.Enabled {
-		return nil, nil, errors.New("agent disabled")
+	if !client.Enabled {
+		return nil, errors.New("MCP client disabled")
 	}
-
-	rt := s.runtimeFor(agent.ID)
-	return agent, rt, nil
+	return client, nil
 }
 
 // adminAuth guards admin endpoints using HTTP Basic Authentication.

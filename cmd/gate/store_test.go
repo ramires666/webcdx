@@ -21,17 +21,15 @@ func TestStoreCRUDAndRelations(t *testing.T) {
 
 	// 1. Create Agent
 	agent := Agent{
-		ID:                    "home",
-		Name:                  "Home PC",
-		Enabled:               true,
-		AgentTokenHash:        hashSecret("token_home"),
-		OAuthClientID:         "client_home",
-		OAuthClientSecretHash: hashSecret("secret_home"),
-		AllowedTools:          "exec_command,read_file",
-		DeniedTools:           "exec_command",
+		ID:             "home",
+		Name:           "Home PC",
+		Enabled:        true,
+		AgentTokenHash: hashSecret("token_home"),
+		AllowedTools:   "exec_command,read_file",
+		DeniedTools:    "exec_command",
 	}
 
-	if err := s.CreateAgent(ctx, agent); err != nil {
+	if err := createTestAgent(s, ctx, agent, "client_home", hashSecret("secret_home")); err != nil {
 		t.Fatalf("CreateAgent failed: %v", err)
 	}
 
@@ -53,10 +51,10 @@ func TestStoreCRUDAndRelations(t *testing.T) {
 		t.Fatalf("byToken.ID = %q, want 'home'", byToken.ID)
 	}
 
-	// 4. FindAgentByOAuthClientID
-	byClient, err := s.FindAgentByOAuthClientID(ctx, "client_home")
+	// 4. FindMCPClientByOAuthClientID
+	byClient, err := s.FindMCPClientByOAuthClientID(ctx, "client_home")
 	if err != nil {
-		t.Fatalf("FindAgentByOAuthClientID failed: %v", err)
+		t.Fatalf("FindMCPClientByOAuthClientID failed: %v", err)
 	}
 	if byClient.ID != "home" {
 		t.Fatalf("byClient.ID = %q, want 'home'", byClient.ID)
@@ -67,18 +65,18 @@ func TestStoreCRUDAndRelations(t *testing.T) {
 	expiresAt := time.Now().Add(24 * time.Hour)
 	if err := s.CreateAccessToken(ctx, AccessToken{
 		TokenHash: accessTokenHash,
-		AgentID:   "home",
+		ClientID:  "home",
 		ExpiresAt: expiresAt,
 	}); err != nil {
 		t.Fatalf("CreateAccessToken failed: %v", err)
 	}
 
-	// 6. FindAgentByAccessTokenHash
-	agentWithToken, token, err := s.FindAgentByAccessTokenHash(ctx, accessTokenHash)
+	// 6. FindMCPClientByAccessTokenHash
+	agentWithToken, token, err := s.FindMCPClientByAccessTokenHash(ctx, accessTokenHash)
 	if err != nil {
-		t.Fatalf("FindAgentByAccessTokenHash failed: %v", err)
+		t.Fatalf("FindMCPClientByAccessTokenHash failed: %v", err)
 	}
-	if agentWithToken.ID != "home" || token.AgentID != "home" {
+	if agentWithToken.ID != "home" || token.ClientID != "home" {
 		t.Fatalf("unexpected result: agent=%+v token=%+v", agentWithToken, token)
 	}
 
@@ -105,15 +103,15 @@ func TestStoreCRUDAndRelations(t *testing.T) {
 	if err := s.RevokeAccessTokens(ctx, "home"); err != nil {
 		t.Fatalf("RevokeAccessTokens failed: %v", err)
 	}
-	_, _, err = s.FindAgentByAccessTokenHash(ctx, accessTokenHash)
+	_, _, err = s.FindMCPClientByAccessTokenHash(ctx, accessTokenHash)
 	if err == nil {
 		t.Fatalf("expected error finding revoked access token")
 	}
 
-	// 10. Delete Agent with Cascade
+	// 10. Deleting a worker preserves the independent MCP registration and token.
 	if err := s.CreateAccessToken(ctx, AccessToken{
 		TokenHash: accessTokenHash,
-		AgentID:   "home",
+		ClientID:  "home",
 		ExpiresAt: expiresAt,
 	}); err != nil {
 		t.Fatalf("CreateAccessToken failed: %v", err)
@@ -125,8 +123,14 @@ func TestStoreCRUDAndRelations(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected agent to be deleted")
 	}
-	_, _, err = s.FindAgentByAccessTokenHash(ctx, accessTokenHash)
-	if err == nil {
-		t.Fatalf("expected access token to be cascaded")
+	_, _, err = s.FindMCPClientByAccessTokenHash(ctx, accessTokenHash)
+	if err != nil {
+		t.Fatalf("deleting worker revoked MCP token: %v", err)
+	}
+	if err := s.DeleteMCPClient(ctx, "home"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.FindMCPClientByAccessTokenHash(ctx, accessTokenHash); err == nil {
+		t.Fatal("deleted MCP retained access token")
 	}
 }

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP {{.Client.Name}} — WebCodex Gate</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { background:#0f172a; color:#f8fafc; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; padding:2rem 1rem; line-height:1.5; }
+        .container { max-width:900px; margin:auto; }
+        a { color:#38bdf8; }
+        .card { background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1.5rem; margin:1.5rem 0; }
+        h1 { font-size:1.5rem; } h2 { color:#38bdf8; font-size:1.15rem; }
+        label { display:block; margin:.75rem 0; } input { accent-color:#38bdf8; }
+        .btn { background:#38bdf8; color:#0f172a; border:0; border-radius:.375rem; padding:.5rem 1rem; cursor:pointer; font-weight:600; }
+        .danger { background:#ef4444; color:white; } .actions { display:flex; flex-wrap:wrap; gap:.75rem; }
+        pre { background:#0f172a; padding:1rem; border-radius:.375rem; white-space:pre-wrap; overflow-wrap:anywhere; }
+    </style>
+</head>
+<body><div class="container">
+    <a href="/admin">← MCP-подключения и агенты</a>
+    <h1>MCP: {{.Client.Name}} ({{.Client.ID}}) — {{if .Client.Enabled}}включено{{else}}отключено{{end}}</h1>
+    <section class="card">
+        <h2>Доступные компьютеры</h2>
+        <p>Отметьте агенты, доступные через OAuth-данные этого MCP-подключения. У каждого компьютера отдельный Agent Token. Доступ применяется ко всем активным сессиям этого подключения.</p>
+        <form action="/admin/mcp-clients/{{.Client.ID}}/agents" method="POST">
+            <input type="hidden" name="csrf" value="{{.CSRF}}">
+            {{range .Agents}}<label><input type="checkbox" name="agent_id" value="{{.Agent.ID}}" {{if .Granted}}checked{{end}}> {{.Agent.Name}} ({{.Agent.ID}}){{if not .Agent.Enabled}} — отключён{{end}}</label>{{else}}<p>Сначала зарегистрируйте агенты в админке.</p>{{end}}
+            <button class="btn" type="submit">Сохранить доступ</button>
+        </form>
+        <p>После изменения обновите инструменты или переподключите коннектор. Вызовите <code>list_agents</code>, затем передавайте <code>agent_id</code> выбранного компьютера в каждом вызове. <code>list_allowed_roots</code> показывает действующие пути на компьютере.</p>
+    </section>
+    <section class="card">
+        <h2>Подключение Gemini / ChatGPT</h2>
+        <pre>Server URL:        {{.PublicURL}}/mcp/v5
+Authorization URL: {{.PublicURL}}/oauth/authorize
+Token URL:         {{.PublicURL}}/oauth/token
+Client ID:         {{.Client.OAuthClientID}}
+Client Secret:     [Получен при создании или ротации]</pre>
+        <div class="actions">
+            <form action="/admin/mcp-clients/{{.Client.ID}}/toggle" method="POST"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" type="submit">{{if .Client.Enabled}}Отключить{{else}}Включить{{end}} MCP</button></form>
+            <form action="/admin/mcp-clients/{{.Client.ID}}/rotate-oauth-secret" method="POST" onsubmit="return confirm('Ротировать OAuth Secret и отозвать все сессии этого MCP?');"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" type="submit">Ротировать OAuth Secret</button></form>
+            <form action="/admin/mcp-clients/{{.Client.ID}}/revoke-access" method="POST" onsubmit="return confirm('Отозвать все сессии этого MCP?');"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" type="submit">Отозвать MCP-сессии</button></form>
+            <form action="/admin/mcp-clients/{{.Client.ID}}/delete" method="POST" onsubmit="return confirm('Удалить MCP-подключение? Агенты сохранятся.');"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn danger" type="submit">Удалить MCP</button></form>
+        </div>
+    </section>
+</div></body>
+</html>

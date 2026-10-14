@@ -25,12 +25,12 @@ type jsonrpcMessage struct {
 // handleMCP implements the MCP Streamable HTTP entry point and routes calls to the authenticated agent.
 func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	agent, rt, authErr := s.authenticateMCP(r)
+	client, authErr := s.authenticateMCP(r)
 	authorized := authErr == nil
 
 	agentLabel := "unauthorized"
 	if authorized {
-		agentLabel = agent.ID
+		agentLabel = client.ID
 	}
 
 	log.Printf(
@@ -86,17 +86,25 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	var msg jsonrpcMessage
 	if err := json.Unmarshal(body, &msg); err != nil {
-		log.Printf("mcp invalid json bytes=%d agent=%s", len(body), agent.ID)
+		log.Printf("mcp invalid json bytes=%d agent=%s", len(body), client.ID)
 		writeRPCError(w, nil, -32700, "invalid json")
 		return
 	}
 
-	log.Printf("mcp request agent=%s method=%q id=%s bytes=%d", agent.ID, msg.Method, string(msg.ID), len(body))
+	log.Printf("mcp request client=%s method=%q id=%s bytes=%d", client.ID, msg.Method, string(msg.ID), len(body))
+	agents, err := s.mcpAgents(r.Context(), client)
+	if err != nil {
+		writeRPCError(w, msg.ID, -32000, "failed to load available agents")
+		return
+	}
 
 	if msg.Method == "initialize" {
 		instructions := protocol.ExecutionInstructions
 		if r.URL.Path == "/mcp/v5" {
 			instructions += protocol.V5Instructions
+		}
+		if len(agents) != 1 {
+			instructions += " This connection provides multiple computers. Call list_agents to discover their IDs and online status. Supply agent_id in every execution tool call, including browser and command session operations. Never switch computers implicitly."
 		}
 		writeJSON(w, map[string]any{
 			"jsonrpc": "2.0",
@@ -116,7 +124,7 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 				"instructions": instructions,
 			},
 		})
-		log.Printf("mcp response ok agent=%s method=%q id=%s local=true elapsed=%s", agent.ID, msg.Method, string(msg.ID), time.Since(started))
+		log.Printf("mcp response ok agent=%s method=%q id=%s local=true elapsed=%s", client.ID, msg.Method, string(msg.ID), time.Since(started))
 		return
 	}
 
@@ -126,7 +134,7 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			"id":      msg.ID,
 			"result":  map[string]any{},
 		})
-		log.Printf("mcp response ok agent=%s method=%q id=%s local=true elapsed=%s", agent.ID, msg.Method, string(msg.ID), time.Since(started))
+		log.Printf("mcp response ok agent=%s method=%q id=%s local=true elapsed=%s", client.ID, msg.Method, string(msg.ID), time.Since(started))
 		return
 	}
 
@@ -135,23 +143,37 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			writeRPCError(w, nil, -32600, "tool requests require an id")
 			return
 		}
-		if err := rt.enqueue(r.Context(), protocol.AgentRequest{ID: "", Request: body, Deadline: time.Now().Add(s.timeout)}); err != nil {
-			log.Printf("mcp notification enqueue error agent=%s method=%q error=%v", agent.ID, msg.Method, err)
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		if msg.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		log.Printf("mcp notification accepted agent=%s method=%q elapsed=%s", agent.ID, msg.Method, time.Since(started))
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
-	policy := newToolPolicy(agent.AllowedTools, agent.DeniedTools)
+	var agent *Agent
+	var rt *agentRuntime
 	if msg.Method == "tools/call" {
 		call, err := parseToolCall(body)
 		if err != nil {
 			writeToolCallError(w, msg.ID, err.Error())
 			return
 		}
+		if call.Name == "list_agents" {
+			if len(call.Arguments) != 0 {
+				writeToolCallError(w, msg.ID, "list_agents takes no arguments")
+				return
+			}
+			s.writeMCPAgents(w, msg.ID, agents)
+			return
+		}
+		agent, body, err = selectMCPAgent(body, call, agents)
+		if err != nil {
+			writeToolCallError(w, msg.ID, err.Error())
+			return
+		}
+		rt = s.runtimeFor(agent.ID)
+		policy := newToolPolicy(agent.AllowedTools, agent.DeniedTools)
 		if !policy.allows(call.Name) {
 			log.Printf("mcp tool denied by policy agent=%s tool=%q", agent.ID, call.Name)
 			writeToolCallError(w, msg.ID, fmt.Sprintf("tool not allowed: %q", call.Name))
@@ -167,6 +189,19 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	agentRequest, err = markContract(body, version)
 	if err != nil {
 		writeRPCError(w, msg.ID, -32602, err.Error())
+		return
+	}
+	if msg.Method == "tools/list" {
+		tools, err := s.groupedTools(r.Context(), agents, agentRequest)
+		if err != nil {
+			writeRPCError(w, msg.ID, -32000, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": map[string]any{"tools": tools}})
+		return
+	}
+	if rt == nil {
+		writeRPCError(w, msg.ID, -32601, "method not supported")
 		return
 	}
 	resp, err := rt.callAgent(r.Context(), agentRequest, s.timeout)
@@ -185,23 +220,6 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeRPCError(w, msg.ID, -32000, err.Error())
 		return
-	}
-
-	if msg.Method == "tools/list" {
-		response, err := filterToolsList(resp.Response, policy)
-		if err != nil {
-			log.Printf(
-				"mcp filter tools error agent=%s method=%q id=%s error=%v elapsed=%s",
-				agent.ID,
-				msg.Method,
-				string(msg.ID),
-				err,
-				time.Since(started),
-			)
-			writeRPCError(w, msg.ID, -32000, err.Error())
-			return
-		}
-		resp.Response = response
 	}
 
 	if msg.Method == "tools/call" {

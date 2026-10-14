@@ -31,16 +31,33 @@ func main() {
 	if gateURL == "" || token == "" {
 		log.Fatal("WEBCODEX_GATE_URL and WEBCODEX_AGENT_TOKEN are required")
 	}
-	executor, err := newNativeExecutor()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	client := &http.Client{}
+	var roots string
+	for ctx.Err() == nil {
+		var err error
+		roots, err = loadAllowedRoots(ctx, client, gateURL, token)
+		if err == nil {
+			break
+		}
+		log.Printf("load agent defaults: %v", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	executor, err := newNativeExecutor(roots)
 	if err != nil {
 		log.Fatalf("initialize local executor: %v", err)
 	}
 	defer executor.Close()
 	log.Printf("agent ready: verbose=%t log_dir=%q; WEBCODEX_VERBOSE=0 hides commands and output", executor.verbose, executor.logDir)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	client := &http.Client{}
 	for ctx.Err() == nil {
 		if err := streamOnce(ctx, client, gateURL, token, executor); err != nil && ctx.Err() == nil {
 			log.Printf("stream: %v", err)

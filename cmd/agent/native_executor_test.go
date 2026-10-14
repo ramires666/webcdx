@@ -80,7 +80,7 @@ func TestToolContractAndForbiddenTerms(t *testing.T) {
 	if err := json.Unmarshal(toolsResponse, &listed); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"read_file", "write_file", "list_directory", "search_files", "exec_command", "poll_command", "cancel_command"}
+	want := []string{"read_file", "write_file", "list_directory", "search_files", "exec_command", "poll_command", "cancel_command", "list_allowed_roots"}
 	if len(listed.Result.Tools) != len(want) {
 		t.Fatalf("tool count = %d, want %d", len(listed.Result.Tools), len(want))
 	}

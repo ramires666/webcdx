@@ -78,8 +78,8 @@ func (s *server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.FindAgentByOAuthClientID(r.Context(), clientID)
-	if err != nil || !agent.Enabled {
+	client, err := s.store.FindMCPClientByOAuthClientID(r.Context(), clientID)
+	if err != nil || !client.Enabled {
 		http.Error(w, "unknown or disabled client", http.StatusUnauthorized)
 		return
 	}
@@ -115,7 +115,7 @@ func (s *server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry := oauthCode{
-		AgentID:             agent.ID,
+		MCPClientID:         client.ID,
 		ClientID:            clientID,
 		RedirectURI:         redirectURI,
 		CodeChallenge:       challenge,
@@ -179,14 +179,14 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := s.store.FindAgentByOAuthClientID(r.Context(), clientID)
-	if err != nil || !agent.Enabled {
+	client, err := s.store.FindMCPClientByOAuthClientID(r.Context(), clientID)
+	if err != nil || !client.Enabled {
 		http.Error(w, "unknown or disabled client", http.StatusUnauthorized)
 		return
 	}
 
 	secretHash := hashSecret(clientSecret)
-	if !secureCompare(secretHash, agent.OAuthClientSecretHash) {
+	if !secureCompare(secretHash, client.OAuthClientSecretHash) {
 		http.Error(w, "bad client secret", http.StatusUnauthorized)
 		return
 	}
@@ -207,7 +207,7 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 	delete(s.oauthCodes, codeVal)
 	s.oauthMu.Unlock()
 
-	if !exists || time.Now().After(entry.ExpiresAt) || entry.ClientID != clientID || entry.AgentID != agent.ID {
+	if !exists || time.Now().After(entry.ExpiresAt) || entry.ClientID != clientID || entry.MCPClientID != client.ID {
 		http.Error(w, "invalid or expired authorization code", http.StatusBadRequest)
 		return
 	}
@@ -235,7 +235,7 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.CreateAccessToken(r.Context(), AccessToken{
 		TokenHash: tokenHash,
-		AgentID:   agent.ID,
+		ClientID:  client.ID,
 		ExpiresAt: expiresAt,
 	}); err != nil {
 		log.Printf("create access token in store error: %v", err)
@@ -243,7 +243,7 @@ func (s *server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("oauth token issued agent=%s client_id=%s", agent.ID, clientID)
+	log.Printf("oauth token issued agent=%s client_id=%s", client.ID, clientID)
 	writeJSON(w, map[string]any{
 		"access_token": rawToken,
 		"token_type":   "Bearer",

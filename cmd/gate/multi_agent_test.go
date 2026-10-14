@@ -54,26 +54,22 @@ func TestAgentAuthenticationAndIsolation(t *testing.T) {
 	rawTokenB := "wc_agent_token_b"
 
 	// Create Agent A
-	if err := srv.store.CreateAgent(ctx, Agent{
-		ID:                    "agent-a",
-		Name:                  "Agent Alpha",
-		Enabled:               true,
-		AgentTokenHash:        hashSecret(rawTokenA),
-		OAuthClientID:         "client-a",
-		OAuthClientSecretHash: hashSecret("secret-a"),
-	}); err != nil {
+	if err := createTestAgent(srv.store, ctx, Agent{
+		ID:             "agent-a",
+		Name:           "Agent Alpha",
+		Enabled:        true,
+		AgentTokenHash: hashSecret(rawTokenA),
+	}, "client-a", hashSecret("secret-a")); err != nil {
 		t.Fatalf("create agent a: %v", err)
 	}
 
 	// Create Agent B (Disabled)
-	if err := srv.store.CreateAgent(ctx, Agent{
-		ID:                    "agent-b",
-		Name:                  "Agent Beta",
-		Enabled:               false,
-		AgentTokenHash:        hashSecret(rawTokenB),
-		OAuthClientID:         "client-b",
-		OAuthClientSecretHash: hashSecret("secret-b"),
-	}); err != nil {
+	if err := createTestAgent(srv.store, ctx, Agent{
+		ID:             "agent-b",
+		Name:           "Agent Beta",
+		Enabled:        false,
+		AgentTokenHash: hashSecret(rawTokenB),
+	}, "client-b", hashSecret("secret-b")); err != nil {
 		t.Fatalf("create agent b: %v", err)
 	}
 
@@ -114,20 +110,18 @@ func TestAgentResultCannotCompleteOtherAgentRequest(t *testing.T) {
 	rawTokenA := "wc_agent_a"
 	rawTokenB := "wc_agent_b"
 
-	_ = srv.store.CreateAgent(ctx, Agent{
+	_ = createTestAgent(srv.store, ctx, Agent{
 		ID:             "agent-a",
 		Name:           "Agent A",
 		Enabled:        true,
 		AgentTokenHash: hashSecret(rawTokenA),
-		OAuthClientID:  "client-a",
-	})
-	_ = srv.store.CreateAgent(ctx, Agent{
+	}, "client-a", "")
+	_ = createTestAgent(srv.store, ctx, Agent{
 		ID:             "agent-b",
 		Name:           "Agent B",
 		Enabled:        true,
 		AgentTokenHash: hashSecret(rawTokenB),
-		OAuthClientID:  "client-b",
-	})
+	}, "client-b", "")
 
 	rtA := srv.runtimeFor("agent-a")
 	srv.runtimeFor("agent-b")
@@ -193,16 +187,14 @@ func TestOAuthAndMCPRoutingEndToEnd(t *testing.T) {
 	rawOAuthSecret := "wc_oauth_secret_home"
 	clientID := "client-home"
 
-	if err := srv.store.CreateAgent(ctx, Agent{
-		ID:                    "home",
-		Name:                  "Home Worker",
-		Enabled:               true,
-		AgentTokenHash:        hashSecret(rawAgentToken),
-		OAuthClientID:         clientID,
-		OAuthClientSecretHash: hashSecret(rawOAuthSecret),
-		AllowedTools:          "exec_command,read_file",
-		DeniedTools:           "danger_tool",
-	}); err != nil {
+	if err := createTestAgent(srv.store, ctx, Agent{
+		ID:             "home",
+		Name:           "Home Worker",
+		Enabled:        true,
+		AgentTokenHash: hashSecret(rawAgentToken),
+		AllowedTools:   "exec_command,read_file",
+		DeniedTools:    "danger_tool",
+	}, clientID, hashSecret(rawOAuthSecret)); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -318,33 +310,31 @@ func TestToolPolicyEnforcementPerAgent(t *testing.T) {
 	rawTokenA := "wc_mcp_a"
 	rawTokenB := "wc_mcp_b"
 
-	_ = srv.store.CreateAgent(ctx, Agent{
+	_ = createTestAgent(srv.store, ctx, Agent{
 		ID:             "agent-a",
 		Name:           "Agent A",
 		Enabled:        true,
 		AgentTokenHash: hashSecret("at-a"),
-		OAuthClientID:  "client-a",
 		AllowedTools:   "allowed_tool",
 		DeniedTools:    "denied_tool",
-	})
+	}, "client-a", "")
 	_ = srv.store.CreateAccessToken(ctx, AccessToken{
 		TokenHash: hashSecret(rawTokenA),
-		AgentID:   "agent-a",
+		ClientID:  "agent-a",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
 
-	_ = srv.store.CreateAgent(ctx, Agent{
+	_ = createTestAgent(srv.store, ctx, Agent{
 		ID:             "agent-b",
 		Name:           "Agent B",
 		Enabled:        true,
 		AgentTokenHash: hashSecret("at-b"),
-		OAuthClientID:  "client-b",
 		AllowedTools:   "", // All allowed
 		DeniedTools:    "",
-	})
+	}, "client-b", "")
 	_ = srv.store.CreateAccessToken(ctx, AccessToken{
 		TokenHash: hashSecret(rawTokenB),
-		AgentID:   "agent-b",
+		ClientID:  "agent-b",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
 
@@ -378,18 +368,17 @@ func TestToolCallErrorsAreAlwaysEncapsulatedAsMCPResults(t *testing.T) {
 
 	ctx := context.Background()
 	rawAgentToken := "wc_agent_test_encap"
-	_ = srv.store.CreateAgent(ctx, Agent{
+	_ = createTestAgent(srv.store, ctx, Agent{
 		ID:             "agent-encap",
 		Name:           "Agent Encap",
 		Enabled:        true,
 		AgentTokenHash: hashSecret(rawAgentToken),
-		OAuthClientID:  "client-encap",
-	})
+	}, "client-encap", "")
 
 	rawToken, _ := generateSecret("wc_mcp_test_")
 	_ = srv.store.CreateAccessToken(ctx, AccessToken{
 		TokenHash: hashSecret(rawToken),
-		AgentID:   "agent-encap",
+		ClientID:  "agent-encap",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
 
@@ -432,13 +421,12 @@ func TestRotateAgentTokenDisconnectsStream(t *testing.T) {
 	ctx := context.Background()
 
 	rawAgentToken := "wc_agent_test"
-	_ = srv.store.CreateAgent(ctx, Agent{
+	_ = createTestAgent(srv.store, ctx, Agent{
 		ID:             "agent-rot",
 		Name:           "Agent Rot",
 		Enabled:        true,
 		AgentTokenHash: hashSecret(rawAgentToken),
-		OAuthClientID:  "client-rot",
-	})
+	}, "client-rot", "")
 
 	rt := srv.runtimeFor("agent-rot")
 	streamCtx, stream, _ := rt.activateAgentStream(context.Background())

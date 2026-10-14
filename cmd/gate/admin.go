@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"webcodex/internal/protocol"
 )
 
 var agentIDRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -22,6 +24,7 @@ type adminIndexData struct {
 	PublicURL string
 	CSRF      string
 	Agents    []adminAgentView
+	Clients   []MCPClient
 }
 
 type adminAgentData struct {
@@ -33,6 +36,11 @@ type adminAgentData struct {
 	CreatedAtFormatted string
 }
 
+type adminMCPAgentView struct {
+	Agent   Agent
+	Granted bool
+}
+
 type adminCreatedData struct {
 	PublicURL         string
 	CSRF              string
@@ -40,6 +48,7 @@ type adminCreatedData struct {
 	AgentToken        string
 	OAuthClientID     string
 	OAuthClientSecret string
+	Client            MCPClient
 }
 
 func (s *server) verifyCSRF(r *http.Request) bool {
@@ -81,10 +90,16 @@ func (s *server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	clients, err := s.store.ListMCPClients(r.Context())
+	if err != nil {
+		http.Error(w, "failed to load MCP registrations", http.StatusInternalServerError)
+		return
+	}
 	data := adminIndexData{
 		PublicURL: s.publicURL,
 		CSRF:      s.adminCSRF,
 		Agents:    views,
+		Clients:   clients,
 	}
 
 	if err := renderAdminTemplate(w, "admin-index.html", data); err != nil {
@@ -94,6 +109,7 @@ func (s *server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAdminCreateAgent(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if !s.verifyCSRF(r) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
@@ -109,6 +125,14 @@ func (s *server) handleAdminCreateAgent(w http.ResponseWriter, r *http.Request) 
 	if name == "" {
 		name = id
 	}
+	roots := strings.TrimSpace(r.FormValue("allowed_roots"))
+	if roots == "" {
+		roots = protocol.DefaultAllowedRoots
+	}
+	if !validAllowedRoots(roots) {
+		http.Error(w, "invalid allowed roots", http.StatusBadRequest)
+		return
+	}
 
 	rawAgentToken, err := generateSecret("wc_agent_")
 	if err != nil {
@@ -116,42 +140,27 @@ func (s *server) handleAdminCreateAgent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	rawClientID, err := generateSecret("wc_client_")
-	if err != nil {
-		http.Error(w, "generate secret error", http.StatusInternalServerError)
-		return
-	}
-
-	rawOAuthSecret, err := generateSecret("wc_oauth_")
-	if err != nil {
-		http.Error(w, "generate secret error", http.StatusInternalServerError)
-		return
-	}
-
 	agent := Agent{
-		ID:                    id,
-		Name:                  name,
-		Enabled:               true,
-		AgentTokenHash:        hashSecret(rawAgentToken),
-		OAuthClientID:         rawClientID,
-		OAuthClientSecretHash: hashSecret(rawOAuthSecret),
-		AllowedTools:          "",
-		DeniedTools:           "edit_file,move_path,delete_path",
+		ID:             id,
+		Name:           name,
+		Enabled:        true,
+		AgentTokenHash: hashSecret(rawAgentToken),
+		AllowedRoots:   roots,
+		AllowedTools:   "",
+		DeniedTools:    "edit_file,move_path,delete_path",
 	}
 
 	if err := s.store.CreateAgent(r.Context(), agent); err != nil {
 		log.Printf("create agent in store error: %v", err)
-		http.Error(w, "agent ID or client ID already exists", http.StatusConflict)
+		http.Error(w, "agent ID already exists", http.StatusConflict)
 		return
 	}
 
 	data := adminCreatedData{
-		PublicURL:         s.publicURL,
-		CSRF:              s.adminCSRF,
-		Agent:             agent,
-		AgentToken:        rawAgentToken,
-		OAuthClientID:     rawClientID,
-		OAuthClientSecret: rawOAuthSecret,
+		PublicURL:  s.publicURL,
+		CSRF:       s.adminCSRF,
+		Agent:      agent,
+		AgentToken: rawAgentToken,
 	}
 
 	if err := renderAdminTemplate(w, "admin-created.html", data); err != nil {
@@ -191,7 +200,6 @@ func (s *server) handleAdminAgent(w http.ResponseWriter, r *http.Request) {
 		LastSeenFormatted:  formatTimeRelative(lastSeen),
 		CreatedAtFormatted: agent.CreatedAt.Format("2006-01-02 15:04:05"),
 	}
-
 	if err := renderAdminTemplate(w, "admin-agent.html", data); err != nil {
 		log.Printf("render admin agent error: %v", err)
 		http.Error(w, "internal template error", http.StatusInternalServerError)
@@ -267,66 +275,6 @@ func (s *server) handleAdminRotateAgentToken(w http.ResponseWriter, r *http.Requ
 		log.Printf("render admin created error: %v", err)
 		http.Error(w, "internal template error", http.StatusInternalServerError)
 	}
-}
-
-func (s *server) handleAdminRotateOAuthSecret(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyCSRF(r) {
-		http.Error(w, "invalid CSRF token", http.StatusForbidden)
-		return
-	}
-
-	id := r.PathValue("id")
-	agent, err := s.store.GetAgent(r.Context(), id)
-	if err != nil {
-		http.Error(w, "agent not found", http.StatusNotFound)
-		return
-	}
-
-	rawOAuthSecret, err := generateSecret("wc_oauth_")
-	if err != nil {
-		http.Error(w, "generate secret error", http.StatusInternalServerError)
-		return
-	}
-
-	if err := s.store.UpdateOAuthSecretHash(r.Context(), id, hashSecret(rawOAuthSecret)); err != nil {
-		log.Printf("update oauth secret hash error: %v", err)
-		http.Error(w, "failed to rotate oauth secret", http.StatusInternalServerError)
-		return
-	}
-
-	// Revoke existing access tokens for this agent
-	if err := s.store.RevokeAccessTokens(r.Context(), id); err != nil {
-		log.Printf("revoke access tokens on secret rotation error: %v", err)
-	}
-
-	data := adminCreatedData{
-		PublicURL:         s.publicURL,
-		CSRF:              s.adminCSRF,
-		Agent:             *agent,
-		OAuthClientID:     agent.OAuthClientID,
-		OAuthClientSecret: rawOAuthSecret,
-	}
-
-	if err := renderAdminTemplate(w, "admin-created.html", data); err != nil {
-		log.Printf("render admin created error: %v", err)
-		http.Error(w, "internal template error", http.StatusInternalServerError)
-	}
-}
-
-func (s *server) handleAdminRevokeAccess(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyCSRF(r) {
-		http.Error(w, "invalid CSRF token", http.StatusForbidden)
-		return
-	}
-
-	id := r.PathValue("id")
-	if err := s.store.RevokeAccessTokens(r.Context(), id); err != nil {
-		log.Printf("revoke access tokens error: %v", err)
-		http.Error(w, "failed to revoke access tokens", http.StatusInternalServerError)
-		return
-	}
-
-	http.Redirect(w, r, "/admin/agents/"+id, http.StatusSeeOther)
 }
 
 func (s *server) handleAdminPolicy(w http.ResponseWriter, r *http.Request) {

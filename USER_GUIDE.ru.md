@@ -2,18 +2,25 @@
 
 ## 1. Создайте локальный agent
 
-Откройте `https://<ваш-домен>/admin`, создайте agent и сохраните выданные agent token, OAuth Client ID и OAuth Client Secret. Секреты повторно не показываются; при потере выполните ротацию.
+Откройте `https://<ваш-домен>/admin`, в разделе «Агенты» создайте компьютер и сохраните выданный Agent Token. В его карточке задайте разрешённые каталоги (по умолчанию `C:\projects;W:\`). Секреты повторно не показываются; при потере выполните ротацию.
 
 В карточке agent настройте `AllowedTools`/`DeniedTools`. Если выполнение команд не требуется, добавьте `exec_command,cancel_command` в `DeniedTools`. У новых агентов `edit_file`, `move_path` и `delete_path` уже запрещены; удаляйте нужные имена из `DeniedTools` явно.
 
 ## 2. Запустите бинарник на рабочем компьютере
+
+Скачайте готовый .bat/.ps1 при создании агента или ротации токена: в нём уже
+есть каталоги из карточки и `WEBCODEX_BROWSER_ENABLED=1`. Настройка каталогов
+в локальном скрипте перекрывает дефолт Gate; удалите её, если хотите загружать
+каталоги из админки при каждом запуске. После изменения перезапустите агент.
+Недоступный диск не открывает доступ; подключите его и перезапустите агент.
 
 Windows PowerShell:
 
 ```powershell
 $env:WEBCODEX_GATE_URL = "https://<ваш-домен>"
 $env:WEBCODEX_AGENT_TOKEN = "<agent token>"
-$env:WEBCODEX_ALLOWED_ROOTS = "C:\projects;D:\work"
+$env:WEBCODEX_ALLOWED_ROOTS = "C:\projects;W:\"
+$env:WEBCODEX_BROWSER_ENABLED = "1"
 $env:WEBCODEX_LOG_DIR = "$PSScriptRoot\logs"
 ./webcodex-agent.exe
 ```
@@ -32,7 +39,12 @@ export WEBCODEX_LOG_DIR="/var/log/webcodex-agent"
 
 ## 3. Подключите MCP
 
-В настройке MCP/Connected App укажите:
+В `/admin` отдельно создайте «MCP-подключение», сохраните его OAuth Client ID
+и Secret и отметьте в карточке разрешённые компьютеры. Можно подключить несколько
+агентов с разными Agent Token через один URL. Старые OAuth-данные при обновлении
+автоматически переносятся в отдельные MCP-подключения.
+
+В настройке MCP/Connected App Gemini или ChatGPT укажите:
 
 | Поле | Значение |
 | --- | --- |
@@ -44,11 +56,15 @@ export WEBCODEX_LOG_DIR="/var/log/webcodex-agent"
 | OAuth | Authorization Code + PKCE S256 |
 
 Это MCP endpoint, а не OpenAPI schema. После подключения начните новый чат:
-v5 предоставляет двенадцать инструментов (одиннадцать операций v4 плюс
-`list_commands`), а при `WEBCODEX_BROWSER_ENABLED=1` — ещё десять браузерных.
+v5 предоставляет файловые и командные операции, `list_commands`,
+`list_allowed_roots` и инструмент Gate `list_agents`, а при `WEBCODEX_BROWSER_ENABLED=1` — ещё десять браузерных.
 Tool policy может скрывать часть списка. `exec_command` v5 требует `request_key`.
 Для личных вкладок и установки расширения следуйте [инструкции браузера](BROWSER_GUIDE.ru.md).
-Для отката остаются `/mcp/v4` и `/mcp/v3`.
+Вызовите `list_agents`, выберите компьютер и передавайте его `agent_id` в
+каждом вызове, включая продолжение командных и браузерных сессий. Чтобы узнать
+действующие каталоги, вызовите `list_allowed_roots` с тем же `agent_id`.
+При единственном назначенном компьютере `agent_id` можно опустить.
+Остальные контракты доступны на `/mcp/v4` и `/mcp/v3`.
 
 ## Диагностика
 

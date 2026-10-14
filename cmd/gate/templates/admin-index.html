@@ -119,6 +119,23 @@
             </div>
         </header>
 
+        <section class="card" id="mcp">
+            <h2>MCP-подключения</h2>
+            <div class="form-hint">Один URL для Gemini / ChatGPT. У каждого подключения свои OAuth-данные и разрешённые агенты.</div>
+            {{range .Clients}}
+            <div class="agent-item"><div><strong>{{.Name}}</strong> <span class="agent-id">{{.ID}}</span> {{if not .Enabled}}<span class="badge disabled">Отключено</span>{{end}}</div><a href="/admin/mcp-clients/{{.ID}}" class="btn">Настроить MCP</a></div>
+            {{else}}<div class="empty-state">Нет зарегистрированных MCP-подключений.</div>{{end}}
+        </section>
+        <section class="card">
+            <h2>Зарегистрировать MCP-подключение</h2>
+            <form action="/admin/mcp-clients" method="POST">
+                <input type="hidden" name="csrf" value="{{.CSRF}}">
+                <div class="form-group"><label for="mcp_id">ID подключения</label><input type="text" id="mcp_id" name="id" required pattern="^[a-z0-9][a-z0-9_-]{0,63}$" placeholder="gemini, chatgpt, all-computers"></div>
+                <div class="form-group"><label for="mcp_name">Название</label><input type="text" id="mcp_name" name="name" required placeholder="Мои компьютеры"></div>
+                <button type="submit" class="btn">Создать MCP-подключение</button>
+            </form>
+        </section>
+
         <section class="card">
             <h2>Агенты</h2>
             {{if .Agents}}
@@ -170,6 +187,11 @@
                 <div class="form-group">
                     <label for="agent_name">Название (для отображения)</label>
                     <input type="text" id="agent_name" name="name" required placeholder="Home PC (Windows 11)">
+                </div>
+                <div class="form-group">
+                    <label for="agent_roots">Разрешённые каталоги по умолчанию</label>
+                    <input type="text" id="agent_roots" name="allowed_roots" required value="C:\projects;W:\">
+                    <div class="form-hint">Локальная WEBCODEX_ALLOWED_ROOTS в .bat имеет приоритет. Для Linux укажите его абсолютные пути.</div>
                 </div>
                 <button type="submit" class="btn">Создать агента</button>
             </form>

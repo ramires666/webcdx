@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+const DefaultAllowedRoots = `C:\projects;W:\`
+
+type AgentConfig struct {
+	AllowedRoots string `json:"allowed_roots"`
+}
+
 const ExecutionInstructions = "Use explicit file paths and command working directories. Before executing a command, tell the user the command and its purpose, omitting secrets. Prefer yield_time_ms of 1000 to 3000 for prompt feedback. Set timeout_seconds for the expected computation time: default 1200, maximum 86400. A running status means the process is still active, not completed. Continue polling active sessions with poll_command using the returned next offsets until a terminal status, unless the user asks to stop monitoring. Report meaningful progress about every 10 to 20 seconds while monitoring; if there is no new output, report that the process is still running. A client disconnect does not stop the process: after a retry, resume polling the known session_id instead of executing the command again. Report the final status and exit_code, and do not describe a nonzero exit code as success."
 
 // V5Instructions describes recovery and browser behavior for the extended contract.

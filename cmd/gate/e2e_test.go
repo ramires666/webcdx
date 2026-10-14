@@ -27,13 +27,13 @@ func TestRealGateAndLocalExecutorEndToEnd(t *testing.T) {
 	logs := filepath.Join(root, "logs")
 	agentToken := "wc_agent_real_e2e"
 	mcpToken := "wc_mcp_real_e2e"
-	if err := srv.store.CreateAgent(context.Background(), Agent{
-		ID: "real-e2e", Name: "Real E2E", Enabled: true, AgentTokenHash: hashSecret(agentToken), OAuthClientID: "real-e2e-client",
-	}); err != nil {
+	if err := createTestAgent(srv.store, context.Background(), Agent{
+		ID: "real-e2e", Name: "Real E2E", Enabled: true, AgentTokenHash: hashSecret(agentToken),
+	}, "real-e2e-client", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.store.CreateAccessToken(context.Background(), AccessToken{
-		TokenHash: hashSecret(mcpToken), AgentID: "real-e2e", ExpiresAt: time.Now().Add(time.Hour),
+		TokenHash: hashSecret(mcpToken), ClientID: "real-e2e", ExpiresAt: time.Now().Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -125,8 +125,13 @@ func TestRealGateAndLocalExecutorEndToEnd(t *testing.T) {
 	}
 	listed := postMCP(t, httpServer.URL, mcpToken, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 	tools := listed["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 11 {
+	if len(tools) != 13 {
 		t.Fatalf("tools/list count = %d", len(tools))
+	}
+	roots := invokeTool(t, httpServer.URL, mcpToken, "list_allowed_roots", map[string]any{"agent_id": "real-e2e"})
+	rootItems := roots["roots"].([]any)
+	if len(rootItems) != 1 || rootItems[0].(map[string]any)["path"] != root || rootItems[0].(map[string]any)["available"] != true || roots["unrestricted"] != false {
+		t.Fatalf("MCP did not report the worker's local root override: %v", roots)
 	}
 
 	filePath := filepath.Join(root, "data", "hello.txt")

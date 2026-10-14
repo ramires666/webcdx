@@ -13,16 +13,15 @@ func TestHandleMCPStream(t *testing.T) {
 	defer cleanup()
 
 	rawToken := "wc_mcp_test_stream"
-	_ = srv.store.CreateAgent(context.Background(), Agent{
+	_ = createTestAgent(srv.store, context.Background(), Agent{
 		ID:             "stream-agent",
 		Name:           "Stream Agent",
 		Enabled:        true,
 		AgentTokenHash: hashSecret("agent_tok"),
-		OAuthClientID:  "client_tok",
-	})
+	}, "client_tok", "")
 	_ = srv.store.CreateAccessToken(context.Background(), AccessToken{
 		TokenHash: hashSecret(rawToken),
-		AgentID:   "stream-agent",
+		ClientID:  "stream-agent",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
 
