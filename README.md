@@ -61,7 +61,7 @@ Copy `.env.example` to `.env`, set a strong admin password, then start the publi
 docker compose up -d --build
 ```
 
-The current connector endpoint is `/mcp/v5`; v3/v4 are retained for rollback. The other important endpoints are `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, and `/healthz`. Put the gate behind HTTPS. OAuth requires PKCE S256 and a recognized ChatGPT callback URI. Access tokens expire after `WEBCODEX_ACCESS_TOKEN_TTL` (24 hours by default).
+The current connector endpoint is `/mcp/v5`; v3/v4 are retained for rollback. The other important endpoints are `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, and `/healthz`. Put the gate behind HTTPS. OAuth requires PKCE S256 and a recognized ChatGPT or Gemini callback URI (`https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-<id>`). The same agent credentials can connect both clients; their access tokens remain valid independently. Access tokens expire after `WEBCODEX_ACCESS_TOKEN_TTL` (24 hours by default).
 
 Create an agent in `/admin`; copy its one-time agent token and OAuth client secret immediately. Only their SHA-256 hashes are persisted.
 

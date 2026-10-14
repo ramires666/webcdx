@@ -90,6 +90,42 @@ func TestInitializeMetadataAndBodyLimit(t *testing.T) {
 	}
 }
 
+func TestAllowedOAuthRedirect(t *testing.T) {
+	googleCallback := "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-104381269201799843617-codex_grom_world"
+	for _, test := range []struct {
+		uri     string
+		allowed bool
+	}{
+		{"https://chatgpt.com/oauth/callback", true},
+		{"https://chatgpt.com/connector_platform_oauth_redirect", true},
+		{"https://chatgpt.com/connector/oauth/callback-id", true},
+		{"https://chatgpt.com/connector/oauth/", false},
+		{"https://chatgpt.com/connector/oauth/a/b", false},
+		{"https://chatgpt.com.evil.example/connector/oauth/id", false},
+		{googleCallback, true},
+		{strings.Replace(googleCallback, "https:", "http:", 1), false},
+		{strings.Replace(googleCallback, ".com/", ".com.evil.example/", 1), false},
+		{strings.Replace(googleCallback, ".com/", ".com:443/", 1), false},
+		{strings.Replace(googleCallback, "https://", "https://user@", 1), false},
+		{strings.Replace(googleCallback, "https://", "https://evil.example@", 1), false},
+		{strings.Replace(googleCallback, "/r/user_bound_custom-mcp-", "/r/other-", 1), false},
+		{"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-", false},
+		{googleCallback + "/nested", false},
+		{googleCallback + "%2Fnested", false},
+		{googleCallback + "?next=https://evil.example", false},
+		{googleCallback + "?", false},
+		{googleCallback + "#fragment", false},
+		{googleCallback + "%zz", false},
+		{"https://evil.example/callback", false},
+	} {
+		t.Run(test.uri, func(t *testing.T) {
+			if got := allowedOAuthRedirect(test.uri); got != test.allowed {
+				t.Fatalf("allowedOAuthRedirect(%q) = %v, want %v", test.uri, got, test.allowed)
+			}
+		})
+	}
+}
+
 func TestOAuthRequiresKnownRedirectAndS256(t *testing.T) {
 	srv, cleanup := setupTestServer(t)
 	defer cleanup()

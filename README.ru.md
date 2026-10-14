@@ -60,7 +60,7 @@ go build -o bin/webcodex-gate.exe ./cmd/gate
 docker compose up -d --build
 ```
 
-Текущий endpoint коннектора — `/mcp/v5`; v3/v4 сохранены для отката. Остальные основные endpoint: `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, `/healthz`. Gate должен работать за HTTPS. OAuth требует PKCE S256 и известный callback ChatGPT. Срок access token задаёт `WEBCODEX_ACCESS_TOKEN_TTL`, по умолчанию 24 часа.
+Текущий endpoint коннектора — `/mcp/v5`; v3/v4 сохранены для отката. Остальные основные endpoint: `/oauth/authorize`, `/oauth/token`, `/agent/stream`, `/agent/result`, `/admin`, и `/healthz`. Gate должен работать за HTTPS. OAuth требует PKCE S256 и известный callback ChatGPT или Gemini (`https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-<id>`). Одинаковые учётные данные агента можно использовать для обоих клиентов; их access token действуют независимо. Срок access token задаёт `WEBCODEX_ACCESS_TOKEN_TTL`, по умолчанию 24 часа.
 
 Создайте agent в `/admin` и сразу сохраните одноразово показанные agent token и OAuth secret. В SQLite сохраняются только SHA-256 хеши.
 

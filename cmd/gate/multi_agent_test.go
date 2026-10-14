@@ -206,6 +206,33 @@ func TestOAuthAndMCPRoutingEndToEnd(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 
+	var tokens []string
+	for _, redirectURI := range []string{
+		"https://chatgpt.com/oauth/callback",
+		"https://chatgpt.com/connector_platform_oauth_redirect",
+		"https://chatgpt.com/connector/oauth/callback-id",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-104381269201799843617-codex_grom_world",
+	} {
+		t.Run(redirectURI, func(t *testing.T) {
+			tokens = append(tokens, exchangeOAuthToken(t, srv, clientID, rawOAuthSecret, redirectURI))
+		})
+	}
+	// Both clients' tokens must remain usable on the same agent after linking.
+	for _, token := range tokens {
+		for _, endpoint := range []string{"/mcp", "/mcp/v5"} {
+			reqMCP := httptest.NewRequest("POST", endpoint, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+			reqMCP.Header.Set("Authorization", "Bearer "+token)
+			recMCP := httptest.NewRecorder()
+			srv.routes().ServeHTTP(recMCP, reqMCP)
+			if recMCP.Code != http.StatusOK {
+				t.Fatalf("%s initialize status = %d, body = %s", endpoint, recMCP.Code, recMCP.Body.String())
+			}
+		}
+	}
+}
+
+func exchangeOAuthToken(t *testing.T, srv *server, clientID, rawOAuthSecret, redirectURI string) string {
+	t.Helper()
 	// 1. Authorize endpoint with PKCE
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	h := sha256.Sum256([]byte(verifier))
@@ -213,7 +240,7 @@ func TestOAuthAndMCPRoutingEndToEnd(t *testing.T) {
 
 	authURL := "/oauth/authorize?client_id=" + clientID +
 		"&response_type=code" +
-		"&redirect_uri=" + url.QueryEscape("https://chatgpt.com/oauth/callback") +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
 		"&code_challenge=" + challenge +
 		"&code_challenge_method=S256&state=state-123"
 
@@ -230,6 +257,9 @@ func TestOAuthAndMCPRoutingEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse redirect URL: %v", err)
 	}
+	if parsedLoc.Scheme+"://"+parsedLoc.Host+parsedLoc.Path != redirectURI || parsedLoc.Query().Get("state") != "state-123" || parsedLoc.Query().Get("iss") != srv.publicURL {
+		t.Fatalf("unexpected OAuth callback: %s", loc)
+	}
 	code := parsedLoc.Query().Get("code")
 	if code == "" || !strings.HasPrefix(code, "wc_code_") {
 		t.Fatalf("invalid code in redirect: %q", code)
@@ -241,7 +271,7 @@ func TestOAuthAndMCPRoutingEndToEnd(t *testing.T) {
 	form.Set("code", code)
 	form.Set("client_id", clientID)
 	form.Set("client_secret", rawOAuthSecret)
-	form.Set("redirect_uri", "https://chatgpt.com/oauth/callback")
+	form.Set("redirect_uri", redirectURI)
 	form.Set("code_verifier", verifier)
 
 	reqToken := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
@@ -276,17 +306,7 @@ func TestOAuthAndMCPRoutingEndToEnd(t *testing.T) {
 		t.Fatalf("expected code replay to fail with 400, got %d", recReplay.Code)
 	}
 
-	// 4. Use issued MCP Access Token to call /mcp
-	mcpReqBody := `{"jsonrpc":"2.0","id":1,"method":"initialize"}`
-	reqMCP := httptest.NewRequest("POST", "/mcp", strings.NewReader(mcpReqBody))
-	reqMCP.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
-	recMCP := httptest.NewRecorder()
-
-	srv.handleMCP(recMCP, reqMCP)
-
-	if recMCP.Code != http.StatusOK {
-		t.Fatalf("mcp initialize status = %d, body = %s", recMCP.Code, recMCP.Body.String())
-	}
+	return tokenResp.AccessToken
 }
 
 func TestToolPolicyEnforcementPerAgent(t *testing.T) {

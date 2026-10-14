@@ -258,10 +258,18 @@ func allowedOAuthRedirect(value string) bool {
 		return true
 	}
 	target, err := url.Parse(value)
-	if err != nil || target.Scheme != "https" || !strings.EqualFold(target.Host, "chatgpt.com") || target.RawQuery != "" || target.Fragment != "" {
+	if err != nil || target.Scheme != "https" || target.RawQuery != "" || target.Fragment != "" {
 		return false
 	}
-	callbackID := strings.TrimPrefix(target.Path, "/connector/oauth/")
+	var callbackID string
+	switch {
+	case strings.EqualFold(target.Host, "chatgpt.com"):
+		callbackID = strings.TrimPrefix(target.Path, "/connector/oauth/")
+	case strings.EqualFold(target.Host, "oauth-redirect.googleusercontent.com") && target.User == nil && !target.ForceQuery:
+		callbackID = strings.TrimPrefix(target.Path, "/r/user_bound_custom-mcp-")
+	default:
+		return false
+	}
 	return callbackID != target.Path && callbackID != "" && !strings.Contains(callbackID, "/")
 }
 
