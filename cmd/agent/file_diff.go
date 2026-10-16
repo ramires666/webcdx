@@ -93,7 +93,14 @@ func formatFileDiff(before, after string) string {
 		return string(text)
 	}
 	var out strings.Builder
-	fmt.Fprintf(&out, "%-*s │ %s\n", width, "До", "После")
+	beforeTitle, afterTitle := "До", "После"
+	if before == "" {
+		beforeTitle += " (пусто)"
+	}
+	if after == "" {
+		afterTitle += " (пусто)"
+	}
+	fmt.Fprintf(&out, "%-*s │ %s\n", width, beforeTitle, afterTitle)
 	rows := 0
 	for i := 0; i < len(changes); {
 		if changes[i].kind == ' ' {
@@ -117,9 +124,13 @@ func formatFileDiff(before, after string) string {
 			left, right := "", ""
 			if row < len(removed) {
 				left = "- " + column(removed[row])
+			} else if row == len(removed) {
+				left = "(нет строки)"
 			}
 			if row < len(added) {
 				right = "+ " + column(added[row])
+			} else if row == len(added) {
+				right = "(нет строки)"
 			}
 			fmt.Fprintf(&out, "%-*s │ %s\n", width, left, right)
 			rows++
@@ -131,6 +142,14 @@ func formatFileDiff(before, after string) string {
 	return out.String()
 }
 
-func logFileChange(path string, before, after []byte) {
-	log.Printf("✓ Сохранён файл %s\n%s", compactString(path, 180), formatFileDiff(string(before), string(after)))
+func logFileChange(path string, before, after []byte, created bool) {
+	action := "Сохранён файл"
+	if created {
+		action = "Создан файл (ранее не существовал)"
+	}
+	preview := formatFileDiff(string(before), string(after))
+	if created && len(after) == 0 {
+		preview = "Пустой файл"
+	}
+	log.Printf("✓ %s %s\n%s", action, compactString(path, 180), preview)
 }

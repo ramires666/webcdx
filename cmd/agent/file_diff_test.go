@@ -97,6 +97,82 @@ func TestChangedLinesReconstructRepeatedText(t *testing.T) {
 	}
 }
 
+func TestFileDiffExplainsMissingCounterparts(t *testing.T) {
+	for _, test := range []struct {
+		name, before, after string
+		want                []string
+	}{
+		{"empty before", "", "new\n", []string{"До (пусто)", "(нет строки)", "+ 1 new"}},
+		{"empty after", "old\n", "", []string{"После (пусто)", "- 1 old", "│ (нет строки)"}},
+		{"insert", "keep\n", "new\nkeep\n", []string{"(нет строки)", "+ 1 new"}},
+		{"delete", "old\nkeep\n", "keep\n", []string{"- 1 old", "│ (нет строки)"}},
+		{"expand", "old\n", "new\nextra\n", []string{"- 1 old", "+ 1 new", "(нет строки)", "+ 2 extra"}},
+		{"contract", "old\nextra\n", "new\n", []string{"- 1 old", "+ 1 new", "- 2 extra", "│ (нет строки)"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			diff := formatFileDiff(test.before, test.after)
+			for _, want := range test.want {
+				if !strings.Contains(diff, want) {
+					t.Fatalf("diff missing %q: %s", want, diff)
+				}
+			}
+			if strings.Contains(diff, "keep") {
+				t.Fatalf("unchanged line shown: %s", diff)
+			}
+		})
+	}
+}
+
+func TestWriteFileLogsOriginalContents(t *testing.T) {
+	var console bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&console)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	executor, root := testExecutor(t)
+	for _, version := range []string{"v3", "v4"} {
+		t.Run(version, func(t *testing.T) {
+			console.Reset()
+			path := filepath.Join(root, version+".py")
+			if err := os.WriteFile(path, []byte("keep\nold value\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := map[string]any{"path": path, "content": "keep\nnew value\n"}
+			if version == "v4" {
+				args["expected_sha256"] = hashBytes([]byte("keep\nold value\n"))
+				callToolV4(t, executor, "write_file", args)
+			} else {
+				callTool(t, executor, "write_file", args)
+			}
+			for _, want := range []string{"Сохранён файл", "- 2 old value", "+ 2 new value"} {
+				if !strings.Contains(console.String(), want) {
+					t.Fatalf("original contents missing %q: %s", want, console.String())
+				}
+			}
+			if strings.Contains(console.String(), "ранее не существовал") || strings.Contains(console.String(), "keep") {
+				t.Fatalf("incorrect replacement preview: %s", console.String())
+			}
+		})
+	}
+}
+
+func TestFileChangeLoggingDistinguishesNewAndEmptyFiles(t *testing.T) {
+	var console bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&console)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	executor, root := testExecutor(t)
+	path := filepath.Join(root, "empty.py")
+	created := callToolV4(t, executor, "write_file", map[string]any{"path": path, "content": "", "if_absent": true})
+	if !strings.Contains(console.String(), "Создан файл (ранее не существовал)") || !strings.Contains(console.String(), "Пустой файл") || strings.Contains(console.String(), "Без изменений") {
+		t.Fatalf("empty file creation not explained: %s", console.String())
+	}
+	console.Reset()
+	callToolV4(t, executor, "write_file", map[string]any{"path": path, "content": "new\n", "expected_sha256": created["sha256"]})
+	if !strings.Contains(console.String(), "Сохранён файл") || !strings.Contains(console.String(), "До (пусто)") || strings.Contains(console.String(), "ранее не существовал") {
+		t.Fatalf("existing empty file shown as new: %s", console.String())
+	}
+}
+
 func TestFileChangeLoggingOnlyAfterSuccessfulWrite(t *testing.T) {
 	var console bytes.Buffer
 	previous := log.Writer()
@@ -105,7 +181,7 @@ func TestFileChangeLoggingOnlyAfterSuccessfulWrite(t *testing.T) {
 	executor, root := testExecutor(t)
 	path := filepath.Join(root, "new-folder", "текст.md")
 	created := callToolV4(t, executor, "write_file", map[string]any{"path": path, "content": "unchanged\nold\n", "if_absent": true})
-	if !strings.Contains(console.String(), "Создана папка") || !strings.Contains(console.String(), "+ 2 old") {
+	if !strings.Contains(console.String(), "Создана папка") || !strings.Contains(console.String(), "Создан файл (ранее не существовал)") || !strings.Contains(console.String(), "До (пусто)") || !strings.Contains(console.String(), "+ 2 old") {
 		t.Fatalf("creation not shown: %s", console.String())
 	}
 	console.Reset()

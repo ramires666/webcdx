@@ -145,7 +145,7 @@ func (e *nativeExecutor) writeFile(args map[string]any, requirePrecondition bool
 		log.Printf("✓ Создана папка %s", compactString(filepath.Dir(path), 180))
 	}
 	if previewOK {
-		logFileChange(path, before, data)
+		logFileChange(path, before, data, errors.Is(inspectErr, os.ErrNotExist))
 	} else {
 		log.Printf("✓ Сохранён файл %s; сравнение недоступно", compactString(path, 180))
 	}
@@ -230,7 +230,7 @@ func (e *nativeExecutor) editFile(args map[string]any) (any, error) {
 	if err := atomicWrite(path, newData, false); err != nil {
 		return nil, err
 	}
-	logFileChange(path, data, newData)
+	logFileChange(path, data, newData, false)
 	return map[string]any{
 		"path": path, "old_sha256": oldHash, "new_sha256": hashBytes(newData),
 		"replacements": replacements, "bytes_written": len(newData),
