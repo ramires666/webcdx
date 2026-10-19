@@ -1,6 +1,14 @@
 # WebCodex Local Workspace MCP
 
-WebCodex exposes explicit file and process operations from local Windows/Linux machines through one public MCP gate. The gate keeps OAuth, SQLite, per-machine routing, and tool policy; each local agent makes only an outbound HTTP connection.
+WebCodex connects MCP clients such as ChatGPT and Gemini to files, commands, and browsers on your Windows and Linux computers through a single self-hosted gateway. Each local agent connects outbound to the gateway, so it does not need an incoming connection.
+
+Main features:
+
+- **File management:** read, write, search, edit, move, and delete files within configured roots.
+- **Command execution:** run shell commands, track background processes, inspect logs, and cancel tasks.
+- **Browser control:** navigate tabs, interact with pages, capture screenshots, and transfer files using clean, persistent, or signed-in personal sessions.
+- **Multiple computers:** discover available agents and route each operation to the selected machine.
+- **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
 Russian documentation: [README.ru.md](README.ru.md) · [User guide](USER_GUIDE.ru.md)
 
