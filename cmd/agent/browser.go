@@ -32,16 +32,19 @@ type browserConfig struct {
 }
 
 type browserManager struct {
-	mu         sync.Mutex
-	config     browserConfig
-	executor   *nativeExecutor
-	sessions   map[string]*browserSession
-	operations map[string]*browserOperation
-	closed     bool
-	listener   *browserIPCListener
-	bridge     *browserBridge
-	bridgePath string
-	artifactMu sync.Mutex
+	mu          sync.Mutex
+	config      browserConfig
+	executor    *nativeExecutor
+	sessions    map[string]*browserSession
+	operations  map[string]*browserOperation
+	journal     map[string]browserJournalEntry
+	cleanupStop context.CancelFunc
+	cleanupDone chan struct{}
+	closed      bool
+	listener    *browserIPCListener
+	bridge      *browserBridge
+	bridgePath  string
+	artifactMu  sync.Mutex
 }
 
 type browserSession struct {
@@ -101,7 +104,7 @@ func browserID(prefix string) string {
 }
 
 func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager, error) {
-	b := &browserManager{config: config, executor: e, sessions: map[string]*browserSession{}, operations: map[string]*browserOperation{}}
+	b := &browserManager{config: config, executor: e, sessions: map[string]*browserSession{}, operations: map[string]*browserOperation{}, journal: map[string]browserJournalEntry{}}
 	if !config.Enabled {
 		return b, nil
 	}
@@ -136,7 +139,10 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 		if json.Unmarshal(data, &op) != nil {
 			return nil, errors.New("invalid browser operation journal")
 		}
-		if time.Since(op.At) > 24*time.Hour {
+		if !browserOperationID.MatchString(op.ID) || entry.Name() != op.ID+".json" || op.KeyHash == "" {
+			return nil, errors.New("invalid browser operation journal")
+		}
+		if time.Since(op.At) > browserOperationTTL {
 			if err := os.Remove(path); err != nil {
 				return nil, err
 			}
@@ -149,6 +155,8 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 		op.done = make(chan struct{})
 		close(op.done)
 		b.operations[op.ID] = &op
+		b.journal[op.KeyHash] = browserJournalEntry{ID: op.ID, At: op.At}
+		b.trimOperations(browserOperationCacheMax)
 	}
 	if config.Personal {
 		path := config.BridgePath
@@ -159,6 +167,7 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 			return nil, err
 		}
 	}
+	b.startOperationCleanup()
 	return b, nil
 }
 
@@ -170,7 +179,11 @@ func (b *browserManager) saveOperation(op *browserOperation) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(filepath.Join(b.config.Dir, "operations", op.ID+".json"), data, false)
+	if err := atomicWrite(filepath.Join(b.config.Dir, "operations", op.ID+".json"), data, false); err != nil {
+		return err
+	}
+	b.journal[op.KeyHash] = browserJournalEntry{ID: op.ID, At: op.At}
+	return nil
 }
 
 func browserMutation(name string, args map[string]any) bool {
@@ -205,41 +218,27 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		return nil, toolErr("disconnected", "browser manager closed")
 	}
 	if keyHash != "" {
-		for _, op := range b.operations {
-			if op.KeyHash == keyHash {
-				if op.Hash != hash {
-					b.mu.Unlock()
-					return nil, toolErr("request_key_conflict", "key was used with different arguments")
-				}
+		entry, ok := b.journal[keyHash]
+		if ok && time.Since(entry.At) > browserOperationTTL {
+			if err := b.expireOperations(time.Now()); err != nil {
 				b.mu.Unlock()
-				return b.await(ctx, op)
+				return nil, toolErr("io_error", "expire browser retry journal", err)
 			}
+			entry, ok = b.journal[keyHash]
 		}
-	}
-	completedReads := 0
-	oldestReadID := ""
-	var oldestReadAt time.Time
-	for id, op := range b.operations {
-		if op.Status != "running" && time.Since(op.At) > 24*time.Hour {
-			if op.KeyHash != "" {
-				if err := os.Remove(filepath.Join(b.config.Dir, "operations", id+".json")); err != nil {
-					b.mu.Unlock()
-					return nil, toolErr("io_error", "expire browser operation", err)
-				}
+		if ok {
+			op, err := b.loadOperation(entry.ID)
+			if err != nil {
+				b.mu.Unlock()
+				return nil, toolErr("io_error", "read browser retry journal", err)
 			}
-			delete(b.operations, id)
-			continue
-		}
-		if op.KeyHash == "" && op.Status != "running" {
-			completedReads++
-			if oldestReadID == "" || op.At.Before(oldestReadAt) {
-				oldestReadID = id
-				oldestReadAt = op.At
+			if op.Hash != hash {
+				b.mu.Unlock()
+				return nil, toolErr("request_key_conflict", "key was used with different arguments")
 			}
+			b.mu.Unlock()
+			return b.await(ctx, op)
 		}
-	}
-	if completedReads >= 32 {
-		delete(b.operations, oldestReadID)
 	}
 	running := 0
 	for _, op := range b.operations {
@@ -247,10 +246,11 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 			running++
 		}
 	}
-	if len(b.operations) >= 256 || running >= 32 {
+	if running >= browserOperationRunningMax {
 		b.mu.Unlock()
-		return nil, toolErr("limit_reached", "browser operation limit reached; wait for journal expiry")
+		return nil, toolErr("limit_reached", "128 browser operations are running; wait for an operation to finish")
 	}
+	b.trimOperations(browserOperationCacheMax - 1)
 	opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	op := &browserOperation{ID: browserID("bop_"), KeyHash: keyHash, Hash: hash, Status: "running", At: time.Now().UTC(), done: make(chan struct{}), cancel: cancel}
 	if err := b.saveOperation(op); err != nil {
@@ -330,9 +330,12 @@ func (b *browserManager) control(args map[string]any) (any, error) {
 	if id, _ := optionalString(args, "operation_id"); id != "" {
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		op := b.operations[id]
-		if op == nil {
+		op, err := b.loadOperation(id)
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, toolErr("unknown_operation", "unknown operation_id")
+		}
+		if err != nil {
+			return nil, toolErr("io_error", "read browser operation", err)
 		}
 		if action == "cancel" {
 			if op.cancel != nil {
@@ -858,7 +861,14 @@ func (b *browserManager) tabs(ctx context.Context, s *browserSession, t *browser
 
 func (b *browserManager) Close() {
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
 	b.closed = true
+	if b.cleanupStop != nil {
+		b.cleanupStop()
+	}
 	var cancels []context.CancelFunc
 	for _, op := range b.operations {
 		if op.cancel != nil {
@@ -871,6 +881,9 @@ func (b *browserManager) Close() {
 	}
 	link := b.bridge
 	b.mu.Unlock()
+	if b.cleanupDone != nil {
+		<-b.cleanupDone
+	}
 	if b.listener != nil {
 		b.listener.Close()
 	}

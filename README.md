@@ -32,6 +32,13 @@ agent restarts and makes website tabs available without per-tab approval.
 Local pause persists; Disconnect disables the saved grant. Tab control attaches
 on demand, and personal sessions can be reused across chats.
 
+Browser history no longer blocks new actions when full: the agent automatically
+evicts completed results from its 4,096-entry memory cache. Mutation results and
+Retry keys remain on disk for 24 hours, with no fixed entry count, and are loaded
+on demand. Expired records are deleted at startup and every minute, including
+while idle. Up to 128 operations may run concurrently; active operations are
+never evicted. Update and restart the local agent to apply these limits.
+
 | Tool | Operation |
 | --- | --- |
 | `list_agents` | Permitted computers and online status (Gate). |
