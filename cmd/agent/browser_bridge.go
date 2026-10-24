@@ -215,7 +215,7 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 				return
 			}
 		case "url_check":
-			if len(message.URL) > 16384 {
+			if len(message.URL) > 16384 || len(message.ID) == 0 || len(message.ID) > 128 {
 				return
 			}
 			id, rawURL := message.ID, message.URL
@@ -225,12 +225,17 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 			// Full queues fail closed through the extension's bounded URL check
 			// timeout. DNS and slow writes never stall the shared IPC reader.
 			if b.urlChecks != nil {
-				b.urlChecks.submit(connectionCtx, rawURL, func(allowed bool) {
+				policyCtx, stopPolicy := context.WithTimeout(connectionCtx, 3500*time.Millisecond)
+				accepted := b.urlChecks.submit(policyCtx, rawURL, func(allowed bool) {
+					defer stopPolicy()
 					link.mu.Lock()
 					allowed = allowed && !link.closed && !link.paused && link.scopeEpoch == epoch
 					link.mu.Unlock()
-					_ = link.sendContext(connectionCtx, browserBridgeMessage{Kind: "url_result", ID: id, Allowed: allowed})
+					_ = link.sendContext(policyCtx, browserBridgeMessage{Kind: "url_result", ID: id, Allowed: allowed})
 				})
+				if !accepted {
+					stopPolicy()
+				}
 			}
 		case "response", "cancel_ack":
 			link.mu.Lock()

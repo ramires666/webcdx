@@ -296,7 +296,24 @@ func browserConsoleResult(info browserConsoleInfo, result map[string]any) string
 			return fmt.Sprintf("файл сохранён · %d байт", n)
 		}
 		if downloads := browserConsoleSlice(result["downloads"]); downloads != nil {
-			return fmt.Sprintf("загрузок: %d", len(downloads))
+			message := fmt.Sprintf("загрузок: %d", len(downloads))
+			states := map[string]string{"complete": "готово", "completed": "готово", "running": "скачивается", "in_progress": "скачивается", "canceled": "отменено", "interrupted": "прервано"}
+			for index, raw := range downloads {
+				if index >= 8 {
+					message += "\n  … список загрузок усечён"
+					break
+				}
+				item, _ := raw.(map[string]any)
+				id, _ := item["download_id"].(string)
+				status, _ := item["status"].(string)
+				label := states[status]
+				if label == "" {
+					label = compactString(status, 32)
+				}
+				bytes, _ := browserConsoleNumber(item["bytes"])
+				message += fmt.Sprintf("\n  %s · %s · %d байт", compactString(id, 64), label, bytes)
+			}
+			return message
 		}
 	case "browser_screenshot":
 		width, _ := browserConsoleNumber(result["image_width"])
@@ -393,6 +410,8 @@ func browserConsoleError(code string) string {
 		return "подключённая вкладка закрыта или отключена"
 	case "stale_generation":
 		return "содержимое списка изменилось; начните чтение с новой версии"
+	case "focus_changed":
+		return "фокус перешёл в другой элемент; проверьте поле перед повтором ввода"
 	case "browser_unhealthy":
 		return "браузер ограничен: восстановите журнал; файлы и команды доступны"
 	case "unknown_session":
@@ -485,6 +504,12 @@ func browserConsoleSlice(value any) []any {
 		out := make([]any, len(list))
 		for i := range list {
 			out[i] = list[i]
+		}
+		return out
+	case []browserDownload:
+		out := make([]any, len(list))
+		for index, item := range list {
+			out[index] = map[string]any{"download_id": item.ID, "status": item.Status, "bytes": item.Bytes}
 		}
 		return out
 	default:

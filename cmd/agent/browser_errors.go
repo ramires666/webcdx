@@ -9,6 +9,7 @@ import (
 
 // These messages contain no page-provided text, stack, field value or URL.
 var browserFailureMessages = map[string]string{
+	"native_input_unavailable":  "the browser native editing command is unavailable for this control",
 	"browser_unhealthy":         "browser recovery is required; restore the operation journal before making changes",
 	"binding_changed":           "the selected browser tab, window or page changed; bind the exact existing target again",
 	"tab_not_found":             "no locally approved existing tab matches the exact URL and window",
@@ -17,6 +18,7 @@ var browserFailureMessages = map[string]string{
 	"ambiguous_record":          "record IDs are not unique in the selected DOM collection",
 	"unstable_record":           "a selected record has no stable ID; choose an explicit ID attribute",
 	"download_conflict":         "the destination already contains different bytes; choose a new destination",
+	"focus_changed":             "page focus moved to a different control; inspect the target before trying native input again",
 	"cancelled":                 "browser operation was cancelled",
 	"cancelled_before_dispatch": "operation was cancelled before a browser side effect was sent",
 	"scope_changed":             "local browser access changed; obtain fresh state before continuing",

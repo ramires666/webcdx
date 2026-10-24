@@ -27,7 +27,7 @@ func (b *browserManager) fillNative(ctx context.Context, t *browserTab, args map
 if(el.matches(':disabled')||el.getAttribute('aria-disabled')==='true')wcFail('element_disabled');
 if(!visible(el))wcFail('element_hidden');
 if(el.type==='password')return {password:true};
-const input=el.tagName==='INPUT'&&['text','search','url','tel','email'].includes(el.type);
+const input=el.tagName==='INPUT'&&['text','search','url','tel'].includes(el.type);
 const textarea=el.tagName==='TEXTAREA';
 const editable=el.isContentEditable===true;
 if(!input&&!textarea&&!editable)wcFail('invalid_control_type');
@@ -39,8 +39,13 @@ const pointRoot=root===document?document:root,hit=pointRoot.elementFromPoint?.(x
 if(hit&&hit!==el&&!el.contains(hit))wcFail('element_obscured');
 }
 el.focus({preventScroll:true});
+const focusRoot=el.getRootNode(),focused=focusRoot.activeElement||document.activeElement;
+if(!el.isConnected)wcFail('element_detached');
+if(focused!==el&&!el.contains(focused))wcFail('focus_changed');
 if(input||textarea)el.setSelectionRange(0,el.value.length);
 else{const selection=window.getSelection(),range=document.createRange();range.selectNodeContents(el);selection.removeAllRanges();selection.addRange(range)}
+if(!document.execCommand('insertText',false,` + browserJS(text) + `))wcFail('native_input_unavailable');
+globalThis.__webcodexNativeInput={el,document,url:location.href};
 return {password:false,kind:editable?'contenteditable':'value'};
 })()`
 	var prepared struct {
@@ -53,14 +58,8 @@ return {password:false,kind:editable?'contenteditable':'value'};
 	if prepared.Password {
 		return map[string]any{"status": "waiting_user", "reason": "password_entry"}, nil
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := t.commandFrame(ctx, frameID, "Input.insertText", map[string]any{"text": text}, nil); err != nil {
-		return nil, err
-	}
 
-	verify := `(()=>{` + locator + `const expected=` + browserJS(text) + `,actual=`
+	verify := `(()=>{` + browserDOMFailure + `const state=globalThis.__webcodexNativeInput;if(!state||state.document!==document||state.url!==location.href||!state.el.isConnected)wcFail('element_detached');const el=state.el;const expected=` + browserJS(text) + `,actual=`
 	if prepared.Kind == "contenteditable" {
 		verify += `el.innerText`
 	} else {

@@ -40,20 +40,7 @@ func (b *browserManager) trackDownloads(s *browserSession) {
 					if json.Unmarshal(raw, &event) != nil || !downloadGUID.MatchString(event.GUID) {
 						continue
 					}
-					s.downloadMu.Lock()
-					download := s.downloads[event.GUID]
-					if download == nil && method == "Browser.downloadWillBegin" && len(s.downloads) < 16 {
-						download = &browserDownload{ID: event.GUID, Status: "running"}
-						s.downloads[event.GUID] = download
-					}
-					if download != nil {
-						download.Bytes = int64(event.Bytes)
-						if event.State != "" {
-							download.Status = event.State
-						}
-					}
-					tooLarge := download == nil || event.Bytes > 64<<20
-					s.downloadMu.Unlock()
+					tooLarge := recordManagedDownload(s, method, event.GUID, event.State, int64(event.Bytes))
 					b.artifactMu.Lock()
 					size, err := b.cleanArtifacts()
 					b.artifactMu.Unlock()
@@ -67,6 +54,30 @@ func (b *browserManager) trackDownloads(s *browserSession) {
 			}
 		}(method)
 	}
+}
+
+// Different CDP event subscriptions run in separate goroutines: progress may
+// reach us before willBegin. A late willBegin must not cancel or reset a file.
+func recordManagedDownload(s *browserSession, method, id, state string, bytes int64) bool {
+	s.downloadMu.Lock()
+	defer s.downloadMu.Unlock()
+	download := s.downloads[id]
+	if download == nil && len(s.downloads) < 16 {
+		download = &browserDownload{ID: id, Status: "running"}
+		s.downloads[id] = download
+	}
+	if download == nil {
+		return true
+	}
+	if method == "Browser.downloadProgress" {
+		if bytes > download.Bytes {
+			download.Bytes = bytes
+		}
+		if state != "" {
+			download.Status = state
+		}
+	}
+	return bytes > browserDownloadMaxBytes
 }
 
 func (b *browserManager) files(ctx context.Context, s *browserSession, t *browserTab, args map[string]any) (any, error) {

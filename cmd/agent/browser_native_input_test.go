@@ -22,9 +22,26 @@ func nativeInputFixture(t *testing.T) *browserFixture {
 <input id="hidden" value="keep-hidden" data-track="hidden">
 <div id="autosave"></div><div id="events"></div>
 <script>
-for(const el of document.querySelectorAll('[data-track]'))el.addEventListener('input',()=>{const id=el.id,counter=document.querySelector('#events');counter.setAttribute(id,String(Number(counter.getAttribute(id)||0)+1));document.querySelector('#autosave').textContent=el.value??el.innerText});
+for(const el of document.querySelectorAll('[data-track]'))el.addEventListener('input',event=>{const id=el.id,counter=document.querySelector('#events');counter.setAttribute(id+'-trusted',String(event.isTrusted));counter.setAttribute(id,String(Number(counter.getAttribute(id)||0)+1));document.querySelector('#autosave').textContent=el.value??el.innerText});
 </script>`)
 	return f
+}
+
+func TestBrowserNativeInputNeverWritesIntoFocusStealingControl(t *testing.T) {
+	f := newBrowserFixture(t, `<main>fixture ready</main><input id="target" value="keep-target" onfocus="queueMicrotask(()=>document.querySelector('#other').focus())"><input id="other" value="keep-other">`)
+	_, err := f.call("browser_interact", map[string]any{"action": "fill", "selector": "#target", "text": "target-only-text", "input_mode": "native", "request_key": "focus-steal-guard"})
+	inputErr := err
+	var values []string
+	tab := f.b.sessions[f.session].tabs[f.tab]
+	if err := f.b.eval(f.ctx, tab, "", `[document.querySelector('#target').value,document.querySelector('#other').value]`, &values); err != nil {
+		t.Fatal(err)
+	}
+	if inputErr != nil {
+		browserErrorCode(t, inputErr, "focus_changed")
+	}
+	if len(values) != 2 || (values[0] != "keep-target" && values[0] != "target-only-text") || values[1] != "keep-other" {
+		t.Fatalf("native input modified a control after focus moved: %v", values)
+	}
 }
 
 func nativeInputEval(t *testing.T, f *browserFixture, expression string, result any) {
@@ -47,8 +64,8 @@ func TestBrowserNativeInputUnicodeEventsUndoAndMultiline(t *testing.T) {
 		t.Fatalf("native fill result = %#v", result)
 	}
 	var state map[string]any
-	nativeInputEval(t, f, `(()=>({value:document.querySelector('#native').value,events:Number(document.querySelector('#events').getAttribute('native')||0),autosave:document.querySelector('#autosave').textContent}))()`, &state)
-	if state["value"] != text || state["autosave"] != text || state["events"].(float64) < 1 {
+	nativeInputEval(t, f, `(()=>({value:document.querySelector('#native').value,trusted:document.querySelector('#events').getAttribute('native-trusted'),events:Number(document.querySelector('#events').getAttribute('native')||0),autosave:document.querySelector('#autosave').textContent}))()`, &state)
+	if state["value"] != text || state["autosave"] != text || state["events"].(float64) < 1 || state["trusted"] != "true" {
 		t.Fatalf("native input/autosave state = %#v", state)
 	}
 
@@ -102,7 +119,7 @@ func TestBrowserNativeInputThroughBrowserCall(t *testing.T) {
 		t.Fatalf("integrated native fill result = %#v", result)
 	}
 	var state map[string]any
-	nativeInputEval(t, f, `(()=>({value:document.querySelector('#native').value,events:Number(document.querySelector('#events').getAttribute('native')||0),autosave:document.querySelector('#autosave').textContent}))()`, &state)
+	nativeInputEval(t, f, `(()=>({value:document.querySelector('#native').value,trusted:document.querySelector('#events').getAttribute('native-trusted'),events:Number(document.querySelector('#events').getAttribute('native')||0),autosave:document.querySelector('#autosave').textContent}))()`, &state)
 	if state["value"] != text || state["autosave"] != text || state["events"].(float64) < 1 {
 		t.Fatalf("integrated native fill state = %#v", state)
 	}

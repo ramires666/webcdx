@@ -448,7 +448,9 @@ URL/окна/локального доступа остановит её с bind
 из выдаваемых URL и консольного контекста.
 
 Для `browser_interact(action="fill")` доступен `input_mode="native"`: Unicode
-через Input.insertText, read-back и undo. По умолчанию остаётся compatibility;
+через команду редактирования Chromium, read-back и undo. Фокус, выделение и
+вставка выполняются одним шагом renderer, чтобы текст не попадал в другое поле
+между отдельными командами. По умолчанию остаётся compatibility;
 автоматического повтора другим способом при ошибке нет. Пароли вводятся вручную.
 Для personal native-ввода требуется расширение с capability native_text_v1.
 

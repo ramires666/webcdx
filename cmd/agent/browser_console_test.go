@@ -50,6 +50,10 @@ func TestBrowserConsoleStartFamiliesAndSafeContext(t *testing.T) {
 }
 
 func TestBrowserConsoleFinishSnapshotAndTabs(t *testing.T) {
+	downloads := browserConsoleFinish(browserConsoleInfo{Name: "browser_files"}, map[string]any{"downloads": []browserDownload{{ID: "download-one", Status: "completed", Bytes: 1234}}}, "completed", "", 0)
+	if !strings.Contains(downloads, "download-one") || !strings.Contains(downloads, "готово") || !strings.Contains(downloads, "1234 байт") {
+		t.Fatalf("actual download status missing from console: %s", downloads)
+	}
 	preview := browserConsoleTextPreview("read https://user:secret@example.test/image.png?ex=SECRET&hm=TOKEN#fragment", 240)
 	if strings.Contains(preview, "secret") || strings.Contains(preview, "SECRET") || strings.Contains(preview, "TOKEN") || strings.Contains(preview, "fragment") || !strings.Contains(preview, "https://example.test/image.png") {
 		t.Fatalf("snapshot preview exposed URL access parameters: %s", preview)

@@ -24,3 +24,7 @@ start-agent-*.bat
 webcodex-agent.exe
 *.exe
 *~
+
+# Python capture tooling cache
+__pycache__/
+*.py[cod]
