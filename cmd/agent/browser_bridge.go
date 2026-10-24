@@ -278,7 +278,7 @@ func (l *browserBridge) callFrame(ctx context.Context, tabID int, frameID, metho
 			return toolErr("disconnected", "personal browser disconnected")
 		}
 		if response.Error != "" {
-			return toolErr("browser_failed", "personal browser rejected "+method)
+			return browserTransportFailure(response.Error)
 		}
 		if result != nil {
 			if err := json.Unmarshal(response.Result, result); err != nil {

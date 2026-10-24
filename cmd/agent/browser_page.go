@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -33,12 +34,21 @@ func (b *browserManager) pageFrame(ctx context.Context, t *browserTab, wanted st
 	return frame, nil
 }
 
-func (b *browserManager) eval(ctx context.Context, t *browserTab, frameID, expression string, result any) error {
+func (b *browserManager) eval(ctx context.Context, t *browserTab, frameID, expression string, result any) (evalErr error) {
 	frame, err := b.pageFrame(ctx, t, frameID)
 	if err != nil {
 		return err
 	}
 	id, _ := frame["id"].(string)
+	defer func() {
+		if evalErr != nil {
+			failure := browserErrorContext(evalErr, nil).(*codedError)
+			if len(id) <= 128 {
+				failure.details["frame_id"] = id
+			}
+			evalErr = failure
+		}
+	}()
 	t.eventMu.Lock()
 	world := t.worlds[id]
 	t.eventMu.Unlock()
@@ -60,18 +70,20 @@ func (b *browserManager) eval(ctx context.Context, t *browserTab, frameID, expre
 		} `json:"result"`
 		Exception json.RawMessage `json:"exceptionDetails"`
 	}
-	if err := t.commandFrame(ctx, id, "Runtime.evaluate", map[string]any{"expression": expression, "contextId": world, "returnByValue": true, "awaitPromise": true, "silent": true, "userGesture": ctx.Value(browserUserGesture{}) == true}, &response); err != nil {
+	if err := t.commandFrame(ctx, id, "Runtime.evaluate", map[string]any{"expression": browserEvalExpression(expression), "contextId": world, "returnByValue": true, "awaitPromise": true, "silent": true, "userGesture": ctx.Value(browserUserGesture{}) == true}, &response); err != nil {
+		var coded *codedError
+		if errors.As(err, &coded) && coded.code == "frame_changed" {
+			t.eventMu.Lock()
+			delete(t.worlds, id)
+			t.snapshot = ""
+			t.eventMu.Unlock()
+		}
 		return err
 	}
 	if len(response.Exception) > 0 {
-		return toolErr("stale_element", "element unavailable, stale, or locator ambiguous; obtain a new snapshot")
+		return toolErr("page_evaluation_failed", browserFailureMessage("page_evaluation_failed"))
 	}
-	if result != nil {
-		if err := json.Unmarshal(response.Result.Value, result); err != nil {
-			return toolErr("browser_failed", "invalid page result")
-		}
-	}
-	return nil
+	return browserEvalResult(response.Result.Value, result)
 }
 
 const browserDOM = `
@@ -180,15 +192,15 @@ func (b *browserManager) locator(t *browserTab, args map[string]any) (string, er
 		stale := snapshot == "" || snapshot != t.snapshot || frame != t.snapshotFrame
 		t.eventMu.Unlock()
 		if stale {
-			return "", toolErr("stale_element", "snapshot no longer matches this frame")
+			return "", toolErr("stale_snapshot", browserFailureMessage("stale_snapshot"))
 		}
-		return `const snap=globalThis.__webcodex;if(!snap||snap.id!==` + browserJS(snapshot) + `||snap.document!==document||snap.url!==location.href)throw Error('stale');const el=snap.nodes[Number(` + browserJS(element) + `)];if(!el||!el.isConnected)throw Error('stale');`, nil
+		return browserDOMFailure + `const snap=globalThis.__webcodex;if(!snap||snap.id!==` + browserJS(snapshot) + `||snap.document!==document||snap.url!==location.href)wcFail('stale_snapshot');const el=snap.nodes[Number(` + browserJS(element) + `)];if(!el||!el.isConnected)wcFail('element_detached');`, nil
 	}
 	query := `all.filter(el=>role(el)===` + browserJS(role) + `&&name(el)===` + browserJS(name) + `)`
 	if css != "" {
 		query = `all.filter(el=>el.matches(` + browserJS(css) + `))`
 	}
-	return browserDOM + `const matches=` + query + `;if(matches.length!==1)throw Error('ambiguous');const el=matches[0];`, nil
+	return browserDOMFailure + browserDOM + `let matches;try{matches=` + query + `}catch(e){wcFail('invalid_selector')}if(!matches.length)wcFail('element_not_found',0);if(matches.length!==1)wcFail('ambiguous_locator',matches.length);const el=matches[0];`, nil
 }
 
 func (b *browserManager) interact(ctx context.Context, s *browserSession, t *browserTab, args map[string]any) (any, error) {
@@ -313,7 +325,7 @@ func (b *browserManager) interact(ctx context.Context, s *browserSession, t *bro
 		}
 		script = `if(!['INPUT','TEXTAREA'].includes(el.tagName)||el.disabled||el.readOnly)throw Error('not editable');const proto=el.tagName==='INPUT'?HTMLInputElement.prototype:HTMLTextAreaElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,` + browserJS(text) + `);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));`
 	case "select":
-		script = `if(el.tagName!=='SELECT'||![...el.options].some(x=>x.value===` + browserJS(value) + `))throw Error('option');el.value=` + browserJS(value) + `;el.dispatchEvent(new Event('change',{bubbles:true}));`
+		script = `if(el.tagName!=='SELECT')wcFail('invalid_control_type');if(el.disabled)wcFail('element_disabled');if(![...el.options].some(x=>x.value===` + browserJS(value) + `&&!x.disabled&&!x.parentElement.disabled))wcFail('invalid_option_value');el.value=` + browserJS(value) + `;el.dispatchEvent(new Event('change',{bubbles:true}));`
 	case "press":
 		key, err := requiredString(args, "key")
 		if err != nil {
@@ -356,7 +368,7 @@ func (b *browserManager) elementPoint(ctx context.Context, t *browserTab, frame,
 		}
 	}
 	var point struct{ X, Y float64 }
-	if err := b.eval(ctx, t, frame, `(async()=>{`+locator+`if(el.disabled)throw Error('disabled');el.scrollIntoView({block:'center'});await Promise.race([new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))),new Promise(resolve=>setTimeout(resolve,200))]);const r=el.getBoundingClientRect();if(!r.width||!r.height)throw Error('hidden');const x=r.x+r.width/2,y=r.y+r.height/2;let hit=document.elementFromPoint(x,y);while(hit?.shadowRoot){const inner=hit.shadowRoot.elementFromPoint(x,y);if(!inner||inner===hit)break;hit=inner}let covered=true;for(let node=hit;node;node=node.getRootNode()?.host){if(node===el||el.contains(node)){covered=false;break}}if(covered)throw Error('covered');return {X:x,Y:y}})()`, &point); err != nil {
+	if err := b.eval(ctx, t, frame, `(async()=>{`+locator+`if(el.disabled)wcFail('element_disabled');el.scrollIntoView({block:'center'});await Promise.race([new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))),new Promise(resolve=>setTimeout(resolve,200))]);if(!el.isConnected)wcFail('element_detached');const r=el.getBoundingClientRect();if(!r.width||!r.height)wcFail('element_hidden');const x=r.x+r.width/2,y=r.y+r.height/2;let hit=document.elementFromPoint(x,y);while(hit?.shadowRoot){const inner=hit.shadowRoot.elementFromPoint(x,y);if(!inner||inner===hit)break;hit=inner}let covered=true;for(let node=hit;node;node=node.getRootNode()?.host){if(node===el||el.contains(node)){covered=false;break}}if(covered)wcFail('element_obscured');return {X:x,Y:y}})()`, &point); err != nil {
 		return 0, 0, err
 	}
 	if frame != "" {

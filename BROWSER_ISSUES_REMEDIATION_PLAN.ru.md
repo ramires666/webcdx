@@ -261,3 +261,4 @@ Managed browser tests включаются отдельно через `WEBCODEX
 ## 6. Выполнение
 
 - **Этап 1 завершён:** классификация проверяет полный ограниченный буфер; добавлены регрессии 2/3/4-байтовых символов около 8192, BOM/CRLF, NUL/повреждения после 8192 и UTF-8 отчёта >30 KB через write/read/edit/search/preview. Targeted Go tests прошли.
+- **Этап 2 завершён:** ошибки DOM/transport разделены, безопасные причины и canonical IDs сохраняются в журнале и status/MCP, старые записи читаются; успешный UI dispatch отличается от проверки состояния сайта. Проверены отдельный headless Chrome, personal IPC, submit dedup/restart/eviction, Gate pass-through. Исходное незавершённое изменение contenteditable оставлено вне этого коммита.

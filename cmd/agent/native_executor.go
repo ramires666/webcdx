@@ -67,6 +67,7 @@ type codedError struct {
 	code    string
 	message string
 	cause   error
+	details map[string]any
 }
 
 func (e *codedError) Error() string {
@@ -345,7 +346,11 @@ func toolResult(id json.RawMessage, value any, callErr error) json.RawMessage {
 		if errors.As(callErr, &coded) {
 			code = coded.code
 		}
-		value = map[string]any{"error": map[string]any{"code": code, "message": callErr.Error()}}
+		failure := map[string]any{"code": code, "message": callErr.Error()}
+		if coded != nil && len(coded.details) > 0 {
+			failure["details"] = coded.details
+		}
+		value = map[string]any{"error": failure}
 	}
 	encoded, _ := json.Marshal(value)
 	return rpcResult(id, map[string]any{

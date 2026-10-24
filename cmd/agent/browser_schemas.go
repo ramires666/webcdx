@@ -18,16 +18,25 @@ func browserToolSchemas() []mcpToolDefinition {
 		"browser_session_id": str(), "tab_id": str(), "operation_id": str(), "mode": enum("clean", "persistent", "personal"),
 		"status": enum("ready", "running", "waiting_user", "paused", "completed", "failed", "cancelled", "disconnected"),
 		"url":    str(), "title": str(), "text": str(), "reason": str(), "snapshot_id": str(), "truncated": boolean(),
-		"tabs":      map[string]any{"type": "array", "items": object(map[string]any{"tab_id": str(), "url": str()}, "tab_id", "url")},
-		"elements":  map[string]any{"type": "array", "items": object(map[string]any{"element_id": str(), "role": str(), "name": str(), "tag": str(), "disabled": boolean(), "href": str(), "value": str()}, "element_id", "role", "name", "tag", "disabled", "href", "value")},
-		"frames":    map[string]any{"type": "array", "items": object(map[string]any{"frame_id": str(), "url": str()}, "frame_id", "url")},
-		"events":    map[string]any{"type": "array", "items": object(map[string]any{"event": str(), "at": str(), "url": str(), "detail": str()}, "event", "at")},
-		"mime_type": str(), "artifact_path": str(), "path": str(), "download_id": str(), "bytes": integer(0, 1<<30),
+		"confirmation": enum("action_dispatched", "condition_matched", "state_verified"),
+		"tabs":         map[string]any{"type": "array", "items": object(map[string]any{"tab_id": str(), "url": str()}, "tab_id", "url")},
+		"elements":     map[string]any{"type": "array", "items": object(map[string]any{"element_id": str(), "role": str(), "name": str(), "tag": str(), "disabled": boolean(), "href": str(), "value": str()}, "element_id", "role", "name", "tag", "disabled", "href", "value")},
+		"frames":       map[string]any{"type": "array", "items": object(map[string]any{"frame_id": str(), "url": str()}, "frame_id", "url")},
+		"events":       map[string]any{"type": "array", "items": object(map[string]any{"event": str(), "at": str(), "url": str(), "detail": str()}, "event", "at")},
+		"mime_type":    str(), "artifact_path": str(), "path": str(), "download_id": str(), "bytes": integer(0, 1<<30),
 		"viewport_width": integer(1, 100000), "viewport_height": integer(1, 100000),
 		"image_width": integer(1, 100000), "image_height": integer(1, 100000),
 		"downloads":     map[string]any{"type": "array", "items": object(map[string]any{"download_id": str(), "status": str(), "bytes": integer(0, 1<<30)}, "download_id", "status", "bytes")},
 		"accessibility": map[string]any{"type": "array", "items": object(map[string]any{"node_id": str(), "role": str(), "name": str(), "children": map[string]any{"type": []string{"array", "null"}, "items": str()}}, "node_id", "role", "name", "children")},
 	}, "status", "truncated")
+	output["properties"].(map[string]any)["error"] = object(map[string]any{
+		"code": str(), "message": str(), "details": object(map[string]any{
+			"operation_id": str(), "browser_session_id": str(), "tab_id": str(), "frame_id": str(), "snapshot_id": str(), "matches": integer(0, 10000),
+			"recovery": enum("refresh_snapshot", "inspect_options", "inspect_locator", "verify_outcome", "inspect_diagnostics"),
+		}),
+	}, "code", "message")
+	delete(output, "required")
+	output["oneOf"] = []any{map[string]any{"required": []string{"status", "truncated"}}, map[string]any{"required": []string{"error"}}}
 	definitions := []struct {
 		name, description string
 		properties        map[string]any

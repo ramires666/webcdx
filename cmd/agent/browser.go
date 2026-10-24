@@ -78,16 +78,18 @@ type browserTab struct {
 }
 
 type browserOperation struct {
-	ID        string         `json:"operation_id"`
-	KeyHash   string         `json:"key_hash,omitempty"`
-	Hash      string         `json:"hash,omitempty"`
-	Status    string         `json:"status"`
-	At        time.Time      `json:"at"`
-	Result    map[string]any `json:"result,omitempty"`
-	ErrorCode string         `json:"error_code,omitempty"`
-	done      chan struct{}
-	cancel    context.CancelFunc
-	image     string
+	ID           string         `json:"operation_id"`
+	KeyHash      string         `json:"key_hash,omitempty"`
+	Hash         string         `json:"hash,omitempty"`
+	Status       string         `json:"status"`
+	At           time.Time      `json:"at"`
+	Result       map[string]any `json:"result,omitempty"`
+	ErrorCode    string         `json:"error_code,omitempty"`
+	ErrorMessage string         `json:"error_message,omitempty"`
+	ErrorDetails map[string]any `json:"error_details,omitempty"`
+	done         chan struct{}
+	cancel       context.CancelFunc
+	image        string
 }
 
 type browserImage struct {
@@ -267,17 +269,14 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		op.Status = "completed"
 		if err != nil {
 			op.Status = "failed"
-			op.ErrorCode = "browser_failed"
-			var coded *codedError
-			if errors.As(err, &coded) {
-				op.ErrorCode = coded.code
-			}
+			op.fail(err, args)
 			if opCtx.Err() != nil {
 				op.Status = "cancelled"
 				op.ErrorCode = "cancelled"
 				if keyHash != "" {
 					op.ErrorCode = "outcome_unknown"
 				}
+				op.ErrorMessage = browserFailureMessage(op.ErrorCode)
 			}
 		} else if img, ok := result.(browserImage); ok {
 			op.Result, op.image = img.Result, img.Data
@@ -287,6 +286,7 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		if err := b.saveOperation(op); err != nil {
 			op.Status = "failed"
 			op.ErrorCode = "outcome_unknown"
+			op.ErrorMessage = browserFailureMessage(op.ErrorCode)
 		}
 		if b.executor.verbose {
 			log.Printf("[browser operation=%s] %s status=%s error_code=%s", op.ID, name, op.Status, op.ErrorCode)
@@ -317,7 +317,15 @@ func (b *browserManager) operationResult(op *browserOperation) (any, error) {
 		return map[string]any{"operation_id": op.ID, "status": "running", "truncated": false}, nil
 	}
 	if op.ErrorCode != "" {
-		return nil, toolErr(op.ErrorCode, "browser operation ended: "+op.ID)
+		message := op.ErrorMessage
+		if message == "" {
+			message = browserFailureMessage(op.ErrorCode)
+		}
+		details := map[string]any{"operation_id": op.ID}
+		for key, value := range op.ErrorDetails {
+			details[key] = value
+		}
+		return nil, &codedError{code: op.ErrorCode, message: message, details: details}
 	}
 	if op.image != "" {
 		return browserImage{op.Result, op.image}, nil
@@ -587,7 +595,10 @@ func (t *browserTab) command(ctx context.Context, method string, params, result 
 		return t.personal.call(ctx, t.nativeTabID, method, params, result)
 	}
 	if err := chromedp.FromContext(t.ctx).Target.Call(ctx, method, params, result); err != nil {
-		return toolErr("browser_failed", "browser rejected "+method)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return browserTransportFailure(err.Error())
 	}
 	return nil
 }
@@ -748,9 +759,13 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 	}
 	result, err := b.tabAction(callCtx, name, s, t, args)
 	if err != nil {
-		return nil, err
+		contextArgs := map[string]any{"browser_session_id": id, "tab_id": tabID, "snapshot_id": args["snapshot_id"]}
+		return nil, browserErrorContext(err, contextArgs)
 	}
 	if object, ok := result.(map[string]any); ok {
+		if name == "browser_interact" && object["status"] != "waiting_user" {
+			object["confirmation"] = "action_dispatched"
+		}
 		object["browser_session_id"] = id
 		object["tab_id"] = tabID
 		if _, ok := object["status"]; !ok {
