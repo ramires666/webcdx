@@ -49,6 +49,8 @@ type browserManager struct {
 	bridgePath      string
 	artifactMu      sync.Mutex
 	pendingCleanups []<-chan struct{}
+	healthReason    string
+	cacheBytes      int64
 }
 
 type browserSession struct {
@@ -104,6 +106,7 @@ type browserOperation struct {
 	image          string
 	errorTransient map[string]any
 	execution      *browserExecutionState
+	cacheBytes     int64
 }
 
 type browserOperationContext struct{}
@@ -122,7 +125,7 @@ func browserID(prefix string) string {
 }
 
 func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager, error) {
-	b := &browserManager{config: config, executor: e, sessions: map[string]*browserSession{}, operations: map[string]*browserOperation{}, journal: map[string]browserJournalEntry{}}
+	b := browserEmptyManager(e, config)
 	if !config.Enabled {
 		return b, nil
 	}
@@ -149,16 +152,16 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 			continue
 		}
 		path := filepath.Join(config.Dir, "operations", entry.Name())
-		data, err := os.ReadFile(path)
+		data, err := readBrowserJournalRecord(path)
 		if err != nil {
 			return nil, err
 		}
 		var op browserOperation
 		if json.Unmarshal(data, &op) != nil {
-			return nil, errors.New("invalid browser operation journal")
+			return nil, errBrowserJournalCorrupt
 		}
-		if !browserOperationID.MatchString(op.ID) || entry.Name() != op.ID+".json" || op.KeyHash == "" {
-			return nil, errors.New("invalid browser operation journal")
+		if !browserOperationID.MatchString(op.ID) || entry.Name() != op.ID+".json" || op.KeyHash == "" || op.At.IsZero() {
+			return nil, errBrowserJournalCorrupt
 		}
 		if time.Since(op.At) > browserOperationTTL {
 			if err := os.Remove(path); err != nil {
@@ -173,7 +176,7 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 		}
 		op.done = make(chan struct{})
 		close(op.done)
-		b.operations[op.ID] = &op
+		b.cacheOperation(&op)
 		b.journal[op.KeyHash] = browserJournalEntry{ID: op.ID, At: op.At}
 		b.trimOperations(browserOperationCacheMax)
 	}
@@ -243,6 +246,10 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		b.mu.Unlock()
 		return nil, toolErr("disconnected", "browser manager closed")
 	}
+	if browserMutation(name, args) && b.healthReason != "" {
+		b.mu.Unlock()
+		return nil, toolErr("browser_unhealthy", browserFailureMessage("browser_unhealthy"))
+	}
 	if browserMutation(name, args) && b.cleanupsPendingLocked() {
 		b.mu.Unlock()
 		return nil, toolErr("browser_busy", "managed browser cleanup is still finishing")
@@ -289,7 +296,7 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		cancel()
 		return nil, toolErr("io_error", "reserve browser operation", err)
 	}
-	b.operations[op.ID] = op
+	b.cacheOperation(op)
 	b.mu.Unlock()
 	requestInfo := trace.info
 	async = true
@@ -336,6 +343,8 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 			op.Phase = "unknown"
 			op.setFailureCode("outcome_unknown")
 		}
+		b.cacheOperation(op)
+		b.trimOperations(browserOperationCacheMax)
 		b.mu.Unlock()
 		trace.finish(op.Result, nil, op.Status, op.ErrorCode)
 		close(op.done)

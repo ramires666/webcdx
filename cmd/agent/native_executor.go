@@ -168,7 +168,7 @@ func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error)
 	}
 	e.browser, err = newBrowserManager(e, config.Browser)
 	if err != nil {
-		return nil, fmt.Errorf("initialize browser: %w", err)
+		e.browser = browserDegradedManager(e, config.Browser, err)
 	}
 	go e.cleanupLoop()
 	return e, nil

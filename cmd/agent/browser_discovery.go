@@ -133,7 +133,8 @@ func (b *browserManager) discoverPersonal() map[string]any {
 	sort.Slice(browsers, func(i, j int) bool {
 		return browsers[i]["connection_id"].(string) < browsers[j]["connection_id"].(string)
 	})
-	result := map[string]any{"status": "ready", "truncated": false, "browsers": browsers}
+	health, reason := b.healthLocked()
+	result := map[string]any{"status": "ready", "truncated": false, "browsers": browsers, "health": health, "health_reason": reason}
 	for {
 		encoded, _ := json.Marshal(result)
 		if len(encoded) <= 64<<10 {

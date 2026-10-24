@@ -9,6 +9,7 @@ import (
 
 // These messages contain no page-provided text, stack, field value or URL.
 var browserFailureMessages = map[string]string{
+	"browser_unhealthy":         "browser recovery is required; restore the operation journal before making changes",
 	"cancelled":                 "browser operation was cancelled",
 	"cancelled_before_dispatch": "operation was cancelled before a browser side effect was sent",
 	"scope_changed":             "local browser access changed; obtain fresh state before continuing",

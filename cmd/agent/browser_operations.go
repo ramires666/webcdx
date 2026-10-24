@@ -13,14 +13,43 @@ import (
 )
 
 const (
-	browserOperationCacheMax   = 4096
-	browserOperationRunningMax = 128
-	browserOperationReadMax    = 128
-	browserOperationTTL        = 24 * time.Hour
-	browserOperationCleanup    = time.Minute
+	browserOperationCacheMax      = 4096
+	browserOperationRunningMax    = 128
+	browserOperationReadMax       = 128
+	browserOperationCacheBytesMax = 32 << 20
+	browserOperationTTL           = 24 * time.Hour
+	browserOperationCleanup       = time.Minute
 )
 
 var browserOperationID = regexp.MustCompile(`^bop_[0-9a-f]{24}$`)
+
+// Caller holds b.mu. The byte count follows the in-memory operation, while
+// the retry index and journal remain on disk when a cached result is evicted.
+func (b *browserManager) cacheOperation(op *browserOperation) {
+	if old := b.operations[op.ID]; old != nil {
+		b.cacheBytes -= old.cacheBytes
+	}
+	encoded, err := json.Marshal(op)
+	size := int64(len(encoded) + len(op.image))
+	if err != nil {
+		size = browserOperationCacheBytesMax + 1
+	} else if transient, transientErr := json.Marshal(op.errorTransient); transientErr != nil {
+		size = browserOperationCacheBytesMax + 1
+	} else {
+		size += int64(len(transient))
+	}
+	op.cacheBytes = size
+	b.operations[op.ID] = op
+	b.cacheBytes += size
+}
+
+// Caller holds b.mu.
+func (b *browserManager) removeCachedOperation(id string) {
+	if op := b.operations[id]; op != nil {
+		b.cacheBytes -= op.cacheBytes
+		delete(b.operations, id)
+	}
+}
 
 // The small retry index outlives cached results. Eviction must never turn a
 // retry of a completed mutation into another browser action.
@@ -37,7 +66,7 @@ func (b *browserManager) loadOperation(id string) (*browserOperation, error) {
 	if !browserOperationID.MatchString(id) {
 		return nil, os.ErrNotExist
 	}
-	data, err := os.ReadFile(filepath.Join(b.config.Dir, "operations", id+".json"))
+	data, err := readBrowserJournalRecord(filepath.Join(b.config.Dir, "operations", id+".json"))
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +74,7 @@ func (b *browserManager) loadOperation(id string) (*browserOperation, error) {
 	if err := json.Unmarshal(data, &op); err != nil {
 		return nil, err
 	}
-	if op.ID != id || op.KeyHash == "" {
+	if op.ID != id || op.KeyHash == "" || op.At.IsZero() {
 		return nil, errors.New("invalid browser operation journal")
 	}
 	if time.Since(op.At) > browserOperationTTL {
@@ -70,7 +99,7 @@ func (b *browserManager) trimOperations(limit int) {
 			reads++
 		}
 	}
-	if len(b.operations) <= limit && reads <= browserOperationReadMax {
+	if len(b.operations) <= limit && reads <= browserOperationReadMax && b.cacheBytes <= browserOperationCacheBytesMax {
 		return
 	}
 	completed := make([]*browserOperation, 0, len(b.operations))
@@ -95,10 +124,10 @@ func (b *browserManager) trimOperations(limit int) {
 		target -= limit / 8
 	}
 	for _, op := range completed {
-		if len(b.operations) <= target && (op.KeyHash != "" || reads <= browserOperationReadMax) {
+		if len(b.operations) <= target && reads <= browserOperationReadMax && b.cacheBytes <= browserOperationCacheBytesMax {
 			continue
 		}
-		delete(b.operations, op.ID)
+		b.removeCachedOperation(op.ID)
 		if op.KeyHash == "" {
 			reads--
 		}
@@ -119,11 +148,11 @@ func (b *browserManager) expireOperations(now time.Time) error {
 			return err
 		}
 		delete(b.journal, key)
-		delete(b.operations, entry.ID)
+		b.removeCachedOperation(entry.ID)
 	}
 	for id, op := range b.operations {
 		if op.Status != "running" && now.Sub(op.At) > browserOperationTTL {
-			delete(b.operations, id)
+			b.removeCachedOperation(id)
 		}
 	}
 	return nil

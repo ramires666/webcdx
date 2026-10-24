@@ -16,6 +16,7 @@ func browserToolSchemas() []mcpToolDefinition {
 	locator := map[string]any{"selector": str(), "role": str(), "name": str(), "snapshot_id": str(), "element_id": str(), "context": str(), "container_selector": str()}
 	option := object(map[string]any{"label": str(), "value": str(), "disabled": boolean(), "selected": boolean()}, "label", "value", "disabled", "selected")
 	output := object(map[string]any{
+		"health": enum("healthy", "degraded", "disabled", "unavailable"), "health_reason": enum("", "journal_corrupt", "storage_unavailable", "cleanup_pending", "shutdown"),
 		"browser_session_id": str(), "tab_id": str(), "operation_id": str(), "mode": enum("clean", "persistent", "personal"),
 		"status": enum("ready", "running", "waiting_user", "paused", "completed", "failed", "cancelled", "disconnected"),
 		"url":    str(), "title": str(), "text": str(), "reason": str(), "snapshot_id": str(), "truncated": boolean(),

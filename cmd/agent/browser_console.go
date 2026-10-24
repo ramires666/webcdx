@@ -45,6 +45,9 @@ func browserConsoleFinish(info browserConsoleInfo, result map[string]any, status
 			outcome = browserConsoleStatus(status, result)
 		}
 	}
+	if result["health"] == "degraded" || result["health"] == "unavailable" {
+		icon = "⚠"
+	}
 	if context := browserConsoleContext(info); context != "" {
 		outcome += " · " + context
 	}
@@ -257,11 +260,18 @@ func browserConsoleResult(info browserConsoleInfo, result map[string]any) string
 		bytes, _ := browserConsoleNumber(result["image_bytes"])
 		return fmt.Sprintf("снимок %d×%d · %d байт", width, height, bytes)
 	case "browser_control":
+		if browsers := browserConsoleSlice(result["browsers"]); browsers != nil {
+			message := fmt.Sprintf("подключённых браузеров: %d", len(browsers))
+			if result["health"] == "degraded" {
+				message += " · браузер ограничен: "
+				reasons := map[string]string{"journal_corrupt": "повреждён журнал операций", "storage_unavailable": "хранилище недоступно", "cleanup_pending": "закрытие Chrome ещё не завершилось"}
+				reason, _ := result["health_reason"].(string)
+				message += reasons[reason]
+			}
+			return message
+		}
 		if status, _ := result["status"].(string); status != "" {
 			return "состояние: " + compactString(status, 32)
-		}
-		if browsers := browserConsoleSlice(result["browsers"]); browsers != nil {
-			return fmt.Sprintf("подключённых браузеров: %d", len(browsers))
 		}
 	case "browser_open":
 		if profile, _ := result["browser_alias"].(string); profile != "" {
@@ -318,6 +328,8 @@ func browserConsoleStatus(status string, result map[string]any) string {
 
 func browserConsoleError(code string) string {
 	switch code {
+	case "browser_unhealthy":
+		return "браузер ограничен: восстановите журнал; файлы и команды доступны"
 	case "unknown_session":
 		return "браузерная сессия не найдена"
 	case "unknown_tab":
