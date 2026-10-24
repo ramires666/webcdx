@@ -177,6 +177,13 @@ func TestPersonalBrowserIPCAndRevocation(t *testing.T) {
 	if !scanner.Scan() {
 		t.Fatal("no bridge hello")
 	}
+	var hello browserBridgeMessage
+	if json.Unmarshal(scanner.Bytes(), &hello) != nil || hello.CommandProtocol != browserCommandProtocol || hello.ConnectionID == "" {
+		t.Fatal("bridge did not negotiate command protocol 2")
+	}
+	if err := encoder.Encode(browserBridgeMessage{Kind: "identity", ProfileID: "profile_33333333333333333333333333333333", Product: "chrome", CommandProtocol: browserCommandProtocol}); err != nil {
+		t.Fatal(err)
+	}
 	if err := encoder.Encode(browserBridgeMessage{Kind: "scope", Tabs: []browserPersonalTab{}}); err != nil {
 		t.Fatal(err)
 	}
@@ -188,8 +195,16 @@ func TestPersonalBrowserIPCAndRevocation(t *testing.T) {
 			if json.Unmarshal(scanner.Bytes(), &message) != nil {
 				return
 			}
+			if message.Kind == "command_cancel" {
+				_ = encoder.Encode(browserBridgeMessage{Kind: "cancel_ack", ID: message.ID, Cancelled: true})
+				continue
+			}
 			if message.Kind != "command" {
 				continue
+			}
+			if message.CommandProtocol != browserCommandProtocol || message.ConnectionID != hello.ConnectionID || message.DeadlineMS <= time.Now().UnixMilli() {
+				t.Error("command envelope lost its protocol, connection or deadline")
+				return
 			}
 			data := json.RawMessage(`{}`)
 			errorText := ""
@@ -228,7 +243,12 @@ func TestPersonalBrowserIPCAndRevocation(t *testing.T) {
 		b.mu.Lock()
 		link := b.bridge
 		b.mu.Unlock()
-		ready := link != nil
+		ready := false
+		if link != nil {
+			link.mu.Lock()
+			ready = link.commandProtocol == browserCommandProtocol
+			link.mu.Unlock()
+		}
 		if ready {
 			break
 		}

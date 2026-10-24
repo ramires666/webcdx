@@ -51,7 +51,8 @@ type browserManager struct {
 }
 
 type browserSession struct {
-	mu                   sync.Mutex
+	work                 browserWorkQueue
+	workEpoch            uint64 // protected by browserManager.mu; invalidates granted as well as queued work
 	id, mode, profile    string
 	ctx                  context.Context
 	cancel               context.CancelFunc
@@ -94,10 +95,12 @@ type browserOperation struct {
 	ErrorCode      string         `json:"error_code,omitempty"`
 	ErrorMessage   string         `json:"error_message,omitempty"`
 	ErrorDetails   map[string]any `json:"error_details,omitempty"`
+	Phase          string         `json:"phase,omitempty"`
 	done           chan struct{}
 	cancel         context.CancelFunc
 	image          string
 	errorTransient map[string]any
+	execution      *browserExecutionState
 }
 
 type browserOperationContext struct{}
@@ -163,6 +166,7 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 		if op.Status == "running" {
 			op.Status = "failed"
 			op.setFailureCode("outcome_unknown")
+			op.Phase = "unknown"
 		}
 		op.done = make(chan struct{})
 		close(op.done)
@@ -264,7 +268,7 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 	}
 	b.trimOperations(browserOperationCacheMax - 1)
 	opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	op := &browserOperation{ID: browserID("bop_"), KeyHash: keyHash, Hash: hash, Status: "running", At: time.Now().UTC(), done: make(chan struct{}), cancel: cancel}
+	op := &browserOperation{ID: browserID("bop_"), KeyHash: keyHash, Hash: hash, Status: "running", Phase: "reserved", execution: &browserExecutionState{}, At: time.Now().UTC(), done: make(chan struct{}), cancel: cancel}
 	if err := b.saveOperation(op); err != nil {
 		b.mu.Unlock()
 		cancel()
@@ -274,17 +278,30 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 	b.mu.Unlock()
 	go func() {
 		defer cancel()
-		result, err := b.execute(context.WithValue(opCtx, browserOperationContext{}, op.ID), name, args)
+		executionCtx := context.WithValue(context.WithValue(opCtx, browserOperationContext{}, op.ID), browserExecutionContext{}, op.execution)
+		result, err := b.execute(executionCtx, name, args)
 		b.mu.Lock()
 		op.Status = "completed"
+		op.Phase = "completed"
 		if err != nil {
+			op.Phase = "not_dispatched"
+			if op.execution.dispatched.Load() {
+				op.Phase = "dispatch_started"
+			}
 			op.Status = "failed"
 			op.fail(err, args)
-			if opCtx.Err() != nil {
+			if keyHash != "" && op.execution.dispatched.Load() && browserUncertainTransport(op.ErrorCode) {
+				op.setFailureCode("outcome_unknown")
+			}
+			if opCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				op.Status = "cancelled"
 				op.setFailureCode("cancelled")
 				if keyHash != "" {
-					op.setFailureCode("outcome_unknown")
+					if op.execution.dispatched.Load() {
+						op.setFailureCode("outcome_unknown")
+					} else {
+						op.setFailureCode("cancelled_before_dispatch")
+					}
 				}
 			}
 		} else if img, ok := result.(browserImage); ok {
@@ -294,9 +311,11 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		}
 		if op.Result != nil {
 			op.Result["operation_id"] = op.ID
+			op.Result["phase"] = op.Phase
 		}
 		if err := b.saveOperation(op); err != nil {
 			op.Status = "failed"
+			op.Phase = "unknown"
 			op.setFailureCode("outcome_unknown")
 		}
 		if b.executor.verbose {
@@ -325,7 +344,7 @@ func (b *browserManager) await(ctx context.Context, op *browserOperation) (any, 
 
 func (b *browserManager) operationResult(op *browserOperation) (any, error) {
 	if op.Status == "running" {
-		return map[string]any{"operation_id": op.ID, "status": "running", "truncated": false}, nil
+		return map[string]any{"operation_id": op.ID, "status": "running", "phase": op.currentPhase(), "truncated": false}, nil
 	}
 	if op.ErrorCode != "" {
 		message := op.ErrorMessage
@@ -333,6 +352,7 @@ func (b *browserManager) operationResult(op *browserOperation) (any, error) {
 			message = browserFailureMessage(op.ErrorCode)
 		}
 		details := map[string]any{"operation_id": op.ID}
+		details["phase"] = op.currentPhase()
 		for key, value := range op.ErrorDetails {
 			details[key] = value
 		}
@@ -390,6 +410,8 @@ func (b *browserManager) control(args map[string]any) (any, error) {
 	switch action {
 	case "pause":
 		s.paused = true
+		s.workEpoch++
+		s.work.cancelPending()
 		if s.active != nil {
 			s.active()
 		}
@@ -406,15 +428,21 @@ func (b *browserManager) control(args map[string]any) (any, error) {
 		s.paused = false
 	case "waiting_user":
 		s.paused = true
+		s.workEpoch++
+		s.work.cancelPending()
 		if s.active != nil {
 			s.active()
 		}
 	case "cancel":
+		s.workEpoch++
+		s.work.cancelPending()
 		if s.active != nil {
 			s.active()
 		}
 	case "disconnect":
 		s.disconnected = true
+		s.workEpoch++
+		s.work.cancelPending()
 		if s.active != nil {
 			s.active()
 		}
@@ -435,19 +463,25 @@ func (b *browserManager) control(args map[string]any) (any, error) {
 		status = "disconnected"
 	}
 	link := s.personal
-	b.mu.Unlock()
-	if closeSession != nil {
-		closeSession()
-	}
+	control := ""
+	var controlEpoch uint64
 	if link != nil && (action == "pause" || action == "waiting_user" || action == "resume") {
-		control := action
+		control = action
 		if control == "waiting_user" {
 			control = "pause"
 		}
 		link.mu.Lock()
+		link.controlEpoch++
+		controlEpoch = link.controlEpoch
 		link.paused = control == "pause"
 		link.mu.Unlock()
-		if err := link.send(browserBridgeMessage{Kind: "control", Action: control}); err != nil {
+	}
+	b.mu.Unlock()
+	if closeSession != nil {
+		closeSession()
+	}
+	if control != "" {
+		if err := link.send(browserBridgeMessage{Kind: "control", Action: control, ControlEpoch: controlEpoch}); err != nil {
 			return nil, toolErr("disconnected", "personal control write failed")
 		}
 	}
@@ -577,6 +611,11 @@ func (b *browserManager) open(ctx context.Context, args map[string]any) (any, er
 			s.cancel()
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	browserSetPhase(ctx, 2)
+	browserMarkDispatch(ctx, "Browser.launch")
 	stop := context.AfterFunc(ctx, stopRoot)
 	err = chromedp.Do(root)
 	stop()
@@ -613,12 +652,16 @@ func (b *browserManager) open(ctx context.Context, args map[string]any) (any, er
 }
 
 func (t *browserTab) command(ctx context.Context, method string, params, result any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if t.ctx.Err() != nil {
 		return toolErr("disconnected", "browser tab closed")
 	}
 	if t.personal != nil {
 		return t.personal.call(ctx, t.nativeTabID, method, params, result)
 	}
+	browserMarkDispatch(ctx, method)
 	if err := chromedp.FromContext(t.ctx).Target.Call(ctx, method, params, result); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -716,13 +759,32 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 	}
 	b.mu.Lock()
 	s := b.sessions[id]
+	var epoch uint64
+	if s != nil {
+		epoch = s.workEpoch
+	}
 	b.mu.Unlock()
 	if s == nil {
 		return nil, toolErr("unknown_session", "unknown browser_session_id")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	browserSetPhase(ctx, 1)
+	release, err := s.work.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	browserSetPhase(ctx, 2)
 	b.mu.Lock()
+	if epoch != s.workEpoch {
+		b.mu.Unlock()
+		return nil, context.Canceled
+	}
 	if s.paused || s.disconnected {
 		b.mu.Unlock()
 		return nil, toolErr("access_paused", "browser session paused or disconnected")
@@ -732,6 +794,7 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 	b.mu.Unlock()
 	defer func() { cancel(); b.mu.Lock(); s.active = nil; b.mu.Unlock() }()
 	if s.personal != nil {
+		callCtx = s.personal.bindAccess(callCtx)
 		b.syncPersonalTabs(s)
 	}
 	tabID, _ := optionalString(args, "tab_id")
@@ -896,6 +959,8 @@ func (b *browserManager) Close() {
 	}
 	for _, s := range b.sessions {
 		s.disconnected = true
+		s.workEpoch++
+		s.work.cancelPending()
 		cancels = append(cancels, s.cancel)
 	}
 	link := b.bridge

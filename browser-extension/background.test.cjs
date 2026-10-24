@@ -14,7 +14,7 @@ async function environment(options = {}) {
   const chrome = {runtime:{id:'extension',onMessage:event(),onStartup:event(),onInstalled:event(),connectNative(){
     const nativePort = {onDisconnect:event(),onMessage:event(),postMessage:message=>sent.push(message),disconnect(){this.onDisconnect.listener()}};
     ports.push(nativePort);
-    queueMicrotask(() => { if (online) nativePort.onMessage.listener({kind:'hello',allow_local:false}); else nativePort.disconnect(); });
+    queueMicrotask(() => { if (online) nativePort.onMessage.listener({kind:'hello',allow_local:false,command_protocol:2,connection_id:'connection-test'}); else nativePort.disconnect(); });
     return nativePort;
   }},action:{setBadgeText:async()=>{},setBadgeBackgroundColor:async()=>{}},
     storage:{local:{get:async key=>({[key]:storage[key]}),set:async values=>Object.assign(storage,structuredClone(values))}},
@@ -23,8 +23,9 @@ async function environment(options = {}) {
       onCreated:event(),onUpdated:event(),onRemoved:event(),onActivated:event(),remove:async id=>tabs.delete(id),create:async({url})=>{const tab=options.pendingCreate?{id:100+tabs.size,url:'',pendingUrl:url}:{id:100+tabs.size,url};tabs.set(tab.id,tab);return tab}},
     debugger:{onDetach:event(),onEvent:event(),attach:async source=>{debuggerAttaches.push(source.tabId);if(options.attach)await options.attach()},detach:async()=>{},sendCommand:async(source,method,params)=>{commands.push({source,method,params});return {ok:true}}},
     downloads:{onDeterminingFilename:event(),onChanged:event(),cancel:async()=>{}}};
-  const context = vm.createContext({chrome,URL,Map,Set,Promise,TextEncoder,crypto:crypto.webcrypto,navigator:{userAgent:options.userAgent||"Chrome/Test"},
+  const context = vm.createContext({chrome,URL,Map,Set,Promise,TextEncoder,performance,crypto:crypto.webcrypto,navigator:{userAgent:options.userAgent||"Chrome/Test"},
     setTimeout:(fn,ms)=>{timers.set(++timerID,{fn,ms});return timerID},clearTimeout:id=>timers.delete(id)});
+  context.importScripts=name=>vm.runInContext(fs.readFileSync(`${__dirname}/${name}`,'utf8'),context);
   vm.runInContext(fs.readFileSync(`${__dirname}/background.js`,'utf8'),context);
   context.sent=sent;
   await flush();
@@ -39,6 +40,16 @@ async function environment(options = {}) {
       await flush();
     }};
 }
+async function connectedPersonal() {
+  const e=await environment({manual:false,storage:{webcodexPersonalAccess:{continuous:true}}});
+  await e.flush();
+  assert.equal(e.ports.length,1);
+  const tab=e.ports[0];
+  return {e,tab,send(value){tab.onMessage.listener(value)},command(id,method='Page.getFrameTree',extra={}){
+    return {kind:'command',id,tab_id:7,method,params:{},command_protocol:2,connection_id:e.run('commandConnection'),scope_epoch:e.run('accessEpoch'),deadline_ms:Date.now()+5000,...extra};
+  }};
+}
+const responseFor=(e,id)=>e.sent.findLast(message=>message.kind==='response'&&message.id===id);
 test('manifest public key matches the native host extension ID',()=>{
   const hex=crypto.createHash('sha256').update(Buffer.from(manifest.key,'base64')).digest('hex').slice(0,32);
   const id=[...hex].map(x=>String.fromCharCode(97+parseInt(x,16))).join('');
@@ -51,6 +62,140 @@ test('native messages enforce the 900000-byte UTF-8 JSON limit',async()=>{
   assert.throws(()=>e.run(`post({data:'a'.repeat(899990)})`),/exceeds limit/);
   assert.throws(()=>e.run(`post({data:String.fromCodePoint(1046).repeat(450000)})`),/exceeds limit/);
   assert.throws(()=>e.run(`post({data:String.fromCodePoint(0x1f600).repeat(225000)})`),/exceeds limit/);
+});
+test('expired protocol 2 envelopes are rejected before CDP',async()=>{
+  const {e,send,command}=await connectedPersonal();
+  send(command('expired','Page.getFrameTree',{deadline_ms:Date.now()-1}));
+  await e.flush();
+  assert.match(responseFor(e,'expired').error,/deadline expired/i);
+  assert.equal(e.commands.length,0);
+});
+test('protocol 2 rejects stale connection and scope envelopes before input',async()=>{
+  const {e,send,command}=await connectedPersonal();
+  send(command('wrong-connection','Input.dispatchMouseEvent',{connection_id:'stale-connection',params:{type:'mousePressed',x:1,y:1}}));
+  send(command('wrong-scope','Input.dispatchMouseEvent',{scope_epoch:e.run('accessEpoch')+1,params:{type:'mousePressed',x:1,y:1}}));
+  await e.flush();
+  assert.match(responseFor(e,'wrong-connection').error,/scope changed/i);
+  assert.match(responseFor(e,'wrong-scope').error,/scope changed/i);
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+});
+test('legacy reads remain available while legacy mutations require protocol 2',async()=>{
+  const {e,send}=await connectedPersonal();
+  send({kind:'command',id:'legacy-input',tab_id:7,method:'Input.dispatchMouseEvent',params:{type:'mousePressed',x:1,y:1}});
+  send({kind:'command',id:'legacy-read',tab_id:7,method:'Page.getFrameTree',params:{}});
+  await e.flush();await e.flush();
+  assert.match(responseFor(e,'legacy-input').error,/protocol is not supported/i);
+  assert.equal(responseFor(e,'legacy-read').error,undefined);
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+  assert(e.commands.some(call=>call.method==='Page.getFrameTree'));
+});
+test('stale remote resume control epoch cannot clear a newer pause',async()=>{
+  const {e,send,tab}=await connectedPersonal();
+  send({kind:'control',action:'pause',control_epoch:2});
+  await e.flush();
+  assert.equal(e.run('paused'),true);
+  send({kind:'control',action:'resume',control_epoch:1});
+  await e.flush();
+  assert.equal(e.run('paused'),true);
+  assert.equal(e.run('localPaused'),false);
+  assert(tab);
+});
+test('local pause blocks pending input before delayed storage save resolves',async()=>{
+  const {e,send,command}=await connectedPersonal();
+  let resolveRead,resolveStorage;
+  const read=new Promise(resolve=>{resolveRead=resolve});
+  const storageSave=new Promise(resolve=>{resolveStorage=resolve});
+  e.chrome.tabs.get=async id=>{await read;return e.tabs.get(id)};
+  e.chrome.storage.local.set=()=>storageSave;
+  send(command('pending-input','Input.dispatchMouseEvent',{params:{type:'mousePressed',x:1,y:1}}));
+  await e.flush();
+  const pause=e.message({type:'pause'});
+  await e.flush();
+  assert.equal(e.run('paused'),true);
+  assert.equal(e.run('localPaused'),true);
+  resolveRead();await e.flush();await e.flush();
+  assert.match(responseFor(e,'pending-input').error,/local control paused|cancelled/i);
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+  resolveStorage();await pause;
+});
+test('queued input cancellation removes it while an earlier read is delayed',async()=>{
+  const {e,send,command}=await connectedPersonal();
+  let resolveRead;const read=new Promise(resolve=>{resolveRead=resolve});
+  e.chrome.tabs.get=async id=>{await read;return e.tabs.get(id)};
+  send(command('read'));
+  await e.flush();
+  send(command('queued-input','Input.dispatchMouseEvent',{params:{type:'mousePressed',x:1,y:1}}));
+  send({kind:'command_cancel',id:'queued-input',connection_id:e.run('commandConnection')});
+  await e.flush();
+  assert.equal(e.sent.findLast(message=>message.kind==='cancel_ack')?.cancelled,true);
+  resolveRead();await e.flush();await e.flush();
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+  assert.equal(responseFor(e,'read').error,undefined);
+});
+test('queued commands that expire before a blocked read completes never execute',async()=>{
+  const {e,send,command}=await connectedPersonal();
+  let resolveRead;const read=new Promise(resolve=>{resolveRead=resolve});
+  e.chrome.tabs.get=async id=>{await read;return e.tabs.get(id)};
+  send(command('read'));await e.flush();
+  const deadline=Date.now()+2000;
+  send(command('expires','Input.dispatchMouseEvent',{deadline_ms:deadline,params:{type:'mousePressed',x:1,y:1}}));
+  await e.flush();
+  e.run(`Date.now=()=>${deadline+1}`);
+  resolveRead();await e.flush();await e.flush();
+  assert.match(responseFor(e,'expires').error,/deadline expired/i);
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+});
+test('pause and resume invalidate commands queued under the old scope epoch',async()=>{
+  const {e,send,command}=await connectedPersonal();
+  let resolveRead;const read=new Promise(resolve=>{resolveRead=resolve});
+  e.chrome.tabs.get=async id=>{await read;return e.tabs.get(id)};
+  send(command('read'));await e.flush();
+  send(command('old-input','Input.dispatchMouseEvent',{params:{type:'mousePressed',x:1,y:1}}));
+  await e.message({type:'pause'});await e.message({type:'resume'});
+  assert.match(responseFor(e,'old-input').error,/scope changed/i);
+  resolveRead();await e.flush();await e.flush();
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+});
+test('per-port queue rejects a ninth waiter without executing it',async()=>{
+  const {e,send,command}=await connectedPersonal();
+  let resolveRead;const read=new Promise(resolve=>{resolveRead=resolve});
+  e.chrome.tabs.get=async id=>{await read;return e.tabs.get(id)};
+  send(command('read'));await e.flush();
+  for(let i=0;i<9;i++)send(command(`wait-${i}`,'Input.dispatchMouseEvent',{params:{type:'mousePressed',x:i,y:1}}));
+  await e.flush();
+  assert.match(responseFor(e,'wait-8').error,/queue is full/i);
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+  resolveRead();await e.flush();await e.flush();
+  assert.equal(e.commands.filter(call=>call.method.startsWith('Input.')).length,8);
+});
+test('cancellation during a delayed tab read blocks the active input command',async()=>{
+  const {e,send,command}=await connectedPersonal();
+  let resolveRead;const read=new Promise(resolve=>{resolveRead=resolve});
+  e.chrome.tabs.get=async id=>{await read;return e.tabs.get(id)};
+  send(command('active-input','Input.dispatchMouseEvent',{params:{type:'mousePressed',x:1,y:1}}));await e.flush();
+  send({kind:'command_cancel',id:'active-input',connection_id:e.run('commandConnection')});await e.flush();
+  assert.equal(e.sent.findLast(message=>message.kind==='cancel_ack')?.cancelled,false);
+  resolveRead();await e.flush();await e.flush();
+  assert.match(responseFor(e,'active-input').error,/cancelled/i);
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+});
+test('a new connection can process commands while the old read is still blocked',async()=>{
+  const {e,send,command,tab}=await connectedPersonal();
+  let resolveRead;const read=new Promise(resolve=>{resolveRead=resolve});
+  let first=true;
+  e.chrome.tabs.get=async id=>{if(first){first=false;await read}return e.tabs.get(id)};
+  send(command('old-read'));await e.flush();
+  tab.disconnect();await e.flush();
+  await e.tick(2000);await e.flush();
+  assert.equal(e.ports.length,2);
+  const newPort=e.ports[1];
+  newPort.onMessage.listener({kind:'command',id:'new-read',tab_id:7,method:'Page.getFrameTree',params:{},command_protocol:2,connection_id:e.run('commandConnection'),scope_epoch:e.run('accessEpoch'),deadline_ms:Date.now()+5000});
+  await e.flush();await e.flush();
+  assert(responseFor(e,'new-read'),'new port must respond before the old read is released');
+  assert.equal(responseFor(e,'new-read').error,undefined);
+  resolveRead();await e.flush();await e.flush();
+  assert.equal(responseFor(e,'old-read'),undefined);
+  assert(tab);
 });
 test('URL and exact-tab scope reject forbidden navigation and raw methods',async()=>{
   const e=await environment();

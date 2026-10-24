@@ -438,3 +438,15 @@ mutation не исполняется; потеря ответа сохраняе
 - A1 завершён: единый setFailureCode обновляет code/message/recovery и сохраняет
   контекст. Родитель подключил его к timeout, ошибке записи и восстановлению
   журнала; targeted finalizer/restart/eviction/retry tests прошли.
+- A2–A4 реализованы и проверены: protocol 2 передаёт deadline, connection ID и
+  scope epoch; отмена доставляется отдельно от очереди. Контекст проверяется
+  перед отправкой. Очереди Go/SW ограничены восемью ожидающими записями; pause,
+  cancel и смена доступа отменяют старую работу даже при гонке выдачи permit.
+  Ошибки различают not_dispatched и неизвестный исход после начала отправки.
+- Приёмка A: Chrome — 160 pass, Edge — 10 pass, Node — 31 pass; targeted race,
+  go vet, Linux cross-compile и состав ZIP расширения проверены. Расширение 1.3.0
+  требует обновления вместе с агентом для mutations. Подробности и ограничения:
+  [BROWSER_STAGE_A_ACCEPTANCE.ru.md](BROWSER_STAGE_A_ACCEPTANCE.ru.md).
+- Следующие поставки B (кроме готового B1), C, D и E ещё не выполнены. В частности,
+  ускорение snapshot, degraded journal startup и focus_policy=preserve остаются
+  в плане. Нельзя считать выполненными все критерии раздела 12 по результатам A.

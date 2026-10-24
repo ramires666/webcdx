@@ -17,6 +17,9 @@ func validBrowserAlias(alias string) bool {
 }
 
 func (b *browserManager) identifyBrowser(link *browserBridge, message browserBridgeMessage) bool {
+	if message.CommandProtocol < 0 || message.CommandProtocol > browserCommandProtocol {
+		return false
+	}
 	if !browserProfileID.MatchString(message.ProfileID) || !validBrowserAlias(message.Alias) {
 		return false
 	}
@@ -44,6 +47,7 @@ func (b *browserManager) identifyBrowser(link *browserBridge, message browserBri
 		return false
 	}
 	link.profileID, link.alias, link.product = message.ProfileID, message.Alias, message.Product
+	link.commandProtocol = message.CommandProtocol
 	return true
 }
 

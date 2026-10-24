@@ -26,7 +26,7 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 	if available == 0 && !paused {
 		b.mu.Unlock()
 		if err := link.call(ctx, 0, "WebCodex.prepare", map[string]any{}, nil); err != nil {
-			return nil, toolErr("waiting_user", "enable permanent access or connect a website tab in the extension")
+			return nil, err
 		}
 		link.mu.Lock()
 		available = len(link.tabs)
@@ -65,9 +65,33 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 		s.cancel = func() { cancel(); _ = link.send(browserBridgeMessage{Kind: "control", Action: "detach"}) }
 		b.sessions[s.id] = s
 	}
+	epoch := s.workEpoch
 	b.mu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	browserSetPhase(ctx, 1)
+	release, err := s.work.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	browserSetPhase(ctx, 2)
+	b.mu.Lock()
+	if epoch != s.workEpoch {
+		b.mu.Unlock()
+		return nil, context.Canceled
+	}
+	if s.paused || s.disconnected {
+		b.mu.Unlock()
+		return nil, toolErr("access_paused", "browser session paused or disconnected")
+	}
+	callCtx, cancel := context.WithCancel(ctx)
+	s.active = cancel
+	b.mu.Unlock()
+	defer func() { cancel(); b.mu.Lock(); s.active = nil; b.mu.Unlock() }()
+	ctx = callCtx
+	ctx = link.bindAccess(ctx)
 	approved := b.syncPersonalTabs(s)
 	if origin != "" {
 		matches := []int{}

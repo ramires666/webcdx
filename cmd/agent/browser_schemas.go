@@ -19,6 +19,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		"browser_session_id": str(), "tab_id": str(), "operation_id": str(), "mode": enum("clean", "persistent", "personal"),
 		"status": enum("ready", "running", "waiting_user", "paused", "completed", "failed", "cancelled", "disconnected"),
 		"url":    str(), "title": str(), "text": str(), "reason": str(), "snapshot_id": str(), "truncated": boolean(),
+		"phase":          enum("unknown", "reserved", "queued", "executing", "dispatch_started", "not_dispatched", "completed"),
 		"confirmation":   enum("action_dispatched", "condition_matched", "state_verified", "control_value_verified"),
 		"selected_value": str(), "selected_label": str(),
 		"profile_id": str(), "browser_alias": str(), "connection_id": str(), "product": enum("chrome", "edge", "chromium", "unknown"),
@@ -41,8 +42,9 @@ func browserToolSchemas() []mcpToolDefinition {
 	}, "status", "truncated")
 	output["properties"].(map[string]any)["error"] = object(map[string]any{
 		"code": str(), "message": str(), "details": object(map[string]any{
+			"phase":        enum("unknown", "reserved", "queued", "executing", "dispatch_started", "not_dispatched", "completed"),
 			"operation_id": str(), "browser_session_id": str(), "tab_id": str(), "frame_id": str(), "snapshot_id": str(), "matches": integer(0, 10000),
-			"recovery": enum("refresh_snapshot", "inspect_options", "inspect_locator", "verify_outcome", "inspect_diagnostics"),
+			"recovery": enum("refresh_snapshot", "inspect_options", "inspect_locator", "verify_outcome", "inspect_diagnostics", "stop", "wait", "update_extension"),
 			"options":  map[string]any{"type": "array", "items": option}, "verification_error_code": str(),
 		}),
 	}, "code", "message")

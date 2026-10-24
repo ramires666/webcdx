@@ -75,6 +75,9 @@ func (t *browserTab) frames(ctx context.Context) ([]map[string]any, error) {
 }
 
 func (t *browserTab) commandFrame(ctx context.Context, frameID, method string, params, result any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if frameID == "" {
 		return t.command(ctx, method, params, result)
 	}
@@ -85,6 +88,7 @@ func (t *browserTab) commandFrame(ctx context.Context, frameID, method string, p
 	child := t.frameContexts[frameID]
 	t.eventMu.Unlock()
 	if child != nil && child.Err() == nil {
+		browserMarkDispatch(ctx, method)
 		if err := chromedp.FromContext(child).Target.Call(ctx, method, params, result); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -120,6 +124,7 @@ func (t *browserTab) commandFrame(ctx context.Context, frameID, method string, p
 		}
 		t.frameContexts[frameID] = child
 		t.eventMu.Unlock()
+		browserMarkDispatch(ctx, method)
 		if err := chromedp.FromContext(child).Target.Call(ctx, method, params, result); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

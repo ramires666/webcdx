@@ -35,7 +35,7 @@ go build -ldflags="-s -w" -o bin/webcodex-gate ./cmd/gate
 echo "[УСПЕХ] Создан bin/webcodex-gate"
 
 mkdir -p bin/browser-extension
-cp browser-extension/manifest.json browser-extension/background.js browser-extension/popup.html browser-extension/popup.js bin/browser-extension/
+cp browser-extension/manifest.json browser-extension/background.js browser-extension/command_queue.js browser-extension/popup.html browser-extension/popup.js bin/browser-extension/
 echo "[УСПЕХ] Расширение подготовлено в bin/browser-extension"
 
 echo ""

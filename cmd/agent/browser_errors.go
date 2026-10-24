@@ -9,6 +9,12 @@ import (
 
 // These messages contain no page-provided text, stack, field value or URL.
 var browserFailureMessages = map[string]string{
+	"cancelled":                 "browser operation was cancelled",
+	"cancelled_before_dispatch": "operation was cancelled before a browser side effect was sent",
+	"scope_changed":             "local browser access changed; obtain fresh state before continuing",
+	"protocol_upgrade_required": "update agent and browser extension to command protocol 2 before changing the page",
+	"browser_busy":              "browser operation queue is full; retry after current work finishes",
+	"command_expired":           "browser command expired before it could complete",
 	"browser_not_found":         "no connected personal browser matches; use browser_control action=discover",
 	"ambiguous_browser":         "multiple personal browsers match; choose a profile_id or unique local alias from discovery",
 	"ambiguous_tab":             "multiple tabs match target_origin; open the profile and explicitly choose from browser_tabs",
@@ -46,6 +52,16 @@ func browserTransportFailure(message string) error {
 	code := "browser_failed"
 	if len(message) <= 2048 {
 		switch message {
+		case "Command cancelled":
+			code = "cancelled_before_dispatch"
+		case "Command deadline expired":
+			code = "command_expired"
+		case "Command scope changed":
+			code = "scope_changed"
+		case "Command queue is full":
+			code = "browser_busy"
+		case "Command protocol is not supported":
+			code = "protocol_upgrade_required"
 		case "Local control paused", "Local access changed", "Enable permanent access locally":
 			code = "access_paused"
 		case "Tab URL is outside the selected scope", "Tab left permitted scope", "Navigation URL is outside selected scope", "History URL outside scope", "Tab is not locally attached", "CDP method is not permitted", "New tabs are not locally permitted", "Only tabs created for this task can be closed":
@@ -164,6 +180,14 @@ func (op *browserOperation) setFailureCode(code string) {
 
 func browserErrorRecovery(code string) string {
 	switch code {
+	case "cancelled", "cancelled_before_dispatch":
+		return "stop"
+	case "browser_busy":
+		return "wait"
+	case "protocol_upgrade_required":
+		return "update_extension"
+	case "scope_changed", "command_expired":
+		return "refresh_snapshot"
 	case "stale_snapshot", "element_detached", "frame_changed", "navigation_pending":
 		return "refresh_snapshot"
 	case "invalid_option_value":

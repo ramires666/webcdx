@@ -26,27 +26,33 @@ type browserBridgeDescriptor struct {
 	ExtensionID string `json:"extension_id"`
 }
 type browserBridgeMessage struct {
-	Kind        string               `json:"kind"`
-	ID          string               `json:"id,omitempty"`
-	Token       string               `json:"token,omitempty"`
-	Origin      string               `json:"origin,omitempty"`
-	Action      string               `json:"action,omitempty"`
-	TabID       int                  `json:"tab_id,omitempty"`
-	FrameID     string               `json:"frame_id,omitempty"`
-	Method      string               `json:"method,omitempty"`
-	Params      any                  `json:"params,omitempty"`
-	Result      json.RawMessage      `json:"result,omitempty"`
-	Error       string               `json:"error,omitempty"`
-	Tabs        []browserPersonalTab `json:"tabs,omitempty"`
-	Paused      bool                 `json:"paused,omitempty"`
-	LocalPaused bool                 `json:"local_paused,omitempty"`
-	AllowNew    bool                 `json:"allow_new,omitempty"`
-	AllowLocal  bool                 `json:"allow_local,omitempty"`
-	URL         string               `json:"url,omitempty"`
-	Allowed     bool                 `json:"allowed,omitempty"`
-	ProfileID   string               `json:"profile_id,omitempty"`
-	Alias       string               `json:"alias,omitempty"`
-	Product     string               `json:"product,omitempty"`
+	Kind            string               `json:"kind"`
+	ID              string               `json:"id,omitempty"`
+	Token           string               `json:"token,omitempty"`
+	Origin          string               `json:"origin,omitempty"`
+	Action          string               `json:"action,omitempty"`
+	TabID           int                  `json:"tab_id,omitempty"`
+	FrameID         string               `json:"frame_id,omitempty"`
+	Method          string               `json:"method,omitempty"`
+	Params          any                  `json:"params,omitempty"`
+	Result          json.RawMessage      `json:"result,omitempty"`
+	Error           string               `json:"error,omitempty"`
+	Tabs            []browserPersonalTab `json:"tabs,omitempty"`
+	Paused          bool                 `json:"paused,omitempty"`
+	LocalPaused     bool                 `json:"local_paused,omitempty"`
+	AllowNew        bool                 `json:"allow_new,omitempty"`
+	AllowLocal      bool                 `json:"allow_local,omitempty"`
+	URL             string               `json:"url,omitempty"`
+	Allowed         bool                 `json:"allowed,omitempty"`
+	ProfileID       string               `json:"profile_id,omitempty"`
+	Alias           string               `json:"alias,omitempty"`
+	Product         string               `json:"product,omitempty"`
+	CommandProtocol int                  `json:"command_protocol,omitempty"`
+	ConnectionID    string               `json:"connection_id,omitempty"`
+	DeadlineMS      int64                `json:"deadline_ms,omitempty"`
+	ScopeEpoch      uint64               `json:"scope_epoch"`
+	ControlEpoch    uint64               `json:"control_epoch,omitempty"`
+	Cancelled       bool                 `json:"cancelled,omitempty"`
 }
 type browserPersonalTab struct {
 	ID       int    `json:"tab_id"`
@@ -67,6 +73,8 @@ type browserBridge struct {
 	localPaused                   bool
 	attached                      map[int]*browserTab
 	id, profileID, alias, product string
+	commandProtocol               int
+	scopeEpoch, controlEpoch      uint64
 }
 
 func browserBridgePath() string {
@@ -171,6 +179,8 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 		for _, session := range b.sessions {
 			if session.personal == link {
 				session.disconnected = true
+				session.workEpoch++
+				session.work.cancelPending()
 				if session.active != nil {
 					session.active()
 				}
@@ -182,7 +192,7 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 		delete(b.bridges, link.id)
 		b.mu.Unlock()
 	}()
-	if err := link.send(browserBridgeMessage{Kind: "hello", AllowLocal: b.config.AllowLocal}); err != nil {
+	if err := link.send(browserBridgeMessage{Kind: "hello", AllowLocal: b.config.AllowLocal, CommandProtocol: browserCommandProtocol, ConnectionID: link.id}); err != nil {
 		return
 	}
 	for scanner.Scan() {
@@ -203,7 +213,7 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 			if err := link.send(browserBridgeMessage{Kind: "url_result", ID: message.ID, Allowed: allowed}); err != nil {
 				return
 			}
-		case "response":
+		case "response", "cancel_ack":
 			link.mu.Lock()
 			ch := link.pending[message.ID]
 			if ch != nil {
@@ -227,7 +237,15 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 					valid = append(valid, tab)
 				}
 			}
+			b.mu.Lock()
 			link.mu.Lock()
+			if link.commandProtocol == browserCommandProtocol && (message.ScopeEpoch < link.scopeEpoch || (message.ControlEpoch < link.controlEpoch && !message.LocalPaused)) {
+				link.mu.Unlock()
+				b.mu.Unlock()
+				continue
+			}
+			scopeChanged := link.commandProtocol == browserCommandProtocol && message.ScopeEpoch != link.scopeEpoch
+			link.scopeEpoch = message.ScopeEpoch
 			link.tabs = valid
 			link.paused = message.Paused
 			link.localPaused = message.LocalPaused
@@ -246,12 +264,15 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 				}
 			}
 			link.mu.Unlock()
-			b.mu.Lock()
 			for _, session := range b.sessions {
 				if session.personal == link {
 					session.paused = message.Paused
-					if message.Paused && session.active != nil {
-						session.active()
+					if message.Paused || scopeChanged {
+						session.workEpoch++
+						session.work.cancelPending()
+						if session.active != nil {
+							session.active()
+						}
 					}
 				}
 			}
@@ -271,6 +292,13 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 }
 
 func (l *browserBridge) send(message browserBridgeMessage) error {
+	return l.sendContext(context.Background(), message)
+}
+
+func (l *browserBridge) sendContext(ctx context.Context, message browserBridgeMessage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	data, err := json.Marshal(message)
 	if err != nil {
 		return err
@@ -282,6 +310,12 @@ func (l *browserBridge) send(message browserBridgeMessage) error {
 	go func() {
 		l.writeMu.Lock()
 		defer l.writeMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			done <- err
+			return
+		}
+		stop := time.AfterFunc(3*time.Second, func() { l.conn.Close() })
+		defer stop.Stop()
 		_, err := l.conn.Write(append(data, '\n'))
 		done <- err
 	}()
@@ -290,6 +324,8 @@ func (l *browserBridge) send(message browserBridgeMessage) error {
 	select {
 	case err := <-done:
 		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-timer.C:
 		l.conn.Close()
 		return errors.New("native bridge write timed out")
@@ -301,6 +337,9 @@ func (l *browserBridge) call(ctx context.Context, tabID int, method string, para
 }
 
 func (l *browserBridge) callFrame(ctx context.Context, tabID int, frameID, method string, params, result any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	id := browserID("bridge_request_")
 	ch := make(chan browserBridgeMessage, 1)
 	l.mu.Lock()
@@ -308,10 +347,27 @@ func (l *browserBridge) callFrame(ctx context.Context, tabID int, frameID, metho
 		l.mu.Unlock()
 		return toolErr("access_paused", "personal browser disconnected or paused")
 	}
+	if binding, ok := ctx.Value(browserAccessContext{}).(browserAccessBinding); ok && (binding.connection != l.id || binding.scope != l.scopeEpoch) {
+		l.mu.Unlock()
+		return toolErr("scope_changed", "local browser access changed; obtain fresh state")
+	}
+	protocol, epoch, connection := l.commandProtocol, l.scopeEpoch, l.id
+	if browserMayChange(ctx, method) && protocol != browserCommandProtocol {
+		l.mu.Unlock()
+		return toolErr("protocol_upgrade_required", "update the browser extension before changing the page")
+	}
 	l.pending[id] = ch
 	l.mu.Unlock()
 	defer func() { l.mu.Lock(); delete(l.pending, id); l.mu.Unlock() }()
-	if err := l.send(browserBridgeMessage{Kind: "command", ID: id, TabID: tabID, FrameID: frameID, Method: method, Params: params}); err != nil {
+	deadline := time.Now().Add(30 * time.Second)
+	if until, ok := ctx.Deadline(); ok && until.Before(deadline) {
+		deadline = until
+	}
+	browserMarkDispatch(ctx, method)
+	if err := l.sendContext(ctx, browserBridgeMessage{Kind: "command", ID: id, TabID: tabID, FrameID: frameID, Method: method, Params: params, CommandProtocol: protocol, ConnectionID: connection, ScopeEpoch: epoch, DeadlineMS: deadline.UnixMilli()}); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return toolErr("disconnected", "native bridge write failed")
 	}
 	select {
@@ -329,6 +385,16 @@ func (l *browserBridge) callFrame(ctx context.Context, tabID int, frameID, metho
 		}
 		return nil
 	case <-ctx.Done():
+		if protocol == browserCommandProtocol {
+			cancelCtx, stop := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			if l.sendContext(cancelCtx, browserBridgeMessage{Kind: "command_cancel", ID: id, ConnectionID: connection, CommandProtocol: protocol}) == nil {
+				select {
+				case <-ch:
+				case <-cancelCtx.Done():
+				}
+			}
+			stop()
+		}
 		return ctx.Err()
 	}
 }

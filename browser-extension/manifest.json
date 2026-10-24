@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "WebCodex Local Browser",
   "description": "Use your signed-in browser through WebCodex with optional persistent access and automatic reconnection.",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "minimum_chrome_version": "125",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuWPFUpZtlZDPGiv47E2C+kH1pG0s0kfkfP8ah9oB4qjBC3JJJhkXeFhgOgnJgXh6mTbvdndzSJf2Hp17PFalx7uoHvauLBJ2Tr6fZBNmhma2SJoWV673xwnRDIok2nPMI+xc1wmXSABsyPdln+CXEH/MwnbZLePkd0bNTHhjRWCyxOGgffJ9KPJxPVLExQVkdG7UB7bN6AjsK5J53G5ElWWXuCIYEkdVwTag66xQe6kwID3QP1dN93vhv6lgZ7qg0BW3z6RzJQY5P75UHYbG2BJBangDqG3BHz9fniEOo9GLwepQ5UP25OALJCZelrdy4uIUI9Uc7i6LCkDbdVrL5wIDAQAB",
   "permissions": ["tabs", "debugger", "nativeMessaging", "downloads", "storage", "alarms"],

@@ -1,3 +1,4 @@
+importScripts('command_queue.js');
 const HOST = 'org.webcodex.browser';
 const ACCESS_KEY = 'webcodexPersonalAccess';
 const PROFILE_KEY='webcodexBrowserProfile';
@@ -12,7 +13,7 @@ const downloads = new Map();
 const childSessions = new Map();
 const urlChecks = new Map();
 let port, paused = false, localPaused = false, allowLocal = false, allowNew = false, continuous = false, connected = false;
-let serial = Promise.resolve(), scopeSerial = Promise.resolve(), settingsWrites = Promise.resolve(), ready, reconnectTimer, reconnectDelay = 2000, accessEpoch = 0;
+let scopeSerial = Promise.resolve(), settingsWrites = Promise.resolve(), ready, reconnectTimer, reconnectDelay = 2000, accessEpoch = 0;
 const methods = new Set(['Page.enable','Runtime.enable','Network.enable','Page.navigate','Page.getFrameTree','Page.createIsolatedWorld','Runtime.evaluate','Page.reload','Page.getNavigationHistory','Page.navigateToHistoryEntry','Page.bringToFront','Page.captureScreenshot','Page.getLayoutMetrics','Page.handleJavaScriptDialog','Input.dispatchMouseEvent','Input.dispatchKeyEvent','DOM.getFrameOwner','DOM.getBoxModel','DOM.setFileInputFiles','Accessibility.getFullAXTree']);
 methods.add('DOM.scrollIntoViewIfNeeded');
 
@@ -34,9 +35,10 @@ function networkFailure(raw,canceled) {
   return 'other';
 }
 function tabURL(tab) { return tab.url || tab.pendingUrl || ''; }
-async function createTaskTab(scope) {
+async function createTaskTab(scope,guard=()=>{}) {
+  guard();
   const child = await chrome.tabs.create({url:'about:blank'});
-  try { await attach(child,{...scope,created:true}); }
+  try { guard();await attach(child,{...scope,created:true},guard); }
   catch (error) {
     // This tab was created by this call; preserve every existing user tab.
     try { await chrome.tabs.remove(child.id); } catch {}
@@ -50,7 +52,7 @@ function post(message) {
   if (new TextEncoder().encode(serialized).byteLength > 900000) throw Error('Native response exceeds limit');
   port.postMessage(message);
 }
-function publishIdentity(){if(port&&connected)post({kind:'identity',profile_id:profileID,alias:profileAlias,product:browserProduct});}
+function publishIdentity(){if(port&&connected)post({command_protocol:commandProtocol,kind:'identity',profile_id:profileID,alias:profileAlias,product:browserProduct});}
 function tabMetadata(tab){return {tab_id:tab.id,url:tabURL(tab),title:String(tab.title||'').slice(0,256),window_id:Number.isInteger(tab.windowId)&&tab.windowId>=0?tab.windowId:0,active:!!tab.active};}
 function saveAccess() {
   const access = {continuous, localPaused, allowNew};
@@ -58,10 +60,13 @@ function saveAccess() {
   return settingsWrites;
 }
 async function setPaused(value, locally = false) {
-  if (locally) { localPaused = value; await saveAccess(); }
+  if (locally) localPaused = value;
   paused = value || localPaused;
-  accessEpoch++;
+  accessEpoch++; invalidateCommands();
+  const epoch=accessEpoch;
+  if(locally)await saveAccess();
   for (const tabId of attached.keys()) {
+    if(epoch!==accessEpoch)return;
     try { await chrome.debugger.sendCommand({tabId},paused ? 'Fetch.disable' : 'Fetch.enable',paused ? {} : {patterns:[{urlPattern:'*',requestStage:'Request'}]}); } catch {}
   }
   await scopeUpdate();
@@ -83,7 +88,7 @@ async function publishScope() {
   if (epoch !== accessEpoch) return;
   available.clear();
   for (const tab of tabs) available.set(tab.tab_id,tab.url);
-  if (port && connected) post({kind:'scope',tabs,paused,local_paused:localPaused,allow_new:allowNew});
+  if (port && connected) post({kind:'scope',tabs,paused,local_paused:localPaused,allow_new:allowNew,scope_epoch:accessEpoch,control_epoch:commandControlEpoch});
   await chrome.action.setBadgeText({text:paused ? 'PAUSE' : continuous ? connected ? 'AUTO' : 'WAIT' : attached.size ? 'ON' : ''});
   await chrome.action.setBadgeBackgroundColor({color:paused ? '#b45309' : '#0369a1'});
 }
@@ -92,7 +97,7 @@ function scopeUpdate() {
   return scopeSerial;
 }
 async function releaseAttachments() {
-  accessEpoch++;
+  accessEpoch++; invalidateCommands();
   const ids = [...attached.keys()]; attached.clear();
   for (const id of downloads.keys()) { try { await chrome.downloads.cancel(id); } catch {} }
   downloads.clear();
@@ -150,42 +155,42 @@ function connect() {
     if (message.kind === 'hello') {
       clearTimeout(timeout); clearTimeout(reconnectTimer); reconnectTimer = undefined; reconnectDelay = 2000;
       allowLocal = !!message.allow_local; connected = true; paused = localPaused;
+      commandConnection=message.connection_id||'';commandProtocol=Math.min(2,message.command_protocol||1);commandControlEpoch=0;
       publishIdentity(); resolveReady(); scopeUpdate().catch(() => {}); return;
     }
+    if(message.kind==='command_cancel'){cancelCommand(message,nativePort);return;}
     if (message.kind === 'control') {
+      if(message.control_epoch!=null){if(!Number.isSafeInteger(message.control_epoch)||message.control_epoch<commandControlEpoch)return;commandControlEpoch=message.control_epoch;}
       if (message.action === 'detach') { paused = localPaused || !continuous; releaseAttachments().catch(() => {}); }
       if (message.action === 'pause') setPaused(true).catch(() => {});
       if (message.action === 'resume' && !localPaused) setPaused(false).catch(() => {});
       return;
     }
     if (message.kind !== 'command') return;
-    serial = serial.then(async () => {
-      let result, error;
-      try { if (port !== nativePort) throw Error('Native bridge disconnected'); result = await execute(message); } catch (failure) { error = failure.message; }
-      if (port !== nativePort) return;
-      try { post({kind:'response',id:message.id,result:result ?? {},error}); }
-      catch { try { post({kind:'response',id:message.id,error:'Response exceeds native message limit'}); } catch {} }
-    }).catch(() => {});
+    enqueueCommand(message,nativePort);
   });
   return ready;
 }
-async function attach(tab, scope) {
+async function attach(tab, scope,guard=()=>{}) {
+  guard();
   if (attached.size >= PERSONAL_TAB_LIMIT) throw Error('Tab limit reached');
   if (paused || localPaused) throw Error('Local control paused');
   if (!permitted(tabURL(tab),scope,scope.created)) throw Error('Tab URL is outside the selected scope');
   if (attached.has(tab.id)) return;
   const epoch = accessEpoch;
   await chrome.debugger.attach({tabId:tab.id},'1.3');
+  try{guard()}catch(error){await chrome.debugger.detach({tabId:tab.id});throw error;}
   if (epoch !== accessEpoch || paused || localPaused) { await chrome.debugger.detach({tabId:tab.id}); throw Error('Local access changed'); }
   attached.set(tab.id,scope);
   try {
-    await chrome.debugger.sendCommand({tabId:tab.id},'Fetch.enable',{patterns:[{urlPattern:'*',requestStage:'Request'}]});
-    for (const method of ['Page.enable','Runtime.enable','Network.enable']) await chrome.debugger.sendCommand({tabId:tab.id},method);
-    await chrome.debugger.sendCommand({tabId:tab.id},'Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true});
+    guard();await chrome.debugger.sendCommand({tabId:tab.id},'Fetch.enable',{patterns:[{urlPattern:'*',requestStage:'Request'}]});
+    for (const method of ['Page.enable','Runtime.enable','Network.enable']) {guard();await chrome.debugger.sendCommand({tabId:tab.id},method);}
+    guard();await chrome.debugger.sendCommand({tabId:tab.id},'Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true});
     await scopeUpdate();
   } catch (error) { attached.delete(tab.id); await chrome.debugger.detach({tabId:tab.id}); throw error; }
 }
-async function execute(message) {
+async function execute(message,guard=()=>{}) {
+  guard();
   if (paused || localPaused) throw Error('Local control paused');
   const method = message.method, params = message.params || {};
   if (!methods.has(method) && !['WebCodex.prepare','WebCodex.newTab','WebCodex.closeTab','WebCodex.enableDownloads','WebCodex.frames','WebCodex.downloads'].includes(method)) throw Error('CDP method is not permitted');
@@ -193,31 +198,31 @@ async function execute(message) {
     if (!continuous || !connected) throw Error('Enable permanent access locally');
     await scopeUpdate();
     if (!available.size) {
-      await createTaskTab({publicWeb:true});
+      guard();await createTaskTab({publicWeb:true},guard);
     }
     return {};
   }
-  let tab = await chrome.tabs.get(message.tab_id);
+  let tab = await chrome.tabs.get(message.tab_id);guard();
   if (!attached.has(tab.id) && continuous && connected && available.has(tab.id)) {
-    await attach(tab,{origin:new URL(tabURL(tab)).origin,publicWeb:true,created:false});
-    tab = await chrome.tabs.get(message.tab_id);
+    await attach(tab,{origin:new URL(tabURL(tab)).origin,publicWeb:true,created:false},guard);
+    tab = await chrome.tabs.get(message.tab_id);guard();
   }
   const scope = attached.get(message.tab_id);
   if (!scope) throw Error('Tab is not locally attached');
   if (!permitted(tabURL(tab),scope,scope.created)) { await chrome.debugger.detach({tabId:tab.id}); attached.delete(tab.id); await scopeUpdate(); throw Error('Tab left permitted scope'); }
   if (method === 'WebCodex.newTab') {
     if (!allowNew) throw Error('New tabs are not locally permitted');
-    return createTaskTab(scope);
+    return createTaskTab(scope,guard);
   }
   if (method === 'WebCodex.closeTab') {
     if (!scope.created) throw Error('Only tabs created for this task can be closed');
-    attached.delete(tab.id); await chrome.tabs.remove(tab.id); await scopeUpdate(); return {};
+    guard();attached.delete(tab.id); await chrome.tabs.remove(tab.id); await scopeUpdate(); return {};
   }
   if (method === 'WebCodex.enableDownloads') { if (!/^browser_[a-f0-9]{24}$/.test(params.session_id)) throw Error('Invalid session'); scope.downloadSession = params.session_id; return {}; }
   if (method === 'WebCodex.frames') {
     const frames=[];
     function collect(tree){if(!tree)return;frames.push(tree.frame);for(const child of tree.childFrames||[])collect(child)}
-    for(const sessionId of childSessions.get(tab.id)?.values()||[]){try{const result=await chrome.debugger.sendCommand({tabId:tab.id,sessionId},'Page.getFrameTree');collect(result.frameTree)}catch{}}
+    for(const sessionId of childSessions.get(tab.id)?.values()||[]){try{guard();const result=await chrome.debugger.sendCommand({tabId:tab.id,sessionId},'Page.getFrameTree');collect(result.frameTree)}catch{}}
     return frames;
   }
   if (method === 'WebCodex.downloads') {
@@ -228,6 +233,7 @@ async function execute(message) {
   if (!methods.has(method)) throw Error('CDP method is not permitted');
   if (method === 'Page.navigate' && !permitted(params.url,scope)) throw Error('Navigation URL is outside selected scope');
   if (method === 'Page.navigateToHistoryEntry') { const history = await chrome.debugger.sendCommand({tabId:tab.id},'Page.getNavigationHistory'); const entry = history.entries.find(x => x.id === params.entryId); if (!entry || !permitted(entry.url,scope)) throw Error('History URL outside scope'); }
+  guard();
   const sessionId = message.frame_id && childSessions.get(tab.id)?.get(message.frame_id);
   return chrome.debugger.sendCommand(sessionId ? {tabId:tab.id,sessionId} : {tabId:tab.id},method,params);
 }
@@ -241,6 +247,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       profileAlias=alias;settingsWrites=settingsWrites.catch(()=>{}).then(()=>chrome.storage.local.set({[PROFILE_KEY]:{id:profileID,alias:profileAlias}}));await settingsWrites;publishIdentity();
     } else if (message.type === 'attach') {
       if (continuous) await disconnect();
+      accessEpoch++;invalidateCommands();
       localPaused = false; paused = false; allowNew = !!message.allowNew;
       await saveAccess();
       await connect();
@@ -255,7 +262,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         await releaseAttachments();
         await startContinuous();
       } else { await disconnect(); }
-    } else if (message.type === 'options') { allowNew = !!message.allowNew; await saveAccess(); await scopeUpdate(); }
+    } else if (message.type === 'options') { accessEpoch++;invalidateCommands();allowNew = !!message.allowNew; await saveAccess(); await scopeUpdate(); }
     else if (message.type === 'pause') { await setPaused(true,true); }
     else if (message.type === 'resume') { await setPaused(false,true); if (continuous) await startContinuous(); }
     else if (message.type === 'disconnect') { await disconnect(); }

@@ -56,7 +56,7 @@ if %errorlevel% neq 0 (
 )
 echo [SUCCESS] Created bin\webcodex-gate.exe
 
-powershell -NoProfile -NonInteractive -Command "Compress-Archive -LiteralPath 'browser-extension\manifest.json','browser-extension\background.js','browser-extension\popup.html','browser-extension\popup.js' -DestinationPath 'bin\webcodex-browser-extension.zip' -Force"
+powershell -NoProfile -NonInteractive -Command "Compress-Archive -LiteralPath 'browser-extension\manifest.json','browser-extension\background.js','browser-extension\command_queue.js','browser-extension\popup.html','browser-extension\popup.js' -DestinationPath 'bin\webcodex-browser-extension.zip' -Force"
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to package browser extension
     exit /b 1
