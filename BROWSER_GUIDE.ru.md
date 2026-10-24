@@ -507,3 +507,42 @@ verified=true относится к сохранённым байтам, source_
 числе во время долгого wait. URL/DNS-проверки расширения выполняет ограниченный
 пул: медленный DNS не задерживает reader, ответы команд и отмену. При переполнении
 проверка не разрешает запрос автоматически; срабатывает ограниченный timeout.
+
+## Сохранить файл с подписью и checkpoint
+
+Для **уже скачанных разрешённых файлов** есть локальная утилита
+`tools/browser_capture_store.py`. Она не обращается к сайту. Подготовьте JSON
+со стабильными record_id/attachment_id и точным текстом того же сообщения:
+
+```json
+{"record_id":"message_123","attachment_id":"attachment_456","message_text_exact":"Точная подпись автора","attachment_original_filename":"image.png"}
+```
+
+Дополнительно поддерживаются ordinal_in_message, channel_id, author_display,
+posted_at_utc, edited_at_utc и source_message_permalink. Данные берутся из
+проверенной записи, а не сопоставляются по порядку двух независимых списков.
+Позиционный attachment ID из snapshot не заменяет устойчивый ID источника.
+
+```powershell
+python tools/browser_capture_store.py add --root C:\exports\channel --source C:\downloads\image.png --record-file C:\downloads\record.json
+```
+
+Утилита сохраняет байты в images/, точную подпись в metadata/*.txt и JSON commit
+marker последним. Затем каждый раз пересобирает manifest.csv, quality_audit.json
+и checkpoint.json по проверенным файлам на диске. Повтор не переписывает файл;
+несовпадение байтов или подписи считается конфликтом. Незавершённая запись без
+JSON не считается готовой и может быть продолжена повтором add.
+
+Для проверки и восстановления сводок после сбоя:
+
+```powershell
+python tools/browser_capture_store.py rebuild --root C:\exports\channel
+```
+
+Exit code 0 означает успешную проверку локальных записей, 1 — найдены повреждённые
+sidecars/файлы, 2 — ошибка вызова или доступа. Checkpoint записывается последним
+и содержит хэши manifest/audit, пары IDs и число уникальных вложений.
+CSV экранирует формулы; исходный текст в JSON/TXT остаётся точным.
+coverage_complete и source_original_verified остаются false: локальная
+согласованность не подтверждает полноту канала или оригинальность источника.
+Утилита не мигрирует автоматически существующие датасеты другого формата.
