@@ -121,14 +121,7 @@ func (b *browserManager) files(ctx context.Context, s *browserSession, t *browse
 		if err != nil {
 			return nil, err
 		}
-		data, info, err := readRegularFile(filepath.Join(dir, id), 64<<20)
-		if err != nil {
-			return nil, err
-		}
-		if err := atomicCreate(path, data); err != nil {
-			return nil, err
-		}
-		return map[string]any{"path": path, "download_id": id, "bytes": info.Size()}, nil
+		return saveBrowserDownloadedFile(filepath.Join(dir, id), path, id)
 	case "upload":
 		return b.upload(ctx, t, args)
 	}

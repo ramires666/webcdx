@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -223,6 +224,22 @@ func browserConsoleResult(info browserConsoleInfo, result map[string]any) string
 	}
 	switch info.Name {
 	case "browser_snapshot":
+		if records := browserConsoleSlice(result["records"]); records != nil {
+			message := fmt.Sprintf("прочитано записей: %d", len(records))
+			if result["has_more"] == true {
+				message += " · есть следующая страница DOM"
+			}
+			if result["truncated"] == true {
+				message += " · усечено"
+			}
+			if len(records) != 0 {
+				row, _ := records[0].(map[string]any)
+				id, _ := row["record_id"].(string)
+				text, _ := row["text"].(string)
+				message += " · первая запись " + compactString(id, 80) + ": «" + browserConsoleTextPreview(text, 240) + "»"
+			}
+			return message
+		}
 		counts, _ := result["counts"].(map[string]any)
 		countText := browserConsoleCounts(counts)
 		text, _ := result["text"].(string)
@@ -240,6 +257,23 @@ func browserConsoleResult(info browserConsoleInfo, result map[string]any) string
 			parts = append(parts, "прочитано: «"+preview+"»")
 		}
 		return strings.Join(parts, " · ")
+	case "browser_interact":
+		if moved, ok := result["scroll_moved"].(bool); ok {
+			message := "контейнер не прокрутился"
+			if moved {
+				message = "контейнер прокручен"
+			}
+			first, _ := result["first_id"].(string)
+			last, _ := result["last_id"].(string)
+			message += fmt.Sprintf(" · новых ID: %d", len(browserConsoleSlice(result["new_ids"])))
+			if first != "" {
+				message += " · видны " + compactString(first, 64) + " … " + compactString(last, 64)
+			}
+			if result["at_scroll_end"] == true {
+				message += " · край контейнера, конец истории не подтверждён"
+			}
+			return message
+		}
 	case "browser_tabs":
 		if tabs := browserConsoleSlice(result["tabs"]); tabs != nil {
 			return browserConsoleTabs(tabs, result["truncated"] == true)
@@ -256,6 +290,9 @@ func browserConsoleResult(info browserConsoleInfo, result map[string]any) string
 		return message
 	case "browser_files":
 		if n, ok := browserConsoleNumber(result["bytes"]); ok {
+			if result["duplicate"] == true {
+				return fmt.Sprintf("файл уже сохранён, байты совпадают · %d байт", n)
+			}
 			return fmt.Sprintf("файл сохранён · %d байт", n)
 		}
 		if downloads := browserConsoleSlice(result["downloads"]); downloads != nil {
@@ -301,7 +338,10 @@ func browserConsoleResult(info browserConsoleInfo, result map[string]any) string
 	return "действие выполнено"
 }
 
+var browserConsoleURLs = regexp.MustCompile(`https?://[^\s<>"']+`)
+
 func browserConsoleTextPreview(text string, maxRunes int) string {
+	text = browserConsoleURLs.ReplaceAllStringFunc(text, consoleURL)
 	preview := compactString(consoleText(text), maxRunes)
 	runes := []rune(preview)
 	if len(runes) > maxRunes {

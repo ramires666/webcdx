@@ -51,6 +51,7 @@ type browserManager struct {
 	pendingCleanups []<-chan struct{}
 	healthReason    string
 	journalWriter   *browserJournalWriter
+	urlChecks       *browserURLChecks
 	cacheBytes      int64
 }
 
@@ -66,6 +67,7 @@ type browserSession struct {
 	active               context.CancelFunc
 	personal             *browserBridge
 	boundOnly            bool // strict existing-tab tasks require explicit binding on subsequent page calls
+	readCatalog          browserReadCatalogSlot
 	downloadMu           sync.Mutex
 	downloads            map[string]*browserDownload
 }
@@ -380,7 +382,7 @@ func (b *browserManager) operationResult(op *browserOperation) (any, error) {
 	if op.image != "" {
 		return browserImage{b.browserImageMetadata(op.Result, true), op.image}, nil
 	}
-	if op.Result["mime_type"] == "image/jpeg" {
+	if op.Result["mime_type"] == "image/jpeg" && op.Result["image_width"] != nil {
 		return b.browserImageMetadata(op.Result, false), nil
 	}
 	return op.Result, nil
@@ -516,6 +518,13 @@ func safeBrowserURL(raw string) string {
 }
 
 func (b *browserManager) checkURL(raw string) error {
+	return b.checkURLContext(context.Background(), raw)
+}
+
+func (b *browserManager) checkURLContext(parent context.Context, raw string) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
 		return toolErr("invalid_url", "only HTTP/HTTPS URLs without credentials are allowed")
@@ -527,7 +536,7 @@ func (b *browserManager) checkURL(raw string) error {
 			return toolErr("url_not_allowed", "local/intranet access is disabled locally")
 		}
 		if ip == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 			defer cancel()
 			addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 			if err != nil {
@@ -682,6 +691,7 @@ func (b *browserManager) open(ctx context.Context, args map[string]any) (any, er
 		}
 	}
 	ready = true
+	s.publishReadCatalog()
 	return map[string]any{"browser_session_id": s.id, "tab_id": tab.id, "mode": mode, "status": "ready", "truncated": false}, nil
 }
 
@@ -801,6 +811,9 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 	if s == nil {
 		return nil, toolErr("unknown_session", "unknown browser_session_id")
 	}
+	if name == "browser_diagnostics" {
+		return b.cachedBrowserDiagnostics(ctx, s, args)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -810,6 +823,7 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 		return nil, err
 	}
 	defer release()
+	defer s.publishReadCatalog()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1052,6 +1066,11 @@ func (b *browserManager) Close() {
 		if err := b.journalWriter.close(ctx); err != nil {
 			log.Print("⚠ Запись журнала браузера ещё завершается; исходы потребуют проверки при восстановлении")
 		}
+		done()
+	}
+	if b.urlChecks != nil {
+		ctx, done := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = b.urlChecks.close(ctx)
 		done()
 	}
 }

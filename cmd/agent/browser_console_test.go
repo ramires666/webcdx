@@ -50,6 +50,10 @@ func TestBrowserConsoleStartFamiliesAndSafeContext(t *testing.T) {
 }
 
 func TestBrowserConsoleFinishSnapshotAndTabs(t *testing.T) {
+	preview := browserConsoleTextPreview("read https://user:secret@example.test/image.png?ex=SECRET&hm=TOKEN#fragment", 240)
+	if strings.Contains(preview, "secret") || strings.Contains(preview, "SECRET") || strings.Contains(preview, "TOKEN") || strings.Contains(preview, "fragment") || !strings.Contains(preview, "https://example.test/image.png") {
+		t.Fatalf("snapshot preview exposed URL access parameters: %s", preview)
+	}
 	text := strings.Repeat("界", 250) + "tail-secret"
 	snapshot := browserConsoleFinish(browserConsoleInfo{Name: "browser_snapshot", ID: "op-12345678"}, map[string]any{
 		"counts": map[string]any{"elements_found": float64(12), "elements_returned": 8, "dom_visited": int64(99)},

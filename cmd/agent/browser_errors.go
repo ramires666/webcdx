@@ -16,6 +16,7 @@ var browserFailureMessages = map[string]string{
 	"stale_generation":          "the DOM collection changed; restart pagination with a fresh revision",
 	"ambiguous_record":          "record IDs are not unique in the selected DOM collection",
 	"unstable_record":           "a selected record has no stable ID; choose an explicit ID attribute",
+	"download_conflict":         "the destination already contains different bytes; choose a new destination",
 	"cancelled":                 "browser operation was cancelled",
 	"cancelled_before_dispatch": "operation was cancelled before a browser side effect was sent",
 	"scope_changed":             "local browser access changed; obtain fresh state before continuing",

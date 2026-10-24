@@ -116,6 +116,14 @@ func browserJS(value any) string { data, _ := json.Marshal(value); return string
 
 func (b *browserManager) snapshot(ctx context.Context, t *browserTab, args map[string]any) (any, error) {
 	ctx = withBrowserFrameReads(ctx)
+	if selector, _ := optionalString(args, "record_selector"); selector != "" {
+		return b.readBrowserRecords(ctx, t, args)
+	}
+	for _, field := range []string{"id_attribute", "text_selector", "author_selector", "time_selector", "attachment_selector", "page_size", "page_token"} {
+		if _, present := args[field]; present {
+			return nil, toolErr("invalid_arguments", "record pagination options require record_selector")
+		}
+	}
 	frameID, _ := optionalString(args, "frame_id")
 	id := browserID("snapshot_")
 	container, _ := optionalString(args, "container_selector")
@@ -287,6 +295,9 @@ func (b *browserManager) interact(ctx context.Context, s *browserSession, t *bro
 		return map[string]any{}, nil
 	}
 	if action == "scroll" {
+		if container, _ := optionalString(args, "container_selector"); container != "" {
+			return b.scrollBrowserContainer(ctx, t, args)
+		}
 		x, err := optionalInt(args, "x", 0, -100000, 100000)
 		if err != nil {
 			return nil, err
@@ -491,6 +502,11 @@ func (b *browserManager) tabAction(ctx context.Context, name string, s *browserS
 		return nil, err
 	}
 	u, _ := page["url"].(string)
+	if frame == "" {
+		if trace, _ := ctx.Value(browserConsoleContextKey{}).(*browserConsoleTrace); trace != nil {
+			trace.info.URL = u
+		}
+	}
 	switch name {
 	case "browser_navigate":
 		action, _ := requiredString(args, "action")

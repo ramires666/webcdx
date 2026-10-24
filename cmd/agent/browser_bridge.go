@@ -109,6 +109,7 @@ func (b *browserManager) startBridge(path string) error {
 	b.listener = listener
 	b.bridgePath = path
 	b.bridgePeers = map[io.ReadWriteCloser]bool{}
+	b.urlChecks = newBrowserURLChecks(func(ctx context.Context, raw string) bool { return b.checkURLContext(ctx, raw) == nil })
 	b.bridgeWG.Add(1)
 	go func() {
 		defer b.bridgeWG.Done()
@@ -143,6 +144,8 @@ func (b *browserManager) startBridge(path string) error {
 
 func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browserBridgeDescriptor) {
 	defer conn.Close()
+	connectionCtx, stopConnection := context.WithCancel(context.Background())
+	defer stopConnection()
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 65536), browserBridgeMax)
 	timer := time.AfterFunc(5*time.Second, func() { conn.Close() })
@@ -215,9 +218,19 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 			if len(message.URL) > 16384 {
 				return
 			}
-			allowed := b.checkURL(message.URL) == nil
-			if err := link.send(browserBridgeMessage{Kind: "url_result", ID: message.ID, Allowed: allowed}); err != nil {
-				return
+			id, rawURL := message.ID, message.URL
+			link.mu.Lock()
+			epoch := link.scopeEpoch
+			link.mu.Unlock()
+			// Full queues fail closed through the extension's bounded URL check
+			// timeout. DNS and slow writes never stall the shared IPC reader.
+			if b.urlChecks != nil {
+				b.urlChecks.submit(connectionCtx, rawURL, func(allowed bool) {
+					link.mu.Lock()
+					allowed = allowed && !link.closed && !link.paused && link.scopeEpoch == epoch
+					link.mu.Unlock()
+					_ = link.sendContext(connectionCtx, browserBridgeMessage{Kind: "url_result", ID: id, Allowed: allowed})
+				})
 			}
 		case "response", "cancel_ack":
 			link.mu.Lock()

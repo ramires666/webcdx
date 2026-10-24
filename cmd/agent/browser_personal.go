@@ -113,6 +113,7 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 		return nil, err
 	}
 	defer release()
+	defer s.publishReadCatalog()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -208,6 +209,7 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 // Catalog permitted tabs without attaching debuggers or reading page contents.
 // The extension attaches a debugger only when a tool actually uses that tab.
 func (b *browserManager) syncPersonalTabs(s *browserSession) []browserPersonalTab {
+	defer s.publishReadCatalog()
 	s.personal.mu.Lock()
 	defer s.personal.mu.Unlock()
 	approved := append([]browserPersonalTab{}, s.personal.tabs...)
@@ -389,14 +391,7 @@ func (b *browserManager) personalFiles(ctx context.Context, s *browserSession, t
 		if err != nil {
 			return nil, err
 		}
-		data, info, err := readRegularFile(resolved, 64<<20)
-		if err != nil {
-			return nil, err
-		}
-		if err := atomicCreate(destination, data); err != nil {
-			return nil, err
-		}
-		return map[string]any{"path": destination, "download_id": id, "bytes": info.Size()}, nil
+		return saveBrowserDownloadedFile(resolved, destination, id)
 	}
 	return nil, toolErr("download_not_ready", "personal download has not completed")
 }

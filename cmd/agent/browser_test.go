@@ -188,9 +188,20 @@ func TestBrowserManagedEndToEnd(t *testing.T) {
 	if err != nil || string(data) != "test report" {
 		t.Fatalf("download: %s %v", data, err)
 	}
-	if _, err := b.call(ctx, "browser_files", args(map[string]any{"action": "save_download", "download_id": downloads[0].ID, "path": destination, "request_key": "save-overwrite"})); err == nil {
-		t.Fatal("download overwrote existing file")
+	before, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
 	}
+	repeated := call("browser_files", args(map[string]any{"action": "save_download", "download_id": downloads[0].ID, "path": destination, "request_key": "save-repeat"})).(map[string]any)
+	after, err := os.Stat(destination)
+	if err != nil || repeated["duplicate"] != true || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("repeated save rewrote a verified download: %v %v", repeated, err)
+	}
+	if err := os.WriteFile(destination, []byte("different user file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = b.call(ctx, "browser_files", args(map[string]any{"action": "save_download", "download_id": downloads[0].ID, "path": destination, "request_key": "save-conflict"}))
+	browserErrorCode(t, err, "download_conflict")
 	call("browser_interact", args(map[string]any{"action": "click", "selector": "#popup", "request_key": "popup"}))
 	tabs := call("browser_tabs", args(map[string]any{"action": "list"})).(map[string]any)
 	for deadline := time.Now().Add(3 * time.Second); len(tabs["tabs"].([]map[string]any)) < 2 && time.Now().Before(deadline); {
