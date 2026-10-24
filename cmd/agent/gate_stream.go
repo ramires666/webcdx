@@ -80,9 +80,10 @@ func handleRequest(
 	actionDesc := formatActionRequest(request.Request)
 	executor, _ := runner.(*nativeExecutor)
 	debug := executor != nil && executor.verbose
+	browserLog := executor != nil && browserConsoleRequest(request.Request)
 	if debug {
 		log.Printf("▶ %s (id=%s, bytes=%d)", actionDesc, request.ID, len(request.Request))
-	} else if actionDesc != "" {
+	} else if actionDesc != "" && !browserLog {
 		log.Print("▶ " + strings.TrimSpace(actionDesc))
 	}
 
@@ -98,7 +99,7 @@ func handleRequest(
 	actionResult := formatActionResponse(response, err)
 	if debug {
 		log.Printf("◀ %s (id=%s, elapsed=%s)", actionResult, request.ID, time.Since(started).Round(time.Millisecond))
-	} else if actionResult != "" {
+	} else if actionResult != "" && !browserLog {
 		if actionDesc == "" {
 			log.Printf("⚠ %s", actionResult)
 		} else {

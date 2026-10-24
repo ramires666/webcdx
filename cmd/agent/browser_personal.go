@@ -116,6 +116,7 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 	if s.selected == "" {
 		return nil, toolErr("waiting_user", "open a permitted website in the connected browser")
 	}
+	browserConsoleBind(ctx, s, s.tabs[s.selected])
 	if raw, _ := optionalString(args, "url"); raw != "" {
 		if err := b.checkURL(raw); err != nil {
 			return nil, err

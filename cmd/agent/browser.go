@@ -9,7 +9,6 @@ import (
 	"image"
 	"image/jpeg"
 	"io"
-	"log"
 	"net"
 	"net/url"
 	"os"
@@ -83,6 +82,7 @@ type browserTab struct {
 	nativeTabID             int
 	personalReady           bool
 	frameContexts           map[string]context.Context
+	pageTitle, pageURL      string // cached display metadata, protected by eventMu
 }
 
 type browserOperation struct {
@@ -206,7 +206,14 @@ func browserMutation(name string, args map[string]any) bool {
 	return name == "browser_open" || name == "browser_navigate" || name == "browser_interact" || name == "browser_files" && args["action"] != "downloads" || name == "browser_tabs" && args["action"] != "list"
 }
 
-func (b *browserManager) call(ctx context.Context, name string, args map[string]any) (any, error) {
+func (b *browserManager) call(ctx context.Context, name string, args map[string]any) (value any, callErr error) {
+	trace := newBrowserConsoleTrace(name, args)
+	async := false
+	defer func() {
+		if !async {
+			trace.finish(value, callErr, "", "")
+		}
+	}()
 	if ctx.Err() != nil {
 		return nil, toolErr("cancelled", "browser request already expired")
 	}
@@ -253,6 +260,7 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 				return nil, toolErr("request_key_conflict", "key was used with different arguments")
 			}
 			b.mu.Unlock()
+			trace.replay(op.ID)
 			return b.await(ctx, op)
 		}
 	}
@@ -268,7 +276,7 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 	}
 	b.trimOperations(browserOperationCacheMax - 1)
 	opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	op := &browserOperation{ID: browserID("bop_"), KeyHash: keyHash, Hash: hash, Status: "running", Phase: "reserved", execution: &browserExecutionState{}, At: time.Now().UTC(), done: make(chan struct{}), cancel: cancel}
+	op := &browserOperation{ID: trace.info.ID, KeyHash: keyHash, Hash: hash, Status: "running", Phase: "reserved", execution: &browserExecutionState{}, At: time.Now().UTC(), done: make(chan struct{}), cancel: cancel}
 	if err := b.saveOperation(op); err != nil {
 		b.mu.Unlock()
 		cancel()
@@ -276,9 +284,12 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 	}
 	b.operations[op.ID] = op
 	b.mu.Unlock()
+	requestInfo := trace.info
+	async = true
 	go func() {
 		defer cancel()
 		executionCtx := context.WithValue(context.WithValue(opCtx, browserOperationContext{}, op.ID), browserExecutionContext{}, op.execution)
+		executionCtx = context.WithValue(executionCtx, browserConsoleContextKey{}, trace)
 		result, err := b.execute(executionCtx, name, args)
 		b.mu.Lock()
 		op.Status = "completed"
@@ -318,15 +329,15 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 			op.Phase = "unknown"
 			op.setFailureCode("outcome_unknown")
 		}
-		if b.executor.verbose {
-			log.Printf("[browser operation=%s] %s status=%s error_code=%s", op.ID, name, op.Status, op.ErrorCode)
-		} else if op.Status == "failed" || op.ErrorCode != "" {
-			log.Printf("⚠ %s: %s", strings.TrimSpace(describeToolCall(name, args)), readableError(map[string]any{"code": op.ErrorCode}))
-		}
-		close(op.done)
 		b.mu.Unlock()
+		trace.finish(op.Result, nil, op.Status, op.ErrorCode)
+		close(op.done)
 	}()
-	return b.await(ctx, op)
+	value, callErr = b.await(ctx, op)
+	if result, ok := value.(map[string]any); ok && result["status"] == "running" {
+		browserConsolePending(requestInfo, result)
+	}
+	return value, callErr
 }
 
 func (b *browserManager) await(ctx context.Context, op *browserOperation) (any, error) {
@@ -638,6 +649,7 @@ func (b *browserManager) open(ctx context.Context, args map[string]any) (any, er
 		s.cancel()
 		return nil, err
 	}
+	browserConsoleBind(ctx, s, tab)
 	if raw, _ := optionalString(args, "url"); raw != "" {
 		if err := b.checkURL(raw); err != nil {
 			s.cancel()
@@ -805,6 +817,7 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 	if t == nil {
 		return nil, toolErr("unknown_tab", "tab is not in this browser session")
 	}
+	browserConsoleBind(callCtx, s, t)
 	if name == "browser_tabs" {
 		return b.tabs(callCtx, s, t, args)
 	}
