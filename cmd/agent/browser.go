@@ -162,7 +162,7 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 		}
 		if op.Status == "running" {
 			op.Status = "failed"
-			op.ErrorCode = "outcome_unknown"
+			op.setFailureCode("outcome_unknown")
 		}
 		op.done = make(chan struct{})
 		close(op.done)
@@ -282,11 +282,10 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 			op.fail(err, args)
 			if opCtx.Err() != nil {
 				op.Status = "cancelled"
-				op.ErrorCode = "cancelled"
+				op.setFailureCode("cancelled")
 				if keyHash != "" {
-					op.ErrorCode = "outcome_unknown"
+					op.setFailureCode("outcome_unknown")
 				}
-				op.ErrorMessage = browserFailureMessage(op.ErrorCode)
 			}
 		} else if img, ok := result.(browserImage); ok {
 			op.Result, op.image = img.Result, img.Data
@@ -298,8 +297,7 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		}
 		if err := b.saveOperation(op); err != nil {
 			op.Status = "failed"
-			op.ErrorCode = "outcome_unknown"
-			op.ErrorMessage = browserFailureMessage(op.ErrorCode)
+			op.setFailureCode("outcome_unknown")
 		}
 		if b.executor.verbose {
 			log.Printf("[browser operation=%s] %s status=%s error_code=%s", op.ID, name, op.Status, op.ErrorCode)

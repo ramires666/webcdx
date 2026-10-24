@@ -52,7 +52,8 @@ func (b *browserManager) loadOperation(id string) (*browserOperation, error) {
 		return nil, os.ErrNotExist
 	}
 	if op.Status == "running" {
-		op.Status, op.ErrorCode = "failed", "outcome_unknown"
+		op.Status = "failed"
+		op.setFailureCode("outcome_unknown")
 	}
 	op.done = make(chan struct{})
 	close(op.done)

@@ -138,11 +138,8 @@ func browserErrorContext(err error, args map[string]any) error {
 
 func (op *browserOperation) fail(err error, args map[string]any) {
 	failure := browserErrorContext(err, args).(*codedError)
-	op.ErrorCode = failure.code
 	// Persist only safe diagnostics and IDs, never raw exception/cause strings.
-	op.ErrorMessage = browserFailureMessage(failure.code)
-	op.ErrorDetails = map[string]any{"operation_id": op.ID}
-	op.ErrorDetails["recovery"] = browserErrorRecovery(failure.code)
+	op.setFailureCode(failure.code)
 	for key, value := range failure.details {
 		switch key {
 		case "browser_session_id", "tab_id", "frame_id", "snapshot_id", "matches", "verification_error_code":
@@ -151,6 +148,18 @@ func (op *browserOperation) fail(err error, args map[string]any) {
 			op.errorTransient = map[string]any{"options": value}
 		}
 	}
+}
+
+func (op *browserOperation) setFailureCode(code string) {
+	op.ErrorCode = code
+	op.ErrorMessage = browserFailureMessage(code)
+	if op.ErrorDetails == nil {
+		op.ErrorDetails = map[string]any{}
+	}
+	if _, ok := op.ErrorDetails["operation_id"]; !ok {
+		op.ErrorDetails["operation_id"] = op.ID
+	}
+	op.ErrorDetails["recovery"] = browserErrorRecovery(code)
 }
 
 func browserErrorRecovery(code string) string {
