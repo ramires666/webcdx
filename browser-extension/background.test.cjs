@@ -23,7 +23,7 @@ async function environment(options = {}) {
       onCreated:event(),onUpdated:event(),onRemoved:event(),onActivated:event(),remove:async id=>tabs.delete(id),create:async({url})=>{const tab=options.pendingCreate?{id:100+tabs.size,url:'',pendingUrl:url}:{id:100+tabs.size,url};tabs.set(tab.id,tab);return tab}},
     debugger:{onDetach:event(),onEvent:event(),attach:async source=>{debuggerAttaches.push(source.tabId);if(options.attach)await options.attach()},detach:async()=>{},sendCommand:async(source,method,params)=>{commands.push({source,method,params});return {ok:true}}},
     downloads:{onDeterminingFilename:event(),onChanged:event(),cancel:async()=>{}}};
-  const context = vm.createContext({chrome,URL,Map,Set,Promise,crypto:crypto.webcrypto,navigator:{userAgent:options.userAgent||"Chrome/Test"},
+  const context = vm.createContext({chrome,URL,Map,Set,Promise,TextEncoder,crypto:crypto.webcrypto,navigator:{userAgent:options.userAgent||"Chrome/Test"},
     setTimeout:(fn,ms)=>{timers.set(++timerID,{fn,ms});return timerID},clearTimeout:id=>timers.delete(id)});
   vm.runInContext(fs.readFileSync(`${__dirname}/background.js`,'utf8'),context);
   context.sent=sent;
@@ -44,6 +44,13 @@ test('manifest public key matches the native host extension ID',()=>{
   const id=[...hex].map(x=>String.fromCharCode(97+parseInt(x,16))).join('');
   assert.equal(id,'pmobmihkpbblajdanleplliihfmcdmpp');
   assert.equal(manifest.manifest_version,3);
+});
+test('native messages enforce the 900000-byte UTF-8 JSON limit',async()=>{
+  const e=await environment();
+  assert.doesNotThrow(()=>e.run(`post({data:'a'.repeat(899989)})`)); // JSON overhead is 11 bytes.
+  assert.throws(()=>e.run(`post({data:'a'.repeat(899990)})`),/exceeds limit/);
+  assert.throws(()=>e.run(`post({data:String.fromCodePoint(1046).repeat(450000)})`),/exceeds limit/);
+  assert.throws(()=>e.run(`post({data:String.fromCodePoint(0x1f600).repeat(225000)})`),/exceeds limit/);
 });
 test('URL and exact-tab scope reject forbidden navigation and raw methods',async()=>{
   const e=await environment();

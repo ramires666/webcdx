@@ -46,7 +46,8 @@ async function createTaskTab(scope) {
 }
 function post(message) {
   if (!port) throw Error('Native bridge disconnected');
-  if (JSON.stringify(message).length > 900000) throw Error('Native response exceeds limit');
+  const serialized = JSON.stringify(message);
+  if (new TextEncoder().encode(serialized).byteLength > 900000) throw Error('Native response exceeds limit');
   port.postMessage(message);
 }
 function publishIdentity(){if(port&&connected)post({kind:'identity',profile_id:profileID,alias:profileAlias,product:browserProduct});}
