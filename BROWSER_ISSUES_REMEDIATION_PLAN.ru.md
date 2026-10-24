@@ -4,11 +4,11 @@
 
 Исходный материал: `W:\_python\linkedin_profile_audit_20261024\LINKEDIN_BROWSER_AUTOMATION_ISSUES.md`, включая дополнения 18.1 и 18.2. Проверен код WebCodex на базе `b29af1e`. Версии бинарников Gate/agent и расширения, реально использовавшихся на Jinn, в отчёте отсутствуют: совпадение с текущими исходниками ещё нужно подтвердить.
 
-Это результат анализа и план реализации. Исправления поведения инструментов в рамках этого этапа не выполнялись. До начала анализа в рабочем дереве уже было изменение `fill(contenteditable)` в `cmd/agent/browser_page.go`; оно не входит в этот документ и не считается проверенным исправлением описанных ошибок.
+Исходный анализ ниже относится к `b29af1e`. **Этапы 1–8 реализованы и отправлены в main**; результаты и границы автоматической приёмки — в [BROWSER_RELIABILITY_ACCEPTANCE.ru.md](BROWSER_RELIABILITY_ACCEPTANCE.ru.md), состояние этапов — в разделе 6. До начала анализа в рабочем дереве уже было изменение `fill(contenteditable)`; оно доработано и проверено в отдельном этапе 3.
 
 ## 1. Основные выводы и приоритеты
 
-Подтверждены четыре недостатка текущего кода:
+В исходной версии подтверждены четыре недостатка:
 
 1. `eval()` превращает любые JavaScript exceptions в `stale_element`, включая неверный option, неоднозначный locator, disabled и перекрытый элемент. Это напрямую объясняет ложный `stale_element` при `value="October"`.
 2. Исходная причина ошибки теряется в журнале browser operation. Наружу остаются код и строка `browser operation ended: bop_…`, без полезного контекста.
@@ -268,3 +268,4 @@ Managed browser tests включаются отдельно через `WEBCODEX
 - **Этап 6 завершён:** interaction поддерживает bounded verify_selector/verify_text; после отправленного, но неподтверждённого действия возвращается state_verification_failed, без повторного dispatch. Добавлены инструкции клиентам и порядок работы с черновиком/primary save/media. Локальные тесты preview 500/timeout, Back, сохранности полей, status и повторного request_key прошли; submit остался единственным. Внутренний preview LinkedIn не менялся.
 - **Этап 7 завершён:** реестр до 8 одновременных IPC-подключений, локальная persistent profile identity/alias, discover через browser_control, явный выбор профиля/product/origin, title/window metadata и отказ при неоднозначности. Windows pipe допускает несколько клиентов при эксклюзивном владении listener; stale connections не становятся fallback. Реальные IPC-тесты двух профилей, reconnect, pause isolation и race detector прошли; 19 тестов расширения прошли. Product — сообщаемое семейство, window_id — API ID; PID и глобальный список окон не заявляются.
 - **Этап 8 завершён:** JPEG содержит размеры до/после масштабирования, bytes, capture mode и явные payload/artifact availability. Дополнительно исправлен full-page capture: добавлены JSON tags width/height, без которых layout декодировался в нули. Проверены шумовой full-page fixture, downscale, status, metadata без payload, удалённый artifact и декодирование JPEG через реальный Gate → agent. Рендер в пользовательском MCP-клиенте остаётся ручной приёмкой.
+- **Этап 9 — автоматическая приёмка завершена:** общий прогон Chrome 142 pass / 0 fail, Edge 10 / 0, расширение 19 / 0, go vet, targeted race и cross-compile Linux agent/Gate прошли. Подготовлено расширение 1.2.0 и инструкция обновления. Рабочая установка Jinn, Linux GUI, рендер в целевом MCP-клиенте и реальные preview/reorder LinkedIn не проверялись; развёртывание в этой работе не выполнялось.
