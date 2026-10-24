@@ -5,11 +5,23 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime/debug"
 )
 
 var errBrowserJournalCorrupt = errors.New("invalid browser operation journal")
 
 const browserJournalRecordMax = 1 << 20
+
+func browserAgentVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" && setting.Value != "" {
+				return setting.Value[:min(12, len(setting.Value))]
+			}
+		}
+	}
+	return "development"
+}
 
 func browserEmptyManager(e *nativeExecutor, config browserConfig) *browserManager {
 	return &browserManager{config: config, executor: e, sessions: map[string]*browserSession{}, operations: map[string]*browserOperation{}, journal: map[string]browserJournalEntry{}}

@@ -17,6 +17,14 @@ func validBrowserAlias(alias string) bool {
 }
 
 func (b *browserManager) identifyBrowser(link *browserBridge, message browserBridgeMessage) bool {
+	if len(message.Capabilities) > 16 || len(message.ExtensionVersion) > 32 {
+		return false
+	}
+	for _, capability := range message.Capabilities {
+		if len(capability) > 64 || strings.Trim(capability, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+			return false
+		}
+	}
 	if message.CommandProtocol < 0 || message.CommandProtocol > browserCommandProtocol {
 		return false
 	}
@@ -48,6 +56,8 @@ func (b *browserManager) identifyBrowser(link *browserBridge, message browserBri
 	}
 	link.profileID, link.alias, link.product = message.ProfileID, message.Alias, message.Product
 	link.commandProtocol = message.CommandProtocol
+	link.capabilities = append([]string(nil), message.Capabilities...)
+	link.extensionVersion = message.ExtensionVersion
 	return true
 }
 
@@ -78,6 +88,9 @@ func personalTargetOrigin(args map[string]any) (string, error) {
 
 func (b *browserManager) choosePersonal(args map[string]any, origin string) (*browserBridge, error) {
 	matched := []*browserBridge{}
+	profiles := 0
+	exactURL, _ := optionalString(args, "exact_url")
+	windowID, _ := optionalInt(args, "window_id", 0, 0, 2147483647)
 	for _, link := range b.personalConnections() {
 		link.mu.Lock()
 		match := !link.closed
@@ -95,12 +108,22 @@ func (b *browserManager) choosePersonal(args map[string]any, origin string) (*br
 			}
 			match = match && found
 		}
+		if match {
+			profiles++
+		}
+		if exactURL != "" {
+			_, err := chooseBrowserExistingTab(link.tabs, exactURL, windowID)
+			match = match && err == nil
+		}
 		link.mu.Unlock()
 		if match {
 			matched = append(matched, link)
 		}
 	}
 	if len(matched) == 0 {
+		if exactURL != "" && profiles != 0 {
+			return nil, toolErr("tab_not_found", "no approved tab matches the exact URL and window")
+		}
 		return nil, toolErr("browser_not_found", "no connected personal browser matches; use browser_control action=discover")
 	}
 	if len(matched) != 1 {
@@ -127,14 +150,14 @@ func (b *browserManager) discoverPersonal() map[string]any {
 		if product == "" {
 			product = "unknown"
 		}
-		browsers = append(browsers, map[string]any{"connection_id": link.id, "profile_id": link.profileID, "alias": link.alias, "product": product, "paused": link.paused, "identified": link.profileID != "", "tabs": tabs})
+		browsers = append(browsers, map[string]any{"connection_id": link.id, "profile_id": link.profileID, "alias": link.alias, "product": product, "paused": link.paused, "identified": link.profileID != "", "tabs": tabs, "extension_version": link.extensionVersion, "capabilities": append([]string{}, link.capabilities...)})
 		link.mu.Unlock()
 	}
 	sort.Slice(browsers, func(i, j int) bool {
 		return browsers[i]["connection_id"].(string) < browsers[j]["connection_id"].(string)
 	})
 	health, reason := b.healthLocked()
-	result := map[string]any{"status": "ready", "truncated": false, "browsers": browsers, "health": health, "health_reason": reason}
+	result := map[string]any{"status": "ready", "truncated": false, "browsers": browsers, "health": health, "health_reason": reason, "agent_version": browserAgentVersion()}
 	for {
 		encoded, _ := json.Marshal(result)
 		if len(encoded) <= 64<<10 {

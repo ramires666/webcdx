@@ -9,12 +9,49 @@ import (
 )
 
 func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) (any, error) {
+	reuseOnly, _, err := optionalBool(args, "reuse_only")
+	if err != nil {
+		return nil, err
+	}
+	exactURL, _ := optionalString(args, "exact_url")
+	requestedURL, _ := optionalString(args, "url")
+	if reuseOnly && exactURL == "" {
+		exactURL = requestedURL
+	}
+	windowID, err := optionalInt(args, "window_id", 0, 0, 2147483647)
+	if err != nil {
+		return nil, err
+	}
+	selectionArgs := args
+	if exactURL != "" {
+		reuseOnly = true
+		canonical, err := canonicalBrowserExistingURL(exactURL)
+		if err != nil {
+			return nil, toolErr("invalid_arguments", "exact_url must be an HTTP/HTTPS URL without credentials")
+		}
+		if requestedURL != "" {
+			other, err := canonicalBrowserExistingURL(requestedURL)
+			if err != nil || other != canonical {
+				return nil, toolErr("invalid_arguments", "url and exact_url must identify the same existing tab")
+			}
+		}
+		if err := b.checkURL(canonical); err != nil {
+			return nil, err
+		}
+		selectionArgs = map[string]any{}
+		for key, value := range args {
+			selectionArgs[key] = value
+		}
+		selectionArgs["exact_url"] = canonical
+	} else if reuseOnly || windowID != 0 {
+		return nil, toolErr("invalid_arguments", "reuse_only and window_id require exact_url or url")
+	}
 	origin, err := personalTargetOrigin(args)
 	if err != nil {
 		return nil, err
 	}
 	b.mu.Lock()
-	link, err := b.choosePersonal(args, origin)
+	link, err := b.choosePersonal(selectionArgs, origin)
 	if err != nil {
 		b.mu.Unlock()
 		return nil, err
@@ -25,6 +62,9 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 	link.mu.Unlock()
 	if available == 0 && !paused {
 		b.mu.Unlock()
+		if reuseOnly {
+			return nil, toolErr("tab_not_found", "the requested existing tab is not locally approved")
+		}
 		if err := link.call(ctx, 0, "WebCodex.prepare", map[string]any{}, nil); err != nil {
 			return nil, err
 		}
@@ -86,6 +126,10 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 		b.mu.Unlock()
 		return nil, toolErr("access_paused", "browser session paused or disconnected")
 	}
+	if s.boundOnly && !reuseOnly {
+		b.mu.Unlock()
+		return nil, toolErr("binding_changed", "reuse the exact existing target explicitly before changing this session")
+	}
 	callCtx, cancel := context.WithCancel(ctx)
 	s.active = cancel
 	b.mu.Unlock()
@@ -93,7 +137,19 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 	ctx = callCtx
 	ctx = link.bindAccess(ctx)
 	approved := b.syncPersonalTabs(s)
-	if origin != "" {
+	var choice browserExistingChoice
+	if reuseOnly {
+		choice, err = chooseBrowserExistingTab(approved, exactURL, windowID)
+		if err != nil {
+			return nil, err
+		}
+		for id, tab := range s.tabs {
+			if tab.nativeTabID == choice.Tab.ID {
+				s.selected = id
+				break
+			}
+		}
+	} else if origin != "" {
 		matches := []int{}
 		for _, tab := range approved {
 			if strings.ToLower(browserDiagnosticURL(tab.URL)) == origin {
@@ -117,7 +173,14 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 		return nil, toolErr("waiting_user", "open a permitted website in the connected browser")
 	}
 	browserConsoleBind(ctx, s, s.tabs[s.selected])
-	if raw, _ := optionalString(args, "url"); raw != "" {
+	var proof map[string]any
+	if reuseOnly {
+		proof, err = b.verifyExistingBinding(ctx, s, s.tabs[s.selected], choice)
+		if err != nil {
+			return nil, err
+		}
+		s.boundOnly = true
+	} else if raw, _ := optionalString(args, "url"); raw != "" {
 		if err := b.checkURL(raw); err != nil {
 			return nil, err
 		}
@@ -135,7 +198,11 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 	if product == "" {
 		product = "unknown"
 	}
-	return map[string]any{"browser_session_id": s.id, "tab_id": s.selected, "mode": "personal", "status": "ready", "truncated": false, "profile_id": profile, "browser_alias": alias, "product": product, "connection_id": connection}, nil
+	result := map[string]any{"browser_session_id": s.id, "tab_id": s.selected, "mode": "personal", "status": "ready", "truncated": false, "profile_id": profile, "browser_alias": alias, "product": product, "connection_id": connection, "binding_verified": false, "readable": false, "auth_state": "unverified"}
+	for key, value := range proof {
+		result[key] = value
+	}
+	return result, nil
 }
 
 // Catalog permitted tabs without attaching debuggers or reading page contents.
@@ -211,8 +278,10 @@ func (b *browserManager) personalTabs(ctx context.Context, s *browserSession, t 
 		if err := b.setupTab(ctx, t); err != nil {
 			return nil, err
 		}
-		if err := t.command(ctx, "Page.bringToFront", map[string]any{}, nil); err != nil {
-			return nil, err
+		if args["focus_policy"] == "activate" {
+			if err := t.command(ctx, "Page.bringToFront", map[string]any{}, nil); err != nil {
+				return nil, err
+			}
 		}
 		s.selected = t.id
 	case "close":

@@ -50,6 +50,7 @@ type browserManager struct {
 	artifactMu      sync.Mutex
 	pendingCleanups []<-chan struct{}
 	healthReason    string
+	journalWriter   *browserJournalWriter
 	cacheBytes      int64
 }
 
@@ -64,6 +65,7 @@ type browserSession struct {
 	paused, disconnected bool
 	active               context.CancelFunc
 	personal             *browserBridge
+	boundOnly            bool // strict existing-tab tasks require explicit binding on subsequent page calls
 	downloadMu           sync.Mutex
 	downloads            map[string]*browserDownload
 }
@@ -88,6 +90,7 @@ type browserTab struct {
 	frameContexts           map[string]context.Context
 	pageTitle, pageURL      string // cached display metadata, protected by eventMu
 	frameEpoch              uint64
+	targetBinding           *browserTargetBinding
 }
 
 type browserOperation struct {
@@ -190,6 +193,7 @@ func newBrowserManager(e *nativeExecutor, config browserConfig) (*browserManager
 		}
 	}
 	b.startOperationCleanup()
+	b.journalWriter = newBrowserJournalWriter(func(path string, data []byte) error { return atomicWrite(path, data, false) })
 	return b, nil
 }
 
@@ -200,6 +204,9 @@ func (b *browserManager) saveOperation(op *browserOperation) error {
 	data, err := json.Marshal(op)
 	if err != nil {
 		return err
+	}
+	if len(data) > browserJournalRecordMax {
+		return errBrowserJournalRecordLarge
 	}
 	if err := atomicWrite(filepath.Join(b.config.Dir, "operations", op.ID+".json"), data, false); err != nil {
 		return err
@@ -288,13 +295,20 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		b.mu.Unlock()
 		return nil, toolErr("limit_reached", "128 browser operations are running; wait for an operation to finish")
 	}
+	var reservation *browserJournalSlot
+	if keyHash != "" {
+		var available bool
+		reservation, available = b.journalWriter.tryReserve()
+		if !available {
+			b.mu.Unlock()
+			return nil, toolErr("browser_busy", "browser journal writer is busy")
+		}
+	}
 	b.trimOperations(browserOperationCacheMax - 1)
 	opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	op := &browserOperation{ID: trace.info.ID, KeyHash: keyHash, Hash: hash, Status: "running", Phase: "reserved", execution: &browserExecutionState{}, At: time.Now().UTC(), done: make(chan struct{}), cancel: cancel}
-	if err := b.saveOperation(op); err != nil {
-		b.mu.Unlock()
-		cancel()
-		return nil, toolErr("io_error", "reserve browser operation", err)
+	if keyHash != "" {
+		b.journal[keyHash] = browserJournalEntry{ID: op.ID, At: op.At}
 	}
 	b.cacheOperation(op)
 	b.mu.Unlock()
@@ -304,48 +318,23 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		defer cancel()
 		executionCtx := context.WithValue(context.WithValue(opCtx, browserOperationContext{}, op.ID), browserExecutionContext{}, op.execution)
 		executionCtx = context.WithValue(executionCtx, browserConsoleContextKey{}, trace)
-		result, err := b.execute(executionCtx, name, args)
-		b.mu.Lock()
-		op.Status = "completed"
-		op.Phase = "completed"
-		if err != nil {
-			op.Phase = "not_dispatched"
-			if op.execution.dispatched.Load() {
-				op.Phase = "dispatch_started"
+		var result any
+		var err error
+		if reservation != nil {
+			data, encodeErr := json.Marshal(op)
+			if encodeErr != nil {
+				reservation.release()
+				err = encodeErr
+			} else {
+				err = reservation.write(opCtx, filepath.Join(b.config.Dir, "operations", op.ID+".json"), data)
 			}
-			op.Status = "failed"
-			op.fail(err, args)
-			if keyHash != "" && op.execution.dispatched.Load() && browserUncertainTransport(op.ErrorCode) {
-				op.setFailureCode("outcome_unknown")
-			}
-			if opCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				op.Status = "cancelled"
-				op.setFailureCode("cancelled")
-				if keyHash != "" {
-					if op.execution.dispatched.Load() {
-						op.setFailureCode("outcome_unknown")
-					} else {
-						op.setFailureCode("cancelled_before_dispatch")
-					}
-				}
-			}
-		} else if img, ok := result.(browserImage); ok {
-			op.Result, op.image = img.Result, img.Data
-		} else {
-			op.Result, _ = result.(map[string]any)
 		}
-		if op.Result != nil {
-			op.Result["operation_id"] = op.ID
-			op.Result["phase"] = op.Phase
+		if err == nil {
+			result, err = b.execute(executionCtx, name, args)
+		} else if opCtx.Err() == nil {
+			err = toolErr("io_error", "browser operation could not be reserved")
 		}
-		if err := b.saveOperation(op); err != nil {
-			op.Status = "failed"
-			op.Phase = "unknown"
-			op.setFailureCode("outcome_unknown")
-		}
-		b.cacheOperation(op)
-		b.trimOperations(browserOperationCacheMax)
-		b.mu.Unlock()
+		b.finishBrowserOperation(opCtx, op, args, result, err)
 		trace.finish(op.Result, nil, op.Status, op.ErrorCode)
 		close(op.done)
 	}()
@@ -556,6 +545,9 @@ func (b *browserManager) checkURL(raw string) error {
 }
 
 func (b *browserManager) open(ctx context.Context, args map[string]any) (any, error) {
+	if args["mode"] != "personal" && (args["reuse_only"] == true || args["exact_url"] != nil || args["window_id"] != nil) {
+		return nil, toolErr("invalid_arguments", "existing-tab targeting requires personal mode")
+	}
 	mode, err := requiredString(args, "mode")
 	if err != nil {
 		return nil, err
@@ -840,12 +832,37 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 		b.syncPersonalTabs(s)
 	}
 	tabID, _ := optionalString(args, "tab_id")
+	revision, _ := optionalString(args, "binding_revision")
+	if s.boundOnly && revision == "" {
+		return nil, toolErr("binding_changed", "this existing-tab session requires binding_revision")
+	}
+	if tabID == "" && revision != "" {
+		for id, candidate := range s.tabs {
+			candidate.eventMu.Lock()
+			match := candidate.targetBinding != nil && candidate.targetBinding.Revision == revision
+			candidate.eventMu.Unlock()
+			if match {
+				tabID = id
+				break
+			}
+		}
+		if tabID == "" {
+			return nil, toolErr("binding_changed", browserFailureMessage("binding_changed"))
+		}
+	}
 	if tabID == "" {
 		tabID = s.selected
 	}
 	t := s.tabs[tabID]
 	if t == nil {
 		return nil, toolErr("unknown_tab", "tab is not in this browser session")
+	}
+	callCtx, err = browserBindingContext(callCtx, s, t, revision)
+	if err != nil {
+		return nil, err
+	}
+	if revision != "" && (name == "browser_navigate" || name == "browser_tabs" && args["action"] != "list") {
+		return nil, toolErr("binding_changed", "rebind explicitly before changing the target of an existing-tab task")
 	}
 	browserConsoleBind(callCtx, s, t)
 	if name == "browser_tabs" {
@@ -948,10 +965,12 @@ func (b *browserManager) tabs(ctx context.Context, s *browserSession, t *browser
 		s.tabs[t.id] = t
 		s.selected = t.id
 	case "select":
-		s.selected = t.id
-		if err := t.command(ctx, "Page.bringToFront", map[string]any{}, nil); err != nil {
-			return nil, err
+		if args["focus_policy"] == "activate" {
+			if err := t.command(ctx, "Page.bringToFront", map[string]any{}, nil); err != nil {
+				return nil, err
+			}
 		}
+		s.selected = t.id
 	case "close":
 		if len(s.tabs) == 1 {
 			return nil, toolErr("last_tab", "disconnect the session to close its last tab")
@@ -1027,6 +1046,13 @@ func (b *browserManager) Close() {
 	b.bridgeWG.Wait()
 	for _, cancel := range cancels {
 		cancel()
+	}
+	if b.journalWriter != nil {
+		ctx, done := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := b.journalWriter.close(ctx); err != nil {
+			log.Print("⚠ Запись журнала браузера ещё завершается; исходы потребуют проверки при восстановлении")
+		}
+		done()
 	}
 }
 

@@ -17,6 +17,7 @@ let scopeScheduled = false, scopePublishing, scopeQueued;
 let settingsWrites = Promise.resolve(), ready, reconnectTimer, reconnectDelay = 2000, accessEpoch = 0;
 const methods = new Set(['Page.enable','Runtime.enable','Network.enable','Page.navigate','Page.getFrameTree','Page.createIsolatedWorld','Runtime.evaluate','Page.reload','Page.getNavigationHistory','Page.navigateToHistoryEntry','Page.bringToFront','Page.captureScreenshot','Page.getLayoutMetrics','Page.handleJavaScriptDialog','Input.dispatchMouseEvent','Input.dispatchKeyEvent','DOM.getFrameOwner','DOM.getBoxModel','DOM.setFileInputFiles','Accessibility.getFullAXTree']);
 methods.add('DOM.scrollIntoViewIfNeeded');
+methods.add('Input.insertText');
 
 function localHost(host) {
   return host === 'localhost' || !host.includes('.') || host.endsWith('.local') || /^(127|10)\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || host.startsWith('[');
@@ -53,7 +54,7 @@ function post(message) {
   if (new TextEncoder().encode(serialized).byteLength > 900000) throw Error('Native response exceeds limit');
   port.postMessage(message);
 }
-function publishIdentity(){if(port&&connected)post({command_protocol:commandProtocol,kind:'identity',profile_id:profileID,alias:profileAlias,product:browserProduct});}
+function publishIdentity(){if(port&&connected)post({command_protocol:commandProtocol,kind:'identity',profile_id:profileID,alias:profileAlias,product:browserProduct,extension_version:chrome.runtime.getManifest?.().version||'unknown',capabilities:['target_binding_v1','native_text_v1']});}
 function tabMetadata(tab){return {tab_id:tab.id,url:tabURL(tab),title:String(tab.title||'').slice(0,256),window_id:Number.isInteger(tab.windowId)&&tab.windowId>=0?tab.windowId:0,active:!!tab.active};}
 function saveAccess() {
   const access = {continuous, localPaused, allowNew};
@@ -222,12 +223,28 @@ async function attach(tab, scope,guard=()=>{}) {
     await scopeUpdate();
   } catch (error) { attached.delete(tab.id); await chrome.debugger.detach({tabId:tab.id}); throw error; }
 }
+function assertCommandTarget(message,tab){
+  if(message.expected_window_id!=null&&message.expected_window_id!==tab.windowId)throw Error('Command target changed');
+  if(message.expected_url){
+    let expected,actual;
+    try{expected=new URL(message.expected_url).href;actual=new URL(tabURL(tab)).href}catch{throw Error('Command target changed')}
+    if(expected!==actual)throw Error('Command target changed');
+  }
+}
+async function verifyCommandTarget(message,guard){
+  guard();
+  if(!message.expected_url&&message.expected_window_id==null)return;
+  let actual;
+  try{actual=await chrome.tabs.get(message.tab_id)}catch{throw Error('Bound tab is no longer available')}
+  guard();assertCommandTarget(message,actual);
+}
 async function execute(message,guard=()=>{}) {
   guard();
   if (paused || localPaused) throw Error('Local control paused');
   const method = message.method, params = message.params || {};
-  if (!methods.has(method) && !['WebCodex.prepare','WebCodex.newTab','WebCodex.closeTab','WebCodex.enableDownloads','WebCodex.frames','WebCodex.downloads'].includes(method)) throw Error('CDP method is not permitted');
+  if (!methods.has(method) && !['WebCodex.target','WebCodex.prepare','WebCodex.newTab','WebCodex.closeTab','WebCodex.enableDownloads','WebCodex.frames','WebCodex.downloads'].includes(method)) throw Error('CDP method is not permitted');
   if (method === 'WebCodex.prepare') {
+    if(message.expected_url||message.expected_window_id!=null)throw Error('Command target changed');
     if (!continuous || !connected) throw Error('Enable permanent access locally');
     await scopeUpdate();
     if (!available.size) {
@@ -235,10 +252,16 @@ async function execute(message,guard=()=>{}) {
     }
     return {};
   }
-  let tab = await chrome.tabs.get(message.tab_id);guard();
+  let tab = await chrome.tabs.get(message.tab_id);guard();assertCommandTarget(message,tab);
+  if(method==='WebCodex.target'){
+    const scope=attached.get(tab.id)||(continuous&&connected&&available.has(tab.id)?{publicWeb:true,created:false}:undefined);
+    if(!scope)throw Error('Tab is not locally attached');
+    if(!permitted(tabURL(tab),scope,scope.created))throw Error('Tab URL is outside the selected scope');
+    return tabMetadata(tab);
+  }
   if (!attached.has(tab.id) && continuous && connected && available.has(tab.id)) {
     await attach(tab,{origin:new URL(tabURL(tab)).origin,publicWeb:true,created:false},guard);
-    tab = await chrome.tabs.get(message.tab_id);guard();
+    tab = await chrome.tabs.get(message.tab_id);guard();assertCommandTarget(message,tab);
   }
   const scope = attached.get(message.tab_id);
   if (!scope) throw Error('Tab is not locally attached');
@@ -249,7 +272,7 @@ async function execute(message,guard=()=>{}) {
   }
   if (method === 'WebCodex.closeTab') {
     if (!scope.created) throw Error('Only tabs created for this task can be closed');
-    guard();attached.delete(tab.id); await chrome.tabs.remove(tab.id); await scopeUpdate(); return {};
+    await verifyCommandTarget(message,guard);attached.delete(tab.id); await chrome.tabs.remove(tab.id); await scopeUpdate(); return {};
   }
   if (method === 'WebCodex.enableDownloads') { if (!/^browser_[a-f0-9]{24}$/.test(params.session_id)) throw Error('Invalid session'); scope.downloadSession = params.session_id; return {}; }
   if (method === 'WebCodex.frames') {
@@ -266,9 +289,11 @@ async function execute(message,guard=()=>{}) {
   if (!methods.has(method)) throw Error('CDP method is not permitted');
   if (method === 'Page.navigate' && !permitted(params.url,scope)) throw Error('Navigation URL is outside selected scope');
   if (method === 'Page.navigateToHistoryEntry') { const history = await chrome.debugger.sendCommand({tabId:tab.id},'Page.getNavigationHistory'); const entry = history.entries.find(x => x.id === params.entryId); if (!entry || !permitted(entry.url,scope)) throw Error('History URL outside scope'); }
-  guard();
+  await verifyCommandTarget(message,guard);
   const sessionId = message.frame_id && childSessions.get(tab.id)?.get(message.frame_id);
-  return chrome.debugger.sendCommand(sessionId ? {tabId:tab.id,sessionId} : {tabId:tab.id},method,params);
+  const result=await chrome.debugger.sendCommand(sessionId ? {tabId:tab.id,sessionId} : {tabId:tab.id},method,params);
+  await verifyCommandTarget(message,guard);
+  return result;
 }
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (sender.id !== chrome.runtime.id || sender.tab) return false;

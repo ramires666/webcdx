@@ -29,6 +29,13 @@ func (b *browserManager) pageFrame(ctx context.Context, t *browserTab, wanted st
 		return nil, toolErr("unknown_frame", "frame does not belong to this tab")
 	}
 	u, _ := frame["url"].(string)
+	if binding, _ := ctx.Value(browserTargetContext{}).(*browserTargetBinding); binding != nil && wanted == "" {
+		observed, _ := canonicalBrowserExistingURL(u)
+		expected, _ := canonicalBrowserExistingURL(binding.URL)
+		if observed != expected {
+			return nil, toolErr("binding_changed", browserFailureMessage("binding_changed"))
+		}
+	}
 	if u != "about:blank" {
 		if err := b.checkURL(u); err != nil {
 			return nil, err
@@ -256,6 +263,17 @@ func (b *browserManager) locator(t *browserTab, args map[string]any) (string, er
 func (b *browserManager) interact(ctx context.Context, s *browserSession, t *browserTab, args map[string]any) (any, error) {
 	ctx = context.WithValue(ctx, browserUserGesture{}, true)
 	action, _ := requiredString(args, "action")
+	if mode, _ := optionalString(args, "input_mode"); mode != "" {
+		if action != "fill" {
+			return nil, toolErr("invalid_arguments", "input_mode is only supported for fill")
+		}
+		if mode == "native" {
+			if t.personal != nil && !t.personal.supports("native_text_v1") {
+				return nil, toolErr("protocol_upgrade_required", browserFailureMessage("protocol_upgrade_required"))
+			}
+			return b.fillNative(ctx, t, args)
+		}
+	}
 	frame, _ := optionalString(args, "frame_id")
 	if action == "dialog" {
 		accept, exists, err := optionalBool(args, "accept")
@@ -355,8 +373,10 @@ func (b *browserManager) interact(ctx context.Context, s *browserSession, t *bro
 	script := ""
 	switch action {
 	case "click":
-		if err := t.command(ctx, "Page.bringToFront", map[string]any{}, nil); err != nil {
-			return nil, err
+		if args["focus_policy"] == "activate" {
+			if err := t.command(ctx, "Page.bringToFront", map[string]any{}, nil); err != nil {
+				return nil, err
+			}
 		}
 		x, y, err := b.elementPoint(ctx, t, frame, locator)
 		if err != nil {
@@ -394,7 +414,7 @@ func (b *browserManager) interact(ctx context.Context, s *browserSession, t *bro
 		if !ok {
 			return nil, toolErr("invalid_arguments", "unsupported key")
 		}
-		if err := b.eval(ctx, t, frame, `(()=>{`+locator+`el.focus();return true})()`, nil); err != nil {
+		if err := b.eval(ctx, t, frame, `(()=>{`+locator+`el.focus({preventScroll:true});return true})()`, nil); err != nil {
 			return nil, err
 		}
 		if err := t.command(ctx, "Input.dispatchKeyEvent", map[string]any{"type": "keyDown", "key": key, "windowsVirtualKeyCode": code}, nil); err != nil {
@@ -436,7 +456,7 @@ func (b *browserManager) elementPoint(ctx context.Context, t *browserTab, frame,
 		}
 	}
 	var point struct{ X, Y float64 }
-	if err := b.eval(ctx, t, frame, `(async()=>{`+locator+`if(el.disabled)wcFail('element_disabled');el.scrollIntoView({block:'center'});await Promise.race([new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))),new Promise(resolve=>setTimeout(resolve,200))]);if(!el.isConnected)wcFail('element_detached');const r=el.getBoundingClientRect();if(!r.width||!r.height)wcFail('element_hidden');const x=r.x+r.width/2,y=r.y+r.height/2;let hit=document.elementFromPoint(x,y);while(hit?.shadowRoot){const inner=hit.shadowRoot.elementFromPoint(x,y);if(!inner||inner===hit)break;hit=inner}let covered=true;for(let node=hit;node;node=node.getRootNode()?.host){if(node===el||el.contains(node)){covered=false;break}}if(covered)wcFail('element_obscured');return {X:x,Y:y}})()`, &point); err != nil {
+	if err := b.eval(ctx, t, frame, `(async()=>{`+locator+`if(el.disabled)wcFail('element_disabled');const before=el.getBoundingClientRect();if(before.top<0||before.left<0||before.bottom>innerHeight||before.right>innerWidth)el.scrollIntoView({block:'nearest',inline:'nearest'});await Promise.race([new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))),new Promise(resolve=>setTimeout(resolve,200))]);if(!el.isConnected)wcFail('element_detached');const r=el.getBoundingClientRect();if(!r.width||!r.height)wcFail('element_hidden');const x=r.x+r.width/2,y=r.y+r.height/2;let hit=document.elementFromPoint(x,y);while(hit?.shadowRoot){const inner=hit.shadowRoot.elementFromPoint(x,y);if(!inner||inner===hit)break;hit=inner}let covered=true;for(let node=hit;node;node=node.getRootNode()?.host){if(node===el||el.contains(node)){covered=false;break}}if(covered)wcFail('element_obscured');return {X:x,Y:y}})()`, &point); err != nil {
 		return 0, 0, err
 	}
 	if ownerFrame != "" {

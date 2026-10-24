@@ -71,6 +71,7 @@ func browserConsoleBind(ctx context.Context, session *browserSession, tab *brows
 		for _, native := range session.personal.tabs {
 			if native.ID == tab.nativeTabID {
 				trace.info.Title, trace.info.URL = native.Title, native.URL
+				trace.info.WindowID = native.WindowID
 				break
 			}
 		}
@@ -85,6 +86,9 @@ func (trace *browserConsoleTrace) finish(value any, err error, status, code stri
 	result, _ := value.(map[string]any)
 	if image, ok := value.(browserImage); ok {
 		result = image.Result
+	}
+	if window, ok := browserConsoleNumber(result["window_id"]); ok {
+		trace.info.WindowID = int(window)
 	}
 	for key, field := range map[string]*string{
 		"browser_session_id": &trace.info.SessionID, "tab_id": &trace.info.TabID,

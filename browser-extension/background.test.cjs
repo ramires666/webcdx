@@ -11,7 +11,7 @@ async function environment(options = {}) {
   const tabs = new Map((options.tabs || [{id:7,url:'https://example.com/',active:true}]).map(tab => [tab.id,tab]));
   let online = options.online !== false, timerID = 0;
   const flush = () => new Promise(setImmediate);
-  const chrome = {runtime:{id:'extension',onMessage:event(),onStartup:event(),onInstalled:event(),connectNative(){
+  const chrome = {runtime:{id:'extension',getManifest:()=>({version:manifest.version}),onMessage:event(),onStartup:event(),onInstalled:event(),connectNative(){
     const nativePort = {onDisconnect:event(),onMessage:event(),postMessage:message=>sent.push(message),disconnect(){this.onDisconnect.listener()}};
     ports.push(nativePort);
     queueMicrotask(() => { if (online) nativePort.onMessage.listener({kind:'hello',allow_local:false,command_protocol:2,connection_id:'connection-test'}); else nativePort.disconnect(); });
@@ -40,8 +40,8 @@ async function environment(options = {}) {
       await flush();
     }};
 }
-async function connectedPersonal() {
-  const e=await environment({manual:false,storage:{webcodexPersonalAccess:{continuous:true}}});
+async function connectedPersonal(options={}) {
+  const e=await environment({...options,manual:false,storage:options.storage||{webcodexPersonalAccess:{continuous:true}}});
   await e.flush();
   assert.equal(e.ports.length,1);
   const tab=e.ports[0];
@@ -498,4 +498,83 @@ test('local pause guards commands while scope publication is delayed',async()=>{
 
   resolveQuery([...e.tabs.values()]);
   await pause;
+});
+
+test('identity reports target binding and native text capabilities with manifest version',async()=>{
+	const {e}=await connectedPersonal();
+  const identity=e.sent.find(message=>message.kind==='identity');
+  assert.deepEqual(JSON.parse(JSON.stringify(identity.capabilities)),['target_binding_v1','native_text_v1']);
+  assert.equal(identity.extension_version,'1.4.0');
+  assert.equal(identity.extension_version,manifest.version);
+});
+
+test('WebCodex.target returns current metadata for an approved tab',async()=>{
+  const {e,send,command}=await connectedPersonal({tabs:[{id:7,url:'https://example.com/profile?view=full',title:'Profile page',windowId:23,active:true}]});
+  send(command('target-metadata','WebCodex.target'));
+  await e.flush();await e.flush();
+  const response=responseFor(e,'target-metadata');
+  assert.equal(response.error,undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(response.result)),{tab_id:7,url:'https://example.com/profile?view=full',title:'Profile page',window_id:23,active:true});
+});
+
+test('wrong expected URL or window rejects input before CDP',async()=>{
+  for(const [id,expected] of [
+    ['wrong-expected-url',{expected_url:'https://example.com/other',expected_window_id:23}],
+    ['wrong-expected-window',{expected_url:'https://example.com/profile',expected_window_id:99}],
+  ]){
+    const {e,send,command}=await connectedPersonal({tabs:[{id:7,url:'https://example.com/profile',title:'Profile',windowId:23,active:true}]});
+    send(command(id,'Input.dispatchMouseEvent',{...expected,params:{type:'mousePressed',x:10,y:10}}));
+    await e.flush();await e.flush();
+    assert.match(responseFor(e,id).error,/command target changed/i);
+    assert.equal(e.commands.some(call=>call.method.startsWith('Input.')||call.method.startsWith('Page.navigate')),false);
+  }
+});
+
+test('target changed during delayed tab read blocks input',async()=>{
+  const {e,send,command}=await connectedPersonal({tabs:[{id:7,url:'https://example.com/profile',title:'Profile',windowId:23,active:true}]});
+  const originalGet=e.chrome.tabs.get;
+  let releaseRead,beginRead,first=true;
+  const readGate=new Promise(resolve=>{releaseRead=resolve});
+  const readStarted=new Promise(resolve=>{beginRead=resolve});
+  e.chrome.tabs.get=async id=>{
+    if(first){first=false;beginRead();await readGate}
+    return originalGet(id);
+  };
+  send(command('changed-during-read','Input.dispatchMouseEvent',{expected_url:'https://example.com/profile',expected_window_id:23,params:{type:'mousePressed',x:10,y:10}}));
+  await readStarted;
+  e.tabs.get(7).url='https://example.com/changed';
+  releaseRead();
+  await e.flush();await e.flush();
+  assert.match(responseFor(e,'changed-during-read').error,/command target changed/i);
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+});
+
+test('target changed during async preparation blocks final navigation',async()=>{
+  const {e,send,command}=await connectedPersonal({tabs:[{id:7,url:'https://example.com/profile',title:'Profile',windowId:23,active:true}]});
+  const originalSend=e.chrome.debugger.sendCommand;
+  let releaseHistory,beginHistory;
+  const historyGate=new Promise(resolve=>{releaseHistory=resolve});
+  const historyStarted=new Promise(resolve=>{beginHistory=resolve});
+  e.chrome.debugger.sendCommand=async(source,method,params)=>{
+    if(method==='Page.getNavigationHistory'){
+      beginHistory();await historyGate;
+      return {entries:[{id:1,url:'https://example.com/profile'}],currentIndex:0};
+    }
+    return originalSend(source,method,params);
+  };
+  send(command('changed-during-preparation','Page.navigateToHistoryEntry',{expected_url:'https://example.com/profile',expected_window_id:23,params:{entryId:1}}));
+  await historyStarted;
+  e.tabs.get(7).windowId=24;
+  releaseHistory();
+  await e.flush();await e.flush();
+  assert.match(responseFor(e,'changed-during-preparation').error,/command target changed/i);
+  assert.equal(e.commands.some(call=>call.method==='Page.navigateToHistoryEntry'),false);
+});
+
+test('matching expected target permits normal protocol 2 input',async()=>{
+  const {e,send,command}=await connectedPersonal({tabs:[{id:7,url:'https://example.com/profile',title:'Profile',windowId:23,active:true}]});
+  send(command('bound-input','Input.dispatchMouseEvent',{expected_url:'https://example.com/profile',expected_window_id:23,params:{type:'mousePressed',x:10,y:10}}));
+  await e.flush();await e.flush();
+  assert.equal(responseFor(e,'bound-input').error,undefined);
+  assert(e.commands.some(call=>call.method==='Input.dispatchMouseEvent'));
 });

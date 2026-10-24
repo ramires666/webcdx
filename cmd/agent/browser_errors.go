@@ -10,6 +10,12 @@ import (
 // These messages contain no page-provided text, stack, field value or URL.
 var browserFailureMessages = map[string]string{
 	"browser_unhealthy":         "browser recovery is required; restore the operation journal before making changes",
+	"binding_changed":           "the selected browser tab, window or page changed; bind the exact existing target again",
+	"tab_not_found":             "no locally approved existing tab matches the exact URL and window",
+	"tab_detached":              "the bound tab is no longer available; attach the existing target again",
+	"stale_generation":          "the DOM collection changed; restart pagination with a fresh revision",
+	"ambiguous_record":          "record IDs are not unique in the selected DOM collection",
+	"unstable_record":           "a selected record has no stable ID; choose an explicit ID attribute",
 	"cancelled":                 "browser operation was cancelled",
 	"cancelled_before_dispatch": "operation was cancelled before a browser side effect was sent",
 	"scope_changed":             "local browser access changed; obtain fresh state before continuing",
@@ -53,6 +59,10 @@ func browserTransportFailure(message string) error {
 	code := "browser_failed"
 	if len(message) <= 2048 {
 		switch message {
+		case "Command target changed":
+			code = "binding_changed"
+		case "Bound tab is no longer available":
+			code = "tab_detached"
 		case "Command cancelled":
 			code = "cancelled_before_dispatch"
 		case "Command deadline expired":
@@ -187,8 +197,10 @@ func browserErrorRecovery(code string) string {
 		return "wait"
 	case "protocol_upgrade_required":
 		return "update_extension"
-	case "scope_changed", "command_expired":
+	case "scope_changed", "command_expired", "stale_generation":
 		return "refresh_snapshot"
+	case "binding_changed", "tab_not_found", "tab_detached":
+		return "rebind_target"
 	case "stale_snapshot", "element_detached", "frame_changed", "navigation_pending":
 		return "refresh_snapshot"
 	case "invalid_option_value":

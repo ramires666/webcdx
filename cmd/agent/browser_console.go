@@ -16,6 +16,7 @@ type browserConsoleInfo struct {
 	Title     string
 	URL       string
 	Profile   string
+	WindowID  int
 }
 
 func browserConsoleStart(info browserConsoleInfo) string {
@@ -102,6 +103,9 @@ func browserConsoleShortID(info browserConsoleInfo) string {
 
 func browserConsoleContext(info browserConsoleInfo) string {
 	parts := []string{}
+	if info.WindowID != 0 {
+		parts = append(parts, fmt.Sprintf("окно %d", info.WindowID))
+	}
 	if info.TabID != "" {
 		parts = append(parts, "вкладка "+compactString(info.TabID, 32))
 	} else if info.SessionID != "" {
@@ -139,7 +143,10 @@ func browserConsoleOperation(info browserConsoleInfo) string {
 	action := get("action")
 	switch info.Name {
 	case "browser_open":
-		url := consoleURL(get("url"))
+		url := consoleURL(get("exact_url"))
+		if url == "" {
+			url = consoleURL(get("url"))
+		}
 		return join("Открываю браузер", url)
 	case "browser_navigate":
 		url := consoleURL(get("url"))
@@ -274,6 +281,16 @@ func browserConsoleResult(info browserConsoleInfo, result map[string]any) string
 			return "состояние: " + compactString(status, 32)
 		}
 	case "browser_open":
+		if result["binding_verified"] == true {
+			message := "существующая вкладка проверена"
+			if count, ok := browserConsoleNumber(result["matching_tabs"]); ok {
+				message += fmt.Sprintf(" · совпадений %d", count)
+			}
+			if text, _ := result["text"].(string); text != "" {
+				message += " · прочитано: «" + browserConsoleTextPreview(text, 240) + "»"
+			}
+			return message
+		}
 		if profile, _ := result["browser_alias"].(string); profile != "" {
 			return "браузер подключён · профиль " + compactString(profile, 64)
 		}
@@ -316,7 +333,7 @@ func browserConsoleStatus(status string, result map[string]any) string {
 		return "управление браузером приостановлено"
 	case "running":
 		phase, _ := result["phase"].(string)
-		phases := map[string]string{"queued": "в очереди", "executing": "выполняется", "dispatch_started": "действие отправлено браузеру"}
+		phases := map[string]string{"reserved": "сохраняю резерв операции", "queued": "в очереди", "executing": "выполняется", "dispatch_started": "действие отправлено браузеру"}
 		if label := phases[phase]; label != "" {
 			return label
 		}
@@ -328,6 +345,14 @@ func browserConsoleStatus(status string, result map[string]any) string {
 
 func browserConsoleError(code string) string {
 	switch code {
+	case "binding_changed":
+		return "вкладка, окно или страница изменились; подключитесь к точному адресу заново"
+	case "tab_not_found":
+		return "нужная уже открытая вкладка не найдена среди разрешённых"
+	case "tab_detached":
+		return "подключённая вкладка закрыта или отключена"
+	case "stale_generation":
+		return "содержимое списка изменилось; начните чтение с новой версии"
 	case "browser_unhealthy":
 		return "браузер ограничен: восстановите журнал; файлы и команды доступны"
 	case "unknown_session":
@@ -440,6 +465,9 @@ func browserConsoleTabs(tabs []any, truncated bool) string {
 		title, _ := tab["title"].(string)
 		url, _ := tab["url"].(string)
 		parts := []string{}
+		if window, ok := browserConsoleNumber(tab["window_id"]); ok && window != 0 {
+			parts = append(parts, fmt.Sprintf("окно %d", window))
+		}
 		if id != "" {
 			parts = append(parts, compactString(id, 32))
 		}

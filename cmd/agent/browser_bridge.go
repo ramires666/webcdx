@@ -26,33 +26,37 @@ type browserBridgeDescriptor struct {
 	ExtensionID string `json:"extension_id"`
 }
 type browserBridgeMessage struct {
-	Kind            string               `json:"kind"`
-	ID              string               `json:"id,omitempty"`
-	Token           string               `json:"token,omitempty"`
-	Origin          string               `json:"origin,omitempty"`
-	Action          string               `json:"action,omitempty"`
-	TabID           int                  `json:"tab_id,omitempty"`
-	FrameID         string               `json:"frame_id,omitempty"`
-	Method          string               `json:"method,omitempty"`
-	Params          any                  `json:"params,omitempty"`
-	Result          json.RawMessage      `json:"result,omitempty"`
-	Error           string               `json:"error,omitempty"`
-	Tabs            []browserPersonalTab `json:"tabs,omitempty"`
-	Paused          bool                 `json:"paused,omitempty"`
-	LocalPaused     bool                 `json:"local_paused,omitempty"`
-	AllowNew        bool                 `json:"allow_new,omitempty"`
-	AllowLocal      bool                 `json:"allow_local,omitempty"`
-	URL             string               `json:"url,omitempty"`
-	Allowed         bool                 `json:"allowed,omitempty"`
-	ProfileID       string               `json:"profile_id,omitempty"`
-	Alias           string               `json:"alias,omitempty"`
-	Product         string               `json:"product,omitempty"`
-	CommandProtocol int                  `json:"command_protocol,omitempty"`
-	ConnectionID    string               `json:"connection_id,omitempty"`
-	DeadlineMS      int64                `json:"deadline_ms,omitempty"`
-	ScopeEpoch      uint64               `json:"scope_epoch"`
-	ControlEpoch    uint64               `json:"control_epoch,omitempty"`
-	Cancelled       bool                 `json:"cancelled,omitempty"`
+	Kind             string               `json:"kind"`
+	ID               string               `json:"id,omitempty"`
+	Token            string               `json:"token,omitempty"`
+	Origin           string               `json:"origin,omitempty"`
+	Action           string               `json:"action,omitempty"`
+	TabID            int                  `json:"tab_id,omitempty"`
+	FrameID          string               `json:"frame_id,omitempty"`
+	Method           string               `json:"method,omitempty"`
+	Params           any                  `json:"params,omitempty"`
+	Result           json.RawMessage      `json:"result,omitempty"`
+	Error            string               `json:"error,omitempty"`
+	Tabs             []browserPersonalTab `json:"tabs,omitempty"`
+	Paused           bool                 `json:"paused,omitempty"`
+	LocalPaused      bool                 `json:"local_paused,omitempty"`
+	AllowNew         bool                 `json:"allow_new,omitempty"`
+	AllowLocal       bool                 `json:"allow_local,omitempty"`
+	URL              string               `json:"url,omitempty"`
+	Allowed          bool                 `json:"allowed,omitempty"`
+	ProfileID        string               `json:"profile_id,omitempty"`
+	Alias            string               `json:"alias,omitempty"`
+	Product          string               `json:"product,omitempty"`
+	CommandProtocol  int                  `json:"command_protocol,omitempty"`
+	ConnectionID     string               `json:"connection_id,omitempty"`
+	DeadlineMS       int64                `json:"deadline_ms,omitempty"`
+	ScopeEpoch       uint64               `json:"scope_epoch"`
+	ControlEpoch     uint64               `json:"control_epoch,omitempty"`
+	Cancelled        bool                 `json:"cancelled,omitempty"`
+	Capabilities     []string             `json:"capabilities,omitempty"`
+	ExtensionVersion string               `json:"extension_version,omitempty"`
+	ExpectedURL      string               `json:"expected_url,omitempty"`
+	ExpectedWindowID int                  `json:"expected_window_id,omitempty"`
 }
 type browserPersonalTab struct {
 	ID       int    `json:"tab_id"`
@@ -75,6 +79,8 @@ type browserBridge struct {
 	id, profileID, alias, product string
 	commandProtocol               int
 	scopeEpoch, controlEpoch      uint64
+	capabilities                  []string
+	extensionVersion              string
 }
 
 func browserBridgePath() string {
@@ -352,6 +358,15 @@ func (l *browserBridge) callFrame(ctx context.Context, tabID int, frameID, metho
 		return toolErr("scope_changed", "local browser access changed; obtain fresh state")
 	}
 	protocol, epoch, connection := l.commandProtocol, l.scopeEpoch, l.id
+	expectedURL := ""
+	expectedWindow := 0
+	if binding, _ := ctx.Value(browserTargetContext{}).(*browserTargetBinding); binding != nil {
+		if binding.Connection != connection || binding.Scope != epoch || binding.NativeTab != tabID {
+			l.mu.Unlock()
+			return toolErr("binding_changed", browserFailureMessage("binding_changed"))
+		}
+		expectedURL, expectedWindow = binding.URL, binding.Window
+	}
 	if browserMayChange(ctx, method) && protocol != browserCommandProtocol {
 		l.mu.Unlock()
 		return toolErr("protocol_upgrade_required", "update the browser extension before changing the page")
@@ -364,7 +379,7 @@ func (l *browserBridge) callFrame(ctx context.Context, tabID int, frameID, metho
 		deadline = until
 	}
 	browserMarkDispatch(ctx, method)
-	if err := l.sendContext(ctx, browserBridgeMessage{Kind: "command", ID: id, TabID: tabID, FrameID: frameID, Method: method, Params: params, CommandProtocol: protocol, ConnectionID: connection, ScopeEpoch: epoch, DeadlineMS: deadline.UnixMilli()}); err != nil {
+	if err := l.sendContext(ctx, browserBridgeMessage{Kind: "command", ID: id, TabID: tabID, FrameID: frameID, Method: method, Params: params, CommandProtocol: protocol, ConnectionID: connection, ScopeEpoch: epoch, DeadlineMS: deadline.UnixMilli(), ExpectedURL: expectedURL, ExpectedWindowID: expectedWindow}); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
