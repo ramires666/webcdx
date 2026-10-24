@@ -5,14 +5,19 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) (any, error) {
+	origin, err := personalTargetOrigin(args)
+	if err != nil {
+		return nil, err
+	}
 	b.mu.Lock()
-	link := b.bridge
-	if link == nil {
+	link, err := b.choosePersonal(args, origin)
+	if err != nil {
 		b.mu.Unlock()
-		return nil, toolErr("waiting_user", "connect a tab using the WebCodex extension")
+		return nil, err
 	}
 	link.mu.Lock()
 	available := len(link.tabs)
@@ -43,6 +48,18 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 		}
 	}
 	if s == nil {
+		active := 0
+		for id, session := range b.sessions {
+			if session.disconnected {
+				delete(b.sessions, id)
+			} else {
+				active++
+			}
+		}
+		if active >= 4 {
+			b.mu.Unlock()
+			return nil, toolErr("limit_reached", "at most four browser sessions")
+		}
 		root, cancel := context.WithCancel(context.Background())
 		s = &browserSession{id: browserID("browser_"), mode: "personal", ctx: root, personal: link, tabs: map[string]*browserTab{}}
 		s.cancel = func() { cancel(); _ = link.send(browserBridgeMessage{Kind: "control", Action: "detach"}) }
@@ -51,7 +68,27 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 	b.mu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b.syncPersonalTabs(s)
+	approved := b.syncPersonalTabs(s)
+	if origin != "" {
+		matches := []int{}
+		for _, tab := range approved {
+			if strings.ToLower(browserDiagnosticURL(tab.URL)) == origin {
+				matches = append(matches, tab.ID)
+			}
+		}
+		if len(matches) == 0 {
+			return nil, toolErr("browser_not_found", "target origin is not in the approved tab catalog")
+		}
+		if len(matches) > 1 {
+			return nil, toolErr("ambiguous_tab", "multiple tabs match target_origin; open the profile without target_origin and explicitly select from browser_tabs")
+		}
+		for id, tab := range s.tabs {
+			if tab.nativeTabID == matches[0] {
+				s.selected = id
+				break
+			}
+		}
+	}
 	if s.selected == "" {
 		return nil, toolErr("waiting_user", "open a permitted website in the connected browser")
 	}
@@ -67,7 +104,13 @@ func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) 
 			return nil, err
 		}
 	}
-	return map[string]any{"browser_session_id": s.id, "tab_id": s.selected, "mode": "personal", "status": "ready", "truncated": false}, nil
+	link.mu.Lock()
+	profile, alias, product, connection := link.profileID, link.alias, link.product, link.id
+	link.mu.Unlock()
+	if product == "" {
+		product = "unknown"
+	}
+	return map[string]any{"browser_session_id": s.id, "tab_id": s.selected, "mode": "personal", "status": "ready", "truncated": false, "profile_id": profile, "browser_alias": alias, "product": product, "connection_id": connection}, nil
 }
 
 // Catalog permitted tabs without attaching debuggers or reading page contents.
@@ -167,9 +210,9 @@ func (b *browserManager) personalTabs(ctx context.Context, s *browserSession, t 
 		return nil, toolErr("invalid_arguments", "unknown tabs action")
 	}
 	s.personal.mu.Lock()
-	urls := make(map[int]string, len(s.personal.tabs))
+	nativeTabs := make(map[int]browserPersonalTab, len(s.personal.tabs))
 	for _, native := range s.personal.tabs {
-		urls[native.ID] = native.URL
+		nativeTabs[native.ID] = native
 	}
 	s.personal.mu.Unlock()
 	list := []map[string]any{}
@@ -178,11 +221,11 @@ func (b *browserManager) personalTabs(ctx context.Context, s *browserSession, t 
 			delete(s.tabs, id)
 			continue
 		}
-		url, ok := urls[tab.nativeTabID]
+		native, ok := nativeTabs[tab.nativeTabID]
 		if !ok {
 			continue
 		}
-		list = append(list, map[string]any{"tab_id": id, "url": safeBrowserURL(url)})
+		list = append(list, map[string]any{"tab_id": id, "url": safeBrowserURL(native.URL), "title": native.Title, "window_id": native.WindowID, "active": native.Active})
 	}
 	return map[string]any{"browser_session_id": s.id, "tab_id": s.selected, "status": "ready", "tabs": list, "truncated": false}, nil
 }

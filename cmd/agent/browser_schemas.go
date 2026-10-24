@@ -21,12 +21,14 @@ func browserToolSchemas() []mcpToolDefinition {
 		"url":    str(), "title": str(), "text": str(), "reason": str(), "snapshot_id": str(), "truncated": boolean(),
 		"confirmation":   enum("action_dispatched", "condition_matched", "state_verified", "control_value_verified"),
 		"selected_value": str(), "selected_label": str(),
+		"profile_id": str(), "browser_alias": str(), "connection_id": str(), "product": enum("chrome", "edge", "chromium", "unknown"),
+		"browsers":       map[string]any{"type": "array", "items": object(map[string]any{"connection_id": str(), "profile_id": str(), "alias": str(), "product": enum("chrome", "edge", "chromium", "unknown"), "paused": boolean(), "identified": boolean(), "tabs": map[string]any{"type": "array", "items": object(map[string]any{"url": str(), "title": str(), "window_id": integer(0, 2147483647), "active": boolean()}, "url", "title", "window_id", "active")}}, "connection_id", "profile_id", "alias", "product", "paused", "identified", "tabs")},
 		"dropped_events": integer(0, 2147483647), "tracked_requests": integer(0, 256),
 		"frame_id": str(), "observed_at": str(), "document_generation": str(), "ready_state": enum("loading", "interactive", "complete"),
 		"accessibility_status": enum("available", "unavailable", "omitted_for_scope"),
 		"counts":               object(map[string]any{"dom_visited": integer(0, 10000), "elements_found": integer(0, 10000), "elements_returned": integer(0, 300), "ax_found": integer(0, 1000000), "ax_returned": integer(0, 200)}),
 		"truncation_reasons":   map[string]any{"type": "array", "items": enum("node_limit", "element_limit", "text_limit", "accessibility_limit", "response_budget", "options_limit")},
-		"tabs":                 map[string]any{"type": "array", "items": object(map[string]any{"tab_id": str(), "url": str()}, "tab_id", "url")},
+		"tabs":                 map[string]any{"type": "array", "items": object(map[string]any{"tab_id": str(), "url": str(), "title": str(), "window_id": integer(0, 2147483647), "active": boolean()}, "tab_id", "url")},
 		"elements":             map[string]any{"type": "array", "items": object(map[string]any{"element_id": str(), "role": str(), "name": str(), "tag": str(), "disabled": boolean(), "href": str(), "value": str(), "context": str(), "options": map[string]any{"type": "array", "items": option}, "options_truncated": boolean()}, "element_id", "role", "name", "tag", "disabled", "href", "value")},
 		"frames":               map[string]any{"type": "array", "items": object(map[string]any{"frame_id": str(), "url": str()}, "frame_id", "url")},
 		"events":               map[string]any{"type": "array", "items": object(map[string]any{"event": str(), "at": str(), "url": str(), "detail": str(), "request_id": str(), "operation_id": str(), "duration_ms": integer(0, 120000), "http_status": integer(400, 599), "canceled": boolean(), "failure_type": enum("timeout", "dns", "connection", "blocked", "cancelled", "other")}, "event", "at")},
@@ -51,7 +53,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		required          []string
 		locator, readOnly bool
 	}{
-		{"browser_open", "Open a visible local browser. Use clean or persistent; personal requires a locally connected extension tab. Passwords, MFA and CAPTCHA are completed manually.", map[string]any{"mode": enum("clean", "persistent", "personal"), "url": str()}, []string{"mode", "request_key"}, false, false},
+		{"browser_open", "Open a visible local browser. Use clean or persistent; personal requires a locally connected extension tab. Passwords, MFA and CAPTCHA are completed manually.", map[string]any{"mode": enum("clean", "persistent", "personal"), "url": str(), "profile_id": str(), "browser_alias": str(), "connection_id": str(), "preferred_browser": enum("chrome", "edge", "chromium", "unknown"), "target_origin": str()}, []string{"mode", "request_key"}, false, false},
 		{"browser_tabs", "List, create, select or close tabs in this browser session.", map[string]any{"action": enum("list", "new", "select", "close")}, []string{"browser_session_id", "action"}, false, false},
 		{"browser_navigate", "Navigate HTTP/HTTPS or history. Redirects follow the locally configured URL scope.", map[string]any{"action": enum("url", "back", "forward", "reload"), "url": str()}, []string{"browser_session_id", "action", "request_key"}, false, false},
 		{"browser_snapshot", "Read bounded page text and interactive elements, including open shadow roots. Element IDs require this snapshot_id and frame_id. Read truncated and truncation_reasons; ready_state is not application readiness.", map[string]any{"container_selector": str()}, []string{"browser_session_id"}, false, true},
@@ -60,7 +62,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		{"browser_wait", "Wait up to 25 seconds for load, exact URL, text or a unique visible element. Poll browser_control with operation_id if status is running.", map[string]any{"condition": enum("load", "url", "text", "element", "value"), "text": str(), "url": str(), "value": str(), "state": enum("visible", "enabled", "absent"), "timeout_seconds": integer(1, 25)}, []string{"browser_session_id", "condition"}, true, true},
 		{"browser_files", "Upload a permitted file, enable downloads, read download status or save a completed download without overwriting.", map[string]any{"action": enum("upload", "enable_downloads", "downloads", "save_download"), "path": str(), "download_id": str()}, []string{"browser_session_id", "action"}, true, false},
 		{"browser_diagnostics", "Read bounded redacted failures with operation/request correlation and origin only; no headers, bodies, console text or URL paths.", map[string]any{"operation_id": str()}, []string{"browser_session_id"}, false, true},
-		{"browser_control", "Read operation/session status, pause, resume, cancel, wait for manual authorization, or disconnect. Disconnecting personal preserves the user's browser.", map[string]any{"action": enum("status", "pause", "resume", "cancel", "disconnect", "waiting_user"), "operation_id": str()}, []string{"action"}, false, false},
+		{"browser_control", "Read operation/session status, pause, resume, cancel, wait for manual authorization, or disconnect. Disconnecting personal preserves the user's browser.", map[string]any{"action": enum("status", "pause", "resume", "cancel", "disconnect", "waiting_user", "discover"), "operation_id": str()}, []string{"action"}, false, false},
 	}
 	result := []mcpToolDefinition{}
 	for _, def := range definitions {

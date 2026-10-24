@@ -23,7 +23,7 @@ async function environment(options = {}) {
       onCreated:event(),onUpdated:event(),onRemoved:event(),onActivated:event(),remove:async id=>tabs.delete(id),create:async({url})=>{const tab=options.pendingCreate?{id:100+tabs.size,url:'',pendingUrl:url}:{id:100+tabs.size,url};tabs.set(tab.id,tab);return tab}},
     debugger:{onDetach:event(),onEvent:event(),attach:async source=>{debuggerAttaches.push(source.tabId);if(options.attach)await options.attach()},detach:async()=>{},sendCommand:async(source,method,params)=>{commands.push({source,method,params});return {ok:true}}},
     downloads:{onDeterminingFilename:event(),onChanged:event(),cancel:async()=>{}}};
-  const context = vm.createContext({chrome,URL,Map,Set,Promise,crypto:crypto.webcrypto,
+  const context = vm.createContext({chrome,URL,Map,Set,Promise,crypto:crypto.webcrypto,navigator:{userAgent:options.userAgent||"Chrome/Test"},
     setTimeout:(fn,ms)=>{timers.set(++timerID,{fn,ms});return timerID},clearTimeout:id=>timers.delete(id)});
   vm.runInContext(fs.readFileSync(`${__dirname}/background.js`,'utf8'),context);
   context.sent=sent;
@@ -263,4 +263,18 @@ test('network diagnostics correlate requests without paths or raw failure messag
   await e.chrome.debugger.onEvent.listener({tabId:7},'Network.loadingFailed',{requestId:'456',errorText:'UNKNOWN_SECRET',canceled:false});
   assert.equal(e.sent.at(-1).result.failure_type,'other');
   assert(!JSON.stringify(e.sent).includes('SECRET'));
+});
+
+test('profile identity and local alias persist without expanding page access',async()=>{
+  const e=await environment({manual:false,userAgent:'Chrome/Test Edg/Test',storage:{webcodexPersonalAccess:{continuous:true}}});
+  const identity=e.sent.find(x=>x.kind==='identity');
+  assert(identity.profile_id.match(/^profile_[a-f0-9]{32}$/));
+  assert.equal(identity.product,'edge');
+  const updated=await e.message({type:'identity',alias:'edge-work'});
+  assert.equal(updated.alias,'edge-work');
+  assert.equal(e.sent.at(-1).profile_id,identity.profile_id);
+  assert.deepEqual(await e.message({type:'identity',alias:'page-spoof'},{id:'extension',tab:{id:7}}),{rejected:true});
+  const restarted=await environment({manual:false,storage:e.storage});
+  assert.equal(restarted.sent.find(x=>x.kind==='identity').profile_id,identity.profile_id);
+  assert.equal((await restarted.message({type:'status'})).alias,'edge-work');
 });

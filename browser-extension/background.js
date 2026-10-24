@@ -1,5 +1,9 @@
 const HOST = 'org.webcodex.browser';
 const ACCESS_KEY = 'webcodexPersonalAccess';
+const PROFILE_KEY='webcodexBrowserProfile';
+let profileID='',profileAlias='';
+const reportedAgent=globalThis.navigator?.userAgent||'';
+const browserProduct=/Edg\//.test(reportedAgent)?'edge':/Chrome\//.test(reportedAgent)?'chrome':/Chromium\//.test(reportedAgent)?'chromium':'unknown';
 const RECONNECT_ALARM = 'webcodex-reconnect';
 const PERSONAL_TAB_LIMIT = 128;
 const attached = new Map();
@@ -45,6 +49,8 @@ function post(message) {
   if (JSON.stringify(message).length > 900000) throw Error('Native response exceeds limit');
   port.postMessage(message);
 }
+function publishIdentity(){if(port&&connected)post({kind:'identity',profile_id:profileID,alias:profileAlias,product:browserProduct});}
+function tabMetadata(tab){return {tab_id:tab.id,url:tabURL(tab),title:String(tab.title||'').slice(0,256),window_id:Number.isInteger(tab.windowId)&&tab.windowId>=0?tab.windowId:0,active:!!tab.active};}
 function saveAccess() {
   const access = {continuous, localPaused, allowNew};
   settingsWrites = settingsWrites.catch(() => {}).then(() => chrome.storage.local.set({[ACCESS_KEY]:access}));
@@ -68,10 +74,10 @@ async function publishScope() {
     for (const tab of candidates) {
       const scope = attached.get(tab.id) || {publicWeb:true,created:false};
       const url = tabURL(tab);
-      if (tabs.length < PERSONAL_TAB_LIMIT && permitted(url,scope,scope.created)) tabs.push({tab_id:tab.id,url});
+      if (tabs.length < PERSONAL_TAB_LIMIT && permitted(url,scope,scope.created)) tabs.push(tabMetadata(tab));
     }
   } else {
-    for (const [id, scope] of attached) { try { const tab = await chrome.tabs.get(id); const url = tabURL(tab); if (permitted(url,scope,scope.created)) tabs.push({tab_id:id,url}); } catch {} }
+    for (const [id, scope] of attached) { try { const tab = await chrome.tabs.get(id); const url = tabURL(tab); if (permitted(url,scope,scope.created)) tabs.push(tabMetadata(tab)); } catch {} }
   }
   if (epoch !== accessEpoch) return;
   available.clear();
@@ -143,7 +149,7 @@ function connect() {
     if (message.kind === 'hello') {
       clearTimeout(timeout); clearTimeout(reconnectTimer); reconnectTimer = undefined; reconnectDelay = 2000;
       allowLocal = !!message.allow_local; connected = true; paused = localPaused;
-      resolveReady(); scopeUpdate().catch(() => {}); return;
+      publishIdentity(); resolveReady(); scopeUpdate().catch(() => {}); return;
     }
     if (message.kind === 'control') {
       if (message.action === 'detach') { paused = localPaused || !continuous; releaseAttachments().catch(() => {}); }
@@ -228,7 +234,11 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (sender.id !== chrome.runtime.id || sender.tab) return false;
   (async () => {
     await settingsLoaded;
-    if (message.type === 'attach') {
+    if (message.type==='identity') {
+      const alias=String(message.alias??'').trim();
+      if(Array.from(alias).length>64||/\p{Cc}/u.test(alias))throw Error('????????? ?????? ???? ?? ??????? 64 ???????? ? ??? ??????????? ??????');
+      profileAlias=alias;settingsWrites=settingsWrites.catch(()=>{}).then(()=>chrome.storage.local.set({[PROFILE_KEY]:{id:profileID,alias:profileAlias}}));await settingsWrites;publishIdentity();
+    } else if (message.type === 'attach') {
       if (continuous) await disconnect();
       localPaused = false; paused = false; allowNew = !!message.allowNew;
       await saveAccess();
@@ -248,7 +258,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     else if (message.type === 'pause') { await setPaused(true,true); }
     else if (message.type === 'resume') { await setPaused(false,true); if (continuous) await startContinuous(); }
     else if (message.type === 'disconnect') { await disconnect(); }
-    return {count:available.size,paused,continuous,allowNew,connected};
+    return {count:available.size,paused,continuous,allowNew,connected,alias:profileAlias,product:browserProduct};
   })().then(reply,error => reply({error:error.message}));
   return true;
 });
@@ -308,10 +318,12 @@ chrome.tabs.onActivated.addListener(() => { if (continuous) scopeUpdate().catch(
 chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === RECONNECT_ALARM) startContinuous().catch(() => {}); });
 chrome.runtime.onStartup.addListener(() => { startContinuous().catch(() => {}); });
 chrome.runtime.onInstalled.addListener(() => { startContinuous().catch(() => {}); });
-const settingsLoaded = chrome.storage.local.get(ACCESS_KEY).then(values => {
-  const access = values[ACCESS_KEY] || {};
-  continuous = access.continuous === true; localPaused = access.localPaused === true;
-  allowNew = access.allowNew === true; paused = localPaused;
+const settingsLoaded = Promise.all([chrome.storage.local.get(ACCESS_KEY),chrome.storage.local.get(PROFILE_KEY)]).then(async ([values,profiles]) => {
+  const access=values[ACCESS_KEY]||{},profile=profiles[PROFILE_KEY]||{};
+  continuous=access.continuous===true;localPaused=access.localPaused===true;allowNew=access.allowNew===true;paused=localPaused;
+  profileID=/^profile_[a-f0-9]{32}$/.test(profile.id||'')?profile.id:'profile_'+crypto.randomUUID().replace(/-/g,'');
+  profileAlias=typeof profile.alias==='string'&&!/\p{Cc}/u.test(profile.alias)?Array.from(profile.alias.trim()).slice(0,64).join(''):'';
+  await chrome.storage.local.set({[PROFILE_KEY]:{id:profileID,alias:profileAlias}});
 });
 settingsLoaded.then(() => startContinuous()).catch(() => {});
 chrome.downloads.onDeterminingFilename.addListener((item,suggest) => {

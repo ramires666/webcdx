@@ -40,7 +40,7 @@ func TestNativeBrowserFraming(t *testing.T) {
 func TestPersonalCatalogIsLazyAndReusableAcrossChats(t *testing.T) {
 	link := &browserBridge{attached: map[int]*browserTab{}}
 	for id := 1; id <= 40; id++ {
-		link.tabs = append(link.tabs, browserPersonalTab{id, "https://example.com/?token=hidden#secret"})
+		link.tabs = append(link.tabs, browserPersonalTab{ID: id, URL: "https://example.com/?token=hidden#secret"})
 	}
 	b := &browserManager{bridge: link, sessions: map[string]*browserSession{}}
 	ctx := context.Background()
@@ -79,7 +79,7 @@ func TestPersonalCatalogIsLazyAndReusableAcrossChats(t *testing.T) {
 		}
 	}
 	// Remove the selected tab and make another website available without a local click.
-	link.tabs = append(link.tabs[1:], browserPersonalTab{41, "https://other.example/"})
+	link.tabs = append(link.tabs[1:], browserPersonalTab{ID: 41, URL: "https://other.example/"})
 	listed, err = b.execute(ctx, "browser_tabs", map[string]any{"browser_session_id": id, "action": "list"})
 	if err != nil || len(listed.(map[string]any)["tabs"].([]map[string]any)) != 40 {
 		t.Fatalf("catalog did not refresh: %v %v", listed, err)
@@ -197,7 +197,7 @@ func TestPersonalBrowserIPCAndRevocation(t *testing.T) {
 				data = json.RawMessage(`{"frameTree":{"frame":{"id":"frame","url":"http://localhost/test"}}}`)
 			}
 			if message.Method == "WebCodex.prepare" {
-				if err := encoder.Encode(browserBridgeMessage{Kind: "scope", Tabs: []browserPersonalTab{{7, approvedURL}}}); err != nil {
+				if err := encoder.Encode(browserBridgeMessage{Kind: "scope", Tabs: []browserPersonalTab{{ID: 7, URL: approvedURL}}}); err != nil {
 					return
 				}
 			} else if message.Method == "WebCodex.frames" {

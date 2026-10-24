@@ -8,6 +8,7 @@ import (
 	"errors"
 	"image"
 	"image/jpeg"
+	"io"
 	"log"
 	"net"
 	"net/url"
@@ -42,6 +43,9 @@ type browserManager struct {
 	closed      bool
 	listener    *browserIPCListener
 	bridge      *browserBridge
+	bridges     map[string]*browserBridge
+	bridgePeers map[io.ReadWriteCloser]bool
+	bridgeWG    sync.WaitGroup
 	bridgePath  string
 	artifactMu  sync.Mutex
 }
@@ -347,6 +351,9 @@ func (b *browserManager) operationResult(op *browserOperation) (any, error) {
 
 func (b *browserManager) control(args map[string]any) (any, error) {
 	action, _ := requiredString(args, "action")
+	if action == "discover" {
+		return b.discoverPersonal(), nil
+	}
 	if id, _ := optionalString(args, "operation_id"); id != "" {
 		b.mu.Lock()
 		defer b.mu.Unlock()
@@ -496,6 +503,11 @@ func (b *browserManager) open(ctx context.Context, args map[string]any) (any, er
 	}
 	if mode != "clean" && mode != "persistent" {
 		return nil, toolErr("unsupported_mode", "managed browser supports clean and persistent")
+	}
+	for _, field := range []string{"connection_id", "profile_id", "browser_alias", "preferred_browser", "target_origin"} {
+		if _, ok := args[field]; ok {
+			return nil, toolErr("invalid_arguments", "personal browser selection requires mode=personal")
+		}
 	}
 	profile := ""
 	clean := mode == "clean"
@@ -886,6 +898,10 @@ func (b *browserManager) Close() {
 		cancels = append(cancels, s.cancel)
 	}
 	link := b.bridge
+	peers := make([]io.ReadWriteCloser, 0, len(b.bridgePeers))
+	for peer := range b.bridgePeers {
+		peers = append(peers, peer)
+	}
 	b.mu.Unlock()
 	if b.cleanupDone != nil {
 		<-b.cleanupDone
@@ -896,6 +912,10 @@ func (b *browserManager) Close() {
 	if link != nil {
 		link.conn.Close()
 	}
+	for _, peer := range peers {
+		peer.Close()
+	}
+	b.bridgeWG.Wait()
 	for _, cancel := range cancels {
 		cancel()
 	}

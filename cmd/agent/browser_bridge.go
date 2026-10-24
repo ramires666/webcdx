@@ -18,6 +18,7 @@ const browserExtensionID = "pmobmihkpbblajdanleplliihfmcdmpp"
 const browserNativeHostName = "org.webcodex.browser"
 const browserBridgeMax = 1 << 20
 const browserPersonalTabLimit = 128
+const browserBridgeConnections = 8
 
 type browserBridgeDescriptor struct {
 	Endpoint    string `json:"endpoint"`
@@ -43,22 +44,29 @@ type browserBridgeMessage struct {
 	AllowLocal  bool                 `json:"allow_local,omitempty"`
 	URL         string               `json:"url,omitempty"`
 	Allowed     bool                 `json:"allowed,omitempty"`
+	ProfileID   string               `json:"profile_id,omitempty"`
+	Alias       string               `json:"alias,omitempty"`
+	Product     string               `json:"product,omitempty"`
 }
 type browserPersonalTab struct {
-	ID  int    `json:"tab_id"`
-	URL string `json:"url"`
+	ID       int    `json:"tab_id"`
+	URL      string `json:"url"`
+	Title    string `json:"title,omitempty"`
+	WindowID int    `json:"window_id,omitempty"`
+	Active   bool   `json:"active,omitempty"`
 }
 
 type browserBridge struct {
-	mu                       sync.Mutex
-	writeMu                  sync.Mutex
-	manager                  *browserManager
-	conn                     io.ReadWriteCloser
-	pending                  map[string]chan browserBridgeMessage
-	tabs                     []browserPersonalTab
-	allowNew, paused, closed bool
-	localPaused              bool
-	attached                 map[int]*browserTab
+	mu                            sync.Mutex
+	writeMu                       sync.Mutex
+	manager                       *browserManager
+	conn                          io.ReadWriteCloser
+	pending                       map[string]chan browserBridgeMessage
+	tabs                          []browserPersonalTab
+	allowNew, paused, closed      bool
+	localPaused                   bool
+	attached                      map[int]*browserTab
+	id, profileID, alias, product string
 }
 
 func browserBridgePath() string {
@@ -86,20 +94,34 @@ func (b *browserManager) startBridge(path string) error {
 	}
 	b.listener = listener
 	b.bridgePath = path
+	b.bridgePeers = map[io.ReadWriteCloser]bool{}
+	b.bridgeWG.Add(1)
 	go func() {
+		defer b.bridgeWG.Done()
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
 			b.mu.Lock()
-			closed := b.closed
-			b.mu.Unlock()
-			if closed {
+			if b.closed {
+				b.mu.Unlock()
 				conn.Close()
 				return
 			}
-			b.serveBridge(conn, descriptor)
+			if len(b.bridgePeers) >= browserBridgeConnections {
+				b.mu.Unlock()
+				conn.Close()
+				continue
+			}
+			b.bridgePeers[conn] = true
+			b.bridgeWG.Add(1)
+			b.mu.Unlock()
+			go func() {
+				defer b.bridgeWG.Done()
+				defer func() { b.mu.Lock(); delete(b.bridgePeers, conn); b.mu.Unlock() }()
+				b.serveBridge(conn, descriptor)
+			}()
 		}
 	}()
 	return nil
@@ -121,8 +143,19 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 	}
 	timer.Stop()
 	link := &browserBridge{manager: b, conn: conn, pending: map[string]chan browserBridgeMessage{}, attached: map[int]*browserTab{}}
+	link.id = browserID("connection_")
 	b.mu.Lock()
-	b.bridge = link
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	if b.bridges == nil {
+		b.bridges = map[string]*browserBridge{}
+	}
+	b.bridges[link.id] = link
+	if b.bridge == nil {
+		b.bridge = link
+	}
 	b.mu.Unlock()
 	defer func() {
 		link.mu.Lock()
@@ -146,6 +179,7 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 		if b.bridge == link {
 			b.bridge = nil
 		}
+		delete(b.bridges, link.id)
 		b.mu.Unlock()
 	}()
 	if err := link.send(browserBridgeMessage{Kind: "hello", AllowLocal: b.config.AllowLocal}); err != nil {
@@ -157,6 +191,10 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 			return
 		}
 		switch message.Kind {
+		case "identity":
+			if !b.identifyBrowser(link, message) {
+				return
+			}
 		case "url_check":
 			if len(message.URL) > 16384 {
 				return
@@ -182,6 +220,10 @@ func (b *browserManager) serveBridge(conn io.ReadWriteCloser, descriptor browser
 			valid := []browserPersonalTab{}
 			for _, tab := range message.Tabs {
 				if tab.ID > 0 && (tab.URL == "about:blank" || b.checkURL(tab.URL) == nil) {
+					tab.Title, _ = truncateUTF8(tab.Title, 256)
+					if tab.WindowID < 0 {
+						return
+					}
 					valid = append(valid, tab)
 				}
 			}

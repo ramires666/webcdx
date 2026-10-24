@@ -16,6 +16,7 @@ type browserIPCListener struct {
 	mu     sync.Mutex
 	name   string
 	handle windows.Handle
+	owner  windows.Handle
 	closed bool
 }
 
@@ -31,8 +32,20 @@ func browserListenIPC(dir string) (*browserIPCListener, string, error) {
 	// Keep the regular user bridge exclusive while isolating test/config directories.
 	identity := user.User.Sid.String() + "|" + strings.ToLower(filepath.Clean(bridgeDir))
 	name := `\\.\pipe\webcodex-browser-` + commandHash(identity)[:24]
-	listener := &browserIPCListener{name: name}
+	if err := os.MkdirAll(bridgeDir, 0o700); err != nil {
+		return nil, "", err
+	}
+	lockPath, err := windows.UTF16PtrFromString(filepath.Join(bridgeDir, "browser-owner.lock"))
+	if err != nil {
+		return nil, "", err
+	}
+	owner, err := windows.CreateFile(lockPath, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_TEMPORARY|windows.FILE_FLAG_DELETE_ON_CLOSE, 0)
+	if err != nil {
+		return nil, "", err
+	}
+	listener := &browserIPCListener{name: name, owner: owner}
 	if err := listener.create(); err != nil {
+		windows.CloseHandle(owner)
 		return nil, "", err
 	}
 	return listener, name, nil
@@ -52,7 +65,7 @@ func (l *browserIPCListener) create() error {
 		return err
 	}
 	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
-	handle, err := windows.CreateNamedPipe(name, windows.PIPE_ACCESS_DUPLEX|windows.FILE_FLAG_FIRST_PIPE_INSTANCE|windows.FILE_FLAG_OVERLAPPED, windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS, 1, 65536, 65536, 0, &sa)
+	handle, err := windows.CreateNamedPipe(name, windows.PIPE_ACCESS_DUPLEX|windows.FILE_FLAG_OVERLAPPED, windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS, browserBridgeConnections+1, 65536, 65536, 0, &sa)
 	if err != nil {
 		return err
 	}
@@ -115,7 +128,14 @@ func (l *browserIPCListener) Accept() (io.ReadWriteCloser, error) {
 func (l *browserIPCListener) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed {
+		return nil
+	}
 	l.closed = true
+	if l.owner != 0 {
+		windows.CloseHandle(l.owner)
+		l.owner = 0
+	}
 	if l.handle != 0 {
 		_ = windows.CancelIoEx(l.handle, nil)
 		return windows.CloseHandle(l.handle)

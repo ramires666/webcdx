@@ -9,6 +9,10 @@ import (
 
 // These messages contain no page-provided text, stack, field value or URL.
 var browserFailureMessages = map[string]string{
+	"browser_not_found":         "no connected personal browser matches; use browser_control action=discover",
+	"ambiguous_browser":         "multiple personal browsers match; choose a profile_id or unique local alias from discovery",
+	"ambiguous_tab":             "multiple tabs match target_origin; open the profile and explicitly choose from browser_tabs",
+	"wait_timeout":              "browser wait ended without matching the requested condition",
 	"stale_snapshot":            "snapshot no longer matches this document or frame; obtain a new snapshot",
 	"element_detached":          "element was removed from the document; obtain a new snapshot",
 	"element_not_found":         "no element matches the locator",
