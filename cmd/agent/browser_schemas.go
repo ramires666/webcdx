@@ -21,6 +21,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		"url":    str(), "title": str(), "text": str(), "reason": str(), "snapshot_id": str(), "truncated": boolean(),
 		"confirmation":   enum("action_dispatched", "condition_matched", "state_verified", "control_value_verified"),
 		"selected_value": str(), "selected_label": str(),
+		"dropped_events": integer(0, 2147483647), "tracked_requests": integer(0, 256),
 		"frame_id": str(), "observed_at": str(), "document_generation": str(), "ready_state": enum("loading", "interactive", "complete"),
 		"accessibility_status": enum("available", "unavailable", "omitted_for_scope"),
 		"counts":               object(map[string]any{"dom_visited": integer(0, 10000), "elements_found": integer(0, 10000), "elements_returned": integer(0, 300), "ax_found": integer(0, 1000000), "ax_returned": integer(0, 200)}),
@@ -28,7 +29,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		"tabs":                 map[string]any{"type": "array", "items": object(map[string]any{"tab_id": str(), "url": str()}, "tab_id", "url")},
 		"elements":             map[string]any{"type": "array", "items": object(map[string]any{"element_id": str(), "role": str(), "name": str(), "tag": str(), "disabled": boolean(), "href": str(), "value": str(), "context": str(), "options": map[string]any{"type": "array", "items": option}, "options_truncated": boolean()}, "element_id", "role", "name", "tag", "disabled", "href", "value")},
 		"frames":               map[string]any{"type": "array", "items": object(map[string]any{"frame_id": str(), "url": str()}, "frame_id", "url")},
-		"events":               map[string]any{"type": "array", "items": object(map[string]any{"event": str(), "at": str(), "url": str(), "detail": str()}, "event", "at")},
+		"events":               map[string]any{"type": "array", "items": object(map[string]any{"event": str(), "at": str(), "url": str(), "detail": str(), "request_id": str(), "operation_id": str(), "duration_ms": integer(0, 120000), "http_status": integer(400, 599), "canceled": boolean(), "failure_type": enum("timeout", "dns", "connection", "blocked", "cancelled", "other")}, "event", "at")},
 		"mime_type":            str(), "artifact_path": str(), "path": str(), "download_id": str(), "bytes": integer(0, 1<<30),
 		"viewport_width": integer(1, 100000), "viewport_height": integer(1, 100000),
 		"image_width": integer(1, 100000), "image_height": integer(1, 100000),
@@ -58,7 +59,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		{"browser_interact", "Click, fill, select, hover, press, scroll, drag, handle a dialog or explicitly click viewport coordinates. Locators must match exactly one element. External changes require the user's authorization.", map[string]any{"action": enum("click", "fill", "select", "hover", "press", "scroll", "drag", "coordinates", "dialog"), "text": str(), "value": str(), "select_by": enum("auto", "value", "label"), "key": enum("Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Space"), "accept": boolean(), "x": integer(-100000, 100000), "y": integer(-100000, 100000), "end_x": integer(0, 100000), "end_y": integer(0, 100000), "viewport_width": integer(1, 100000), "viewport_height": integer(1, 100000)}, []string{"browser_session_id", "action", "request_key"}, true, false},
 		{"browser_wait", "Wait up to 25 seconds for load, exact URL, text or a unique visible element. Poll browser_control with operation_id if status is running.", map[string]any{"condition": enum("load", "url", "text", "element", "value"), "text": str(), "url": str(), "value": str(), "state": enum("visible", "enabled", "absent"), "timeout_seconds": integer(1, 25)}, []string{"browser_session_id", "condition"}, true, true},
 		{"browser_files", "Upload a permitted file, enable downloads, read download status or save a completed download without overwriting.", map[string]any{"action": enum("upload", "enable_downloads", "downloads", "save_download"), "path": str(), "download_id": str()}, []string{"browser_session_id", "action"}, true, false},
-		{"browser_diagnostics", "Read bounded console errors and failed requests without headers, bodies, cookies or query secrets.", map[string]any{}, []string{"browser_session_id"}, false, true},
+		{"browser_diagnostics", "Read bounded redacted failures with operation/request correlation and origin only; no headers, bodies, console text or URL paths.", map[string]any{"operation_id": str()}, []string{"browser_session_id"}, false, true},
 		{"browser_control", "Read operation/session status, pause, resume, cancel, wait for manual authorization, or disconnect. Disconnecting personal preserves the user's browser.", map[string]any{"action": enum("status", "pause", "resume", "cancel", "disconnect", "waiting_user"), "operation_id": str()}, []string{"action"}, false, false},
 	}
 	result := []mcpToolDefinition{}

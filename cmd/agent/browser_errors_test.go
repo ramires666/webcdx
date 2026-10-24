@@ -144,6 +144,18 @@ func (f *browserFixture) call(name string, args map[string]any) (any, error) {
 		}
 		result, err = f.b.control(map[string]any{"action": "status", "operation_id": object["operation_id"]})
 	}
+	if err == nil {
+		if image, ok := result.(browserImage); ok {
+			assertBrowserOutput(f.t, image.Result)
+		} else {
+			assertBrowserOutput(f.t, result)
+		}
+	} else {
+		var coded *codedError
+		if errors.As(err, &coded) {
+			assertBrowserOutput(f.t, map[string]any{"error": map[string]any{"code": coded.code, "message": coded.message, "details": coded.details}})
+		}
+	}
 	return result, err
 }
 

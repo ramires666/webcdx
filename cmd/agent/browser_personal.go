@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"time"
 )
 
 func (b *browserManager) openPersonal(ctx context.Context, args map[string]any) (any, error) {
@@ -187,37 +185,6 @@ func (b *browserManager) personalTabs(ctx context.Context, s *browserSession, t 
 		list = append(list, map[string]any{"tab_id": id, "url": safeBrowserURL(url)})
 	}
 	return map[string]any{"browser_session_id": s.id, "tab_id": s.selected, "status": "ready", "tabs": list, "truncated": false}, nil
-}
-
-func (b *browserManager) recordBrowserEvent(t *browserTab, method string, event map[string]any) {
-	t.eventMu.Lock()
-	defer t.eventMu.Unlock()
-	switch method {
-	case "Page.frameNavigated", "Page.navigatedWithinDocument", "WebCodex.detached":
-		t.snapshot = ""
-		t.worlds = map[string]int{}
-	case "Page.javascriptDialogOpening":
-		t.dialog = true
-	case "Page.javascriptDialogClosed":
-		t.dialog = false
-	case "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Network.loadingFailed", "Network.responseReceived":
-		response, _ := event["response"].(map[string]any)
-		status, _ := response["status"].(float64)
-		if method == "Runtime.consoleAPICalled" && event["type"] != "error" && event["type"] != "warning" || method == "Network.responseReceived" && status < 400 {
-			return
-		}
-		if len(t.diagnostics) >= 100 {
-			t.diagnostics = t.diagnostics[1:]
-		}
-		entry := map[string]any{"event": method, "at": time.Now().UTC().Format(timeFormat)}
-		if raw, ok := response["url"].(string); ok {
-			entry["url"] = safeBrowserURL(raw)
-		}
-		if status >= 400 {
-			entry["detail"] = fmt.Sprintf("HTTP %.0f", status)
-		}
-		t.diagnostics = append(t.diagnostics, entry)
-	}
 }
 
 var personalDownloadID = regexp.MustCompile(`^[0-9]{1,20}$`)

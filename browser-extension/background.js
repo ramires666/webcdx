@@ -20,6 +20,15 @@ function permitted(raw, scope, blank = false) {
   try { const url = new URL(raw); return ['http:','https:'].includes(url.protocol) && !url.username && !url.password && (allowLocal || !localHost(url.hostname)) && (scope.publicWeb || url.origin === scope.origin); }
   catch { return false; }
 }
+function diagnosticOrigin(raw) { try { const url=new URL(raw);return ['http:','https:'].includes(url.protocol)?url.origin+'/':''; } catch { return ''; } }
+function networkFailure(raw,canceled) {
+  if(canceled)return 'cancelled';
+  if(['net::ERR_TIMED_OUT','net::ERR_CONNECTION_TIMED_OUT'].includes(raw))return 'timeout';
+  if(raw==='net::ERR_NAME_NOT_RESOLVED')return 'dns';
+  if(['net::ERR_CONNECTION_RESET','net::ERR_CONNECTION_REFUSED','net::ERR_CONNECTION_CLOSED','net::ERR_INTERNET_DISCONNECTED'].includes(raw))return 'connection';
+  if(['net::ERR_BLOCKED_BY_CLIENT','net::ERR_BLOCKED_BY_RESPONSE'].includes(raw))return 'blocked';
+  return 'other';
+}
 function tabURL(tab) { return tab.url || tab.pendingUrl || ''; }
 async function createTaskTab(scope) {
   const child = await chrome.tabs.create({url:'about:blank'});
@@ -273,10 +282,13 @@ chrome.debugger.onEvent.addListener(async (source,method,event) => {
     if (!permitted(tabURL(tab),scope,scope.created)) { attached.delete(tab.id); try { await chrome.debugger.detach({tabId:tab.id}); } catch {} }
     await scopeUpdate();
   }
-  if (!['Page.frameNavigated','Page.navigatedWithinDocument','Page.javascriptDialogOpening','Page.javascriptDialogClosed','Runtime.exceptionThrown','Runtime.consoleAPICalled','Network.loadingFailed','Network.responseReceived'].includes(method)) return;
+  if (!['Page.frameNavigated','Page.navigatedWithinDocument','Page.javascriptDialogOpening','Page.javascriptDialogClosed','Runtime.exceptionThrown','Runtime.consoleAPICalled','Network.loadingFailed','Network.responseReceived','Network.requestWillBeSent','Network.loadingFinished'].includes(method)) return;
   const sanitized = {};
   if (event.type) sanitized.type = event.type;
-  if (event.response) sanitized.response = {status:event.response.status,url:event.response.url.split(/[?#]/)[0]};
+  if (event.requestId) sanitized.requestId = `${source.sessionId||'root'}:${String(event.requestId).slice(0,120)}`;
+  if (event.request) sanitized.request = {url:diagnosticOrigin(event.request.url)};
+  if (event.response) sanitized.response = {status:event.response.status,url:diagnosticOrigin(event.response.url)};
+  if (method==='Network.loadingFailed') {sanitized.canceled=!!event.canceled;sanitized.failure_type=networkFailure(event.errorText,event.canceled);}
   try { post({kind:'event',tab_id:source.tabId,method,result:sanitized}); } catch {}
 });
 chrome.tabs.onCreated.addListener(async tab => {

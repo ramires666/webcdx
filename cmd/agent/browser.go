@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"image"
 	"image/jpeg"
 	"log"
@@ -70,6 +69,9 @@ type browserTab struct {
 	snapshot, snapshotFrame string
 	snapshotMain            bool
 	diagnostics             []map[string]any
+	diagnosticsDropped      int
+	requests                map[string]browserRequestTrace
+	lastOperation           string
 	dialog                  bool
 	blocked                 bool
 	personal                *browserBridge
@@ -93,6 +95,8 @@ type browserOperation struct {
 	image          string
 	errorTransient map[string]any
 }
+
+type browserOperationContext struct{}
 
 type browserImage struct {
 	Result map[string]any
@@ -266,7 +270,7 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 	b.mu.Unlock()
 	go func() {
 		defer cancel()
-		result, err := b.execute(opCtx, name, args)
+		result, err := b.execute(context.WithValue(opCtx, browserOperationContext{}, op.ID), name, args)
 		b.mu.Lock()
 		op.Status = "completed"
 		if err != nil {
@@ -662,7 +666,7 @@ func (b *browserManager) setupTab(ctx context.Context, t *browserTab) error {
 			return err
 		}
 	}
-	for _, method := range []string{"Page.frameNavigated", "Page.navigatedWithinDocument", "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Network.loadingFailed", "Network.responseReceived"} {
+	for _, method := range []string{"Page.frameNavigated", "Page.navigatedWithinDocument", "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Network.loadingFailed", "Network.responseReceived", "Network.requestWillBeSent", "Network.loadingFinished"} {
 		events, stop := chromedp.FromContext(t.ctx).Target.Subscribe(method)
 		go func(method string) {
 			defer stop()
@@ -678,33 +682,7 @@ func (b *browserManager) setupTab(ctx context.Context, t *browserTab) error {
 					if json.Unmarshal(raw, &event) != nil {
 						continue
 					}
-					t.eventMu.Lock()
-					if method == "Page.frameNavigated" || method == "Page.navigatedWithinDocument" {
-						t.snapshot = ""
-						t.worlds = map[string]int{}
-					}
-					if method == "Page.javascriptDialogOpening" {
-						t.dialog = true
-					}
-					if method == "Page.javascriptDialogClosed" {
-						t.dialog = false
-					}
-					response, _ := event["response"].(map[string]any)
-					status, _ := response["status"].(float64)
-					if method == "Runtime.exceptionThrown" || method == "Network.loadingFailed" || method == "Runtime.consoleAPICalled" && (event["type"] == "error" || event["type"] == "warning") || method == "Network.responseReceived" && status >= 400 {
-						if len(t.diagnostics) >= 100 {
-							t.diagnostics = t.diagnostics[1:]
-						}
-						entry := map[string]any{"event": method, "at": time.Now().UTC().Format(timeFormat)}
-						if raw, ok := response["url"].(string); ok {
-							entry["url"] = safeBrowserURL(raw)
-						}
-						if status >= 400 {
-							entry["detail"] = fmt.Sprintf("HTTP %.0f", status)
-						}
-						t.diagnostics = append(t.diagnostics, entry)
-					}
-					t.eventMu.Unlock()
+					b.recordBrowserEvent(t, method, event)
 				}
 			}
 		}(method)
@@ -761,6 +739,11 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 	t.eventMu.Unlock()
 	if dialog && !(name == "browser_interact" && args["action"] == "dialog") {
 		return map[string]any{"browser_session_id": id, "tab_id": tabID, "status": "waiting_user", "reason": "browser_dialog", "truncated": false}, nil
+	}
+	if browserMutation(name, args) {
+		t.eventMu.Lock()
+		t.lastOperation, _ = ctx.Value(browserOperationContext{}).(string)
+		t.eventMu.Unlock()
 	}
 	result, err := b.tabAction(callCtx, name, s, t, args)
 	if err != nil {

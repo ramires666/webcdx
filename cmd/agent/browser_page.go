@@ -539,10 +539,8 @@ func (b *browserManager) tabAction(ctx context.Context, name string, s *browserS
 	case "browser_wait":
 		return b.wait(ctx, t, args)
 	case "browser_diagnostics":
-		t.eventMu.Lock()
-		events := append([]map[string]any{}, t.diagnostics...)
-		t.eventMu.Unlock()
-		return map[string]any{"url": safeBrowserURL(u), "events": events, "truncated": len(events) == 100}, nil
+		operation, _ := optionalString(args, "operation_id")
+		return browserDiagnostics(t, u, operation), nil
 	case "browser_files":
 		return b.files(ctx, s, t, args)
 	}

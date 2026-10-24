@@ -252,3 +252,15 @@ test('failed attachment closes only the tab created for the failed request',asyn
   assert.equal(e.tabs.size,1);
   assert.equal(e.tabs.has(7),true);
 });
+
+test('network diagnostics correlate requests without paths or raw failure messages',async()=>{
+  const e=await environment();
+  await e.chrome.debugger.onEvent.listener({tabId:7,sessionId:'frame'},'Network.requestWillBeSent',{requestId:'123',request:{url:'https://example.com/PRIVATE_SECRET?token=SECRET',headers:{Authorization:'SECRET'},postData:'SECRET'}});
+  assert.equal(e.sent.at(-1).result.requestId,'frame:123');
+  assert.equal(e.sent.at(-1).result.request.url,'https://example.com/');
+  await e.chrome.debugger.onEvent.listener({tabId:7,sessionId:'frame'},'Network.loadingFailed',{requestId:'123',errorText:'net::ERR_TIMED_OUT',canceled:false});
+  assert.equal(e.sent.at(-1).result.failure_type,'timeout');
+  await e.chrome.debugger.onEvent.listener({tabId:7},'Network.loadingFailed',{requestId:'456',errorText:'UNKNOWN_SECRET',canceled:false});
+  assert.equal(e.sent.at(-1).result.failure_type,'other');
+  assert(!JSON.stringify(e.sent).includes('SECRET'));
+});
