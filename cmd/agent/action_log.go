@@ -164,6 +164,7 @@ func consoleURL(value string) string {
 func readableError(detail map[string]any) string {
 	code, _ := detail["code"].(string)
 	labels := map[string]string{
+		"invalid_option_value": "значение не соответствует доступным вариантам списка", "element_disabled": "элемент отключён", "element_hidden": "элемент скрыт", "element_obscured": "элемент перекрыт другим окном", "element_detached": "элемент удалён; нужно перечитать страницу", "element_not_editable": "поле недоступно для ввода", "invalid_control_type": "элемент не поддерживает это действие", "invalid_selector": "неверный CSS-селектор", "frame_changed": "контекст вкладки изменился; нужно перечитать страницу", "page_evaluation_failed": "ошибка чтения или изменения страницы; доступна диагностика", "state_verification_failed": "действие отправлено; результат нужно проверить перед повтором", "scope_denied": "действие вне разрешённой области браузера", "access_paused": "доступ к браузеру приостановлен", "disconnected": "соединение с браузером потеряно",
 		"access_denied": "доступ запрещён", "permission_denied": "доступ запрещён", "not_found": "файл или папка не найдены", "outside_allowed_roots": "путь вне разрешённых каталогов",
 		"stale_hash": "файл изменился; нужно перечитать его", "text_not_found": "заменяемый текст не найден", "ambiguous_match": "найдено несколько совпадений текста",
 		"already_exists": "файл уже существует", "binary_file": "двоичный файл нельзя прочитать как текст", "browser_disabled": "браузинг отключён", "cancelled": "действие отменено",

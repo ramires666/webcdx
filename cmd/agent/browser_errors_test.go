@@ -159,7 +159,7 @@ func TestBrowserTypedDOMFailures(t *testing.T) {
 		{"click", "#disabled", "", "element_disabled"}, {"click", "#hidden", "", "element_hidden"},
 		{"click", "#covered", "", "element_obscured"}, {"click", "[", "", "invalid_selector"},
 	} {
-		_, err := f.call("browser_interact", map[string]any{"action": tc.action, "selector": tc.selector, "value": tc.value, "request_key": string(rune('a' + index))})
+		_, err := f.call("browser_interact", map[string]any{"action": tc.action, "selector": tc.selector, "value": tc.value, "select_by": "value", "request_key": string(rune('a' + index))})
 		failure := browserErrorCode(t, err, tc.code)
 		if failure.details["tab_id"] != f.tab || failure.details["operation_id"] == "" {
 			t.Fatalf("missing canonical context: %v", failure.details)

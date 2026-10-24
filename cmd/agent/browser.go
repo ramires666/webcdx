@@ -78,18 +78,19 @@ type browserTab struct {
 }
 
 type browserOperation struct {
-	ID           string         `json:"operation_id"`
-	KeyHash      string         `json:"key_hash,omitempty"`
-	Hash         string         `json:"hash,omitempty"`
-	Status       string         `json:"status"`
-	At           time.Time      `json:"at"`
-	Result       map[string]any `json:"result,omitempty"`
-	ErrorCode    string         `json:"error_code,omitempty"`
-	ErrorMessage string         `json:"error_message,omitempty"`
-	ErrorDetails map[string]any `json:"error_details,omitempty"`
-	done         chan struct{}
-	cancel       context.CancelFunc
-	image        string
+	ID             string         `json:"operation_id"`
+	KeyHash        string         `json:"key_hash,omitempty"`
+	Hash           string         `json:"hash,omitempty"`
+	Status         string         `json:"status"`
+	At             time.Time      `json:"at"`
+	Result         map[string]any `json:"result,omitempty"`
+	ErrorCode      string         `json:"error_code,omitempty"`
+	ErrorMessage   string         `json:"error_message,omitempty"`
+	ErrorDetails   map[string]any `json:"error_details,omitempty"`
+	done           chan struct{}
+	cancel         context.CancelFunc
+	image          string
+	errorTransient map[string]any
 }
 
 type browserImage struct {
@@ -323,6 +324,9 @@ func (b *browserManager) operationResult(op *browserOperation) (any, error) {
 		}
 		details := map[string]any{"operation_id": op.ID}
 		for key, value := range op.ErrorDetails {
+			details[key] = value
+		}
+		for key, value := range op.errorTransient {
 			details[key] = value
 		}
 		return nil, &codedError{code: op.ErrorCode, message: message, details: details}
@@ -763,7 +767,7 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 		return nil, browserErrorContext(err, contextArgs)
 	}
 	if object, ok := result.(map[string]any); ok {
-		if name == "browser_interact" && object["status"] != "waiting_user" {
+		if name == "browser_interact" && object["status"] != "waiting_user" && object["confirmation"] == nil {
 			object["confirmation"] = "action_dispatched"
 		}
 		object["browser_session_id"] = id

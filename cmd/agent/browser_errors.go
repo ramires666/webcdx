@@ -9,25 +9,26 @@ import (
 
 // These messages contain no page-provided text, stack, field value or URL.
 var browserFailureMessages = map[string]string{
-	"stale_snapshot":         "snapshot no longer matches this document or frame; obtain a new snapshot",
-	"element_detached":       "element was removed from the document; obtain a new snapshot",
-	"element_not_found":      "no element matches the locator",
-	"ambiguous_locator":      "more than one element matches the locator; specify a container or exact selector",
-	"invalid_selector":       "CSS selector is invalid",
-	"invalid_option_value":   "no enabled select option matches; inspect the snapshot options",
-	"invalid_control_type":   "element does not support this interaction",
-	"element_disabled":       "element is disabled",
-	"element_hidden":         "element is not visible",
-	"element_obscured":       "another element covers the interaction point",
-	"element_not_editable":   "element is not editable",
-	"frame_changed":          "frame execution context changed; obtain a new snapshot",
-	"navigation_pending":     "navigation is changing the document; wait for the target state",
-	"page_evaluation_failed": "page evaluation failed; inspect bounded browser diagnostics",
-	"outcome_unknown":        "action outcome is unknown; verify the target state before any new mutation",
-	"access_paused":          "browser access is paused or was changed locally",
-	"scope_denied":           "operation is outside the locally approved tab or URL scope",
-	"disconnected":           "browser connection or tab is no longer available",
-	"response_too_large":     "browser response exceeds the allowed message budget",
+	"stale_snapshot":            "snapshot no longer matches this document or frame; obtain a new snapshot",
+	"element_detached":          "element was removed from the document; obtain a new snapshot",
+	"element_not_found":         "no element matches the locator",
+	"ambiguous_locator":         "more than one element matches the locator; specify a container or exact selector",
+	"invalid_selector":          "CSS selector is invalid",
+	"invalid_option_value":      "no enabled select option matches; inspect the snapshot options",
+	"state_verification_failed": "interaction was dispatched but its control state could not be verified; read a fresh snapshot before retrying",
+	"invalid_control_type":      "element does not support this interaction",
+	"element_disabled":          "element is disabled",
+	"element_hidden":            "element is not visible",
+	"element_obscured":          "another element covers the interaction point",
+	"element_not_editable":      "element is not editable",
+	"frame_changed":             "frame execution context changed; obtain a new snapshot",
+	"navigation_pending":        "navigation is changing the document; wait for the target state",
+	"page_evaluation_failed":    "page evaluation failed; inspect bounded browser diagnostics",
+	"outcome_unknown":           "action outcome is unknown; verify the target state before any new mutation",
+	"access_paused":             "browser access is paused or was changed locally",
+	"scope_denied":              "operation is outside the locally approved tab or URL scope",
+	"disconnected":              "browser connection or tab is no longer available",
+	"response_too_large":        "browser response exceeds the allowed message budget",
 }
 
 func browserFailureMessage(code string) string {
@@ -67,19 +68,20 @@ func browserEvalExpression(expression string) string {
 	return `(async()=>{try{return {value:await (` + expression + `)}}catch(e){
 const legacy={'not editable':'element_not_editable','contenteditable insert failed':'page_evaluation_failed','not file input':'invalid_control_type'};
 const code=e?.webcodexCode||legacy[e?.message]||'page_evaluation_failed';
-return {error:{code,matches:e?.webcodexMatches}};
+return {error:{code,matches:e?.webcodexMatches,options:e?.webcodexOptions}};
 }})()`
 }
 
-const browserDOMFailure = `function wcFail(code,matches){const e=new Error();e.webcodexCode=code;e.webcodexMatches=matches;throw e}
+const browserDOMFailure = `function wcFail(code,matches,options){const e=new Error();e.webcodexCode=code;e.webcodexMatches=matches;e.webcodexOptions=options;throw e}
 `
 
 func browserEvalResult(raw json.RawMessage, result any) error {
 	var envelope struct {
 		Value json.RawMessage `json:"value"`
 		Error *struct {
-			Code    string `json:"code"`
-			Matches *int   `json:"matches"`
+			Code    string                `json:"code"`
+			Matches *int                  `json:"matches"`
+			Options []browserSelectOption `json:"options"`
 		} `json:"error"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
@@ -93,6 +95,12 @@ func browserEvalResult(raw json.RawMessage, result any) error {
 		failure := &codedError{code: code, message: browserFailureMessage(code)}
 		if count := envelope.Error.Matches; count != nil && *count >= 0 && *count <= 10000 {
 			failure.details = map[string]any{"matches": *count}
+		}
+		if len(envelope.Error.Options) > 0 && len(envelope.Error.Options) <= 100 {
+			if failure.details == nil {
+				failure.details = map[string]any{}
+			}
+			failure.details["options"] = envelope.Error.Options
 		}
 		return failure
 	}
@@ -135,6 +143,8 @@ func (op *browserOperation) fail(err error, args map[string]any) {
 		switch key {
 		case "browser_session_id", "tab_id", "frame_id", "snapshot_id", "matches":
 			op.ErrorDetails[key] = value
+		case "options":
+			op.errorTransient = map[string]any{"options": value}
 		}
 	}
 }
@@ -147,7 +157,7 @@ func browserErrorRecovery(code string) string {
 		return "inspect_options"
 	case "element_not_found", "ambiguous_locator", "element_disabled", "element_hidden", "element_obscured", "invalid_selector", "invalid_control_type", "element_not_editable":
 		return "inspect_locator"
-	case "outcome_unknown":
+	case "outcome_unknown", "state_verification_failed":
 		return "verify_outcome"
 	default:
 		return "inspect_diagnostics"

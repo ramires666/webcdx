@@ -86,12 +86,13 @@ func (b *browserManager) eval(ctx context.Context, t *browserTab, frameID, expre
 	return browserEvalResult(response.Result.Value, result)
 }
 
-const browserDOM = `
+const browserDOM = browserFormDOM + `
 const all=[];
 function walk(root){for(const el of root.querySelectorAll('*')){if(all.length>=10000)break;all.push(el);if(el.shadowRoot)walk(el.shadowRoot)}}
 walk(document);
-function role(el){return el.getAttribute('role')||({A:'link',BUTTON:'button',SELECT:'combobox',TEXTAREA:'textbox'}[el.tagName])||(el.tagName==='INPUT'?(el.type==='checkbox'?'checkbox':el.type==='radio'?'radio':el.type==='password'?'textbox':'textbox'):'')}
-function name(el){return (el.getAttribute('aria-label')||(el.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>document.getElementById(id)?.textContent||'').join(' ').trim()||(el.labels&&[...el.labels].map(x=>x.innerText).join(' '))||el.getAttribute('placeholder')||el.innerText||el.getAttribute('alt')||'').trim().slice(0,256)}
+function role(el){return el.getAttribute('role')||({A:'link',BUTTON:'button',SELECT:'combobox',TEXTAREA:'textbox'}[el.tagName])||(el.tagName==='INPUT'?(el.type==='checkbox'?'checkbox':el.type==='radio'?'radio':'textbox'):el.isContentEditable?'textbox':'')}
+function labelText(label){const copy=label.cloneNode(true);for(const child of copy.querySelectorAll('input,select,textarea,button,[contenteditable]'))child.remove();return copy.textContent.trim()}
+function name(el){return (el.getAttribute('aria-label')||(el.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>document.getElementById(id)?.textContent||'').join(' ').trim()||(el.labels&&[...el.labels].map(labelText).join(' '))||el.getAttribute('placeholder')||el.innerText||el.getAttribute('alt')||'').trim().slice(0,256)}
 `
 
 func browserJS(value any) string { data, _ := json.Marshal(value); return string(data) }
@@ -102,7 +103,7 @@ func (b *browserManager) snapshot(ctx context.Context, t *browserTab, args map[s
 	expression := `(()=>{` + browserDOM + `
 const id=` + browserJS(id) + `,nodes=all.filter(el=>role(el)&&el.getClientRects().length).slice(0,300);
 globalThis.__webcodex={id,nodes,document,url:location.href};
-return {snapshot_id:id,url:location.href,title:document.title,viewport_width:innerWidth,viewport_height:innerHeight,text:(document.body?.innerText||'').slice(0,12000),elements:nodes.map((el,i)=>({element_id:String(i),role:role(el),name:name(el),tag:el.tagName.toLowerCase(),disabled:!!el.disabled,href:el.tagName==='A'?el.href.split(/[?#]/)[0]:'',value:el.type==='password'?'':String(el.value??'').slice(0,256)})),truncated:all.length>=10000||nodes.length>=300||(document.body?.innerText||'').length>12000};})()`
+return {snapshot_id:id,url:location.href,title:document.title,viewport_width:innerWidth,viewport_height:innerHeight,text:(document.body?.innerText||'').slice(0,12000),elements:nodes.map((el,i)=>({element_id:String(i),role:role(el),name:name(el),tag:el.tagName.toLowerCase(),disabled:!!el.disabled,href:el.tagName==='A'?el.href.split(/[?#]/)[0]:'',value:el.type==='password'?'':String(el.value??(el.isContentEditable?el.innerText:'')).slice(0,256),context:fieldContext(el),...(el.tagName==='SELECT'?{options:selectOptions(el),options_truncated:el.options.length>100}:{})})),truncated:all.length>=10000||nodes.length>=300||(document.body?.innerText||'').length>12000};})()`
 	var result map[string]any
 	if err := b.eval(ctx, t, frameID, expression, &result); err != nil {
 		return nil, err
@@ -178,6 +179,11 @@ func (b *browserManager) locator(t *browserTab, args map[string]any) (string, er
 	element, _ := optionalString(args, "element_id")
 	snapshot, _ := optionalString(args, "snapshot_id")
 	frame, _ := optionalString(args, "frame_id")
+	container, _ := optionalString(args, "container_selector")
+	fieldContext, _ := optionalString(args, "context")
+	if container != "" && fieldContext != "" {
+		return "", toolErr("invalid_arguments", "choose container_selector or context")
+	}
 	count := 0
 	for _, value := range []string{css, role, element} {
 		if value != "" {
@@ -188,6 +194,9 @@ func (b *browserManager) locator(t *browserTab, args map[string]any) (string, er
 		return "", toolErr("invalid_arguments", "choose one exact selector, role/name, or snapshot/element_id")
 	}
 	if element != "" {
+		if container != "" || fieldContext != "" {
+			return "", toolErr("invalid_arguments", "snapshot element IDs already identify their exact field")
+		}
 		t.eventMu.Lock()
 		stale := snapshot == "" || snapshot != t.snapshot || frame != t.snapshotFrame
 		t.eventMu.Unlock()
@@ -196,11 +205,17 @@ func (b *browserManager) locator(t *browserTab, args map[string]any) (string, er
 		}
 		return browserDOMFailure + `const snap=globalThis.__webcodex;if(!snap||snap.id!==` + browserJS(snapshot) + `||snap.document!==document||snap.url!==location.href)wcFail('stale_snapshot');const el=snap.nodes[Number(` + browserJS(element) + `)];if(!el||!el.isConnected)wcFail('element_detached');`, nil
 	}
-	query := `all.filter(el=>role(el)===` + browserJS(role) + `&&name(el)===` + browserJS(name) + `)`
+	query := `all.filter(el=>role(el)===` + browserJS(role) + `&&name(el)===` + browserJS(name) + `&&visible(el))`
 	if css != "" {
 		query = `all.filter(el=>el.matches(` + browserJS(css) + `))`
 	}
-	return browserDOMFailure + browserDOM + `let matches;try{matches=` + query + `}catch(e){wcFail('invalid_selector')}if(!matches.length)wcFail('element_not_found',0);if(matches.length!==1)wcFail('ambiguous_locator',matches.length);const el=matches[0];`, nil
+	scope := ""
+	if container != "" {
+		scope = `let groups;try{groups=all.filter(el=>el.matches(` + browserJS(container) + `)&&visible(el))}catch(e){wcFail('invalid_selector')}if(!groups.length)wcFail('element_not_found',0);if(groups.length!==1)wcFail('ambiguous_locator',groups.length);matches=matches.filter(el=>groups[0].contains(el));`
+	} else if fieldContext != "" {
+		scope = `matches=matches.filter(el=>fieldContext(el)===` + browserJS(fieldContext) + `);`
+	}
+	return browserDOMFailure + browserDOM + `let matches;try{matches=` + query + `}catch(e){wcFail('invalid_selector')}` + scope + `if(!matches.length)wcFail('element_not_found',0);if(matches.length!==1)wcFail('ambiguous_locator',matches.length);const el=matches[0];`, nil
 }
 
 func (b *browserManager) interact(ctx context.Context, s *browserSession, t *browserTab, args map[string]any) (any, error) {
@@ -323,9 +338,17 @@ func (b *browserManager) interact(ctx context.Context, s *browserSession, t *bro
 		if info.Password {
 			return map[string]any{"status": "waiting_user", "reason": "password_entry"}, nil
 		}
-		script = `if(!['INPUT','TEXTAREA'].includes(el.tagName)||el.disabled||el.readOnly)throw Error('not editable');const proto=el.tagName==='INPUT'?HTMLInputElement.prototype:HTMLTextAreaElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,` + browserJS(text) + `);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));`
+		script = browserFillScript(text)
 	case "select":
-		script = `if(el.tagName!=='SELECT')wcFail('invalid_control_type');if(el.disabled)wcFail('element_disabled');if(![...el.options].some(x=>x.value===` + browserJS(value) + `&&!x.disabled&&!x.parentElement.disabled))wcFail('invalid_option_value');el.value=` + browserJS(value) + `;el.dispatchEvent(new Event('change',{bubbles:true}));`
+		by, _ := optionalString(args, "select_by")
+		if by == "" {
+			by = "auto"
+		}
+		var selected map[string]any
+		if err := b.eval(ctx, t, frame, `(()=>{`+locator+`return `+browserSelectScript(value, by)+`})()`, &selected); err != nil {
+			return nil, err
+		}
+		return selected, nil
 	case "press":
 		key, err := requiredString(args, "key")
 		if err != nil {

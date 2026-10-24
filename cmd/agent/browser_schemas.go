@@ -13,17 +13,19 @@ func browserToolSchemas() []mcpToolDefinition {
 		return map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required}
 	}
 	common := map[string]any{"browser_session_id": str(), "tab_id": str(), "frame_id": str(), "request_key": map[string]any{"type": "string", "minLength": 1, "maxLength": 128}}
-	locator := map[string]any{"selector": str(), "role": str(), "name": str(), "snapshot_id": str(), "element_id": str()}
+	locator := map[string]any{"selector": str(), "role": str(), "name": str(), "snapshot_id": str(), "element_id": str(), "context": str(), "container_selector": str()}
+	option := object(map[string]any{"label": str(), "value": str(), "disabled": boolean(), "selected": boolean()}, "label", "value", "disabled", "selected")
 	output := object(map[string]any{
 		"browser_session_id": str(), "tab_id": str(), "operation_id": str(), "mode": enum("clean", "persistent", "personal"),
 		"status": enum("ready", "running", "waiting_user", "paused", "completed", "failed", "cancelled", "disconnected"),
 		"url":    str(), "title": str(), "text": str(), "reason": str(), "snapshot_id": str(), "truncated": boolean(),
-		"confirmation": enum("action_dispatched", "condition_matched", "state_verified"),
-		"tabs":         map[string]any{"type": "array", "items": object(map[string]any{"tab_id": str(), "url": str()}, "tab_id", "url")},
-		"elements":     map[string]any{"type": "array", "items": object(map[string]any{"element_id": str(), "role": str(), "name": str(), "tag": str(), "disabled": boolean(), "href": str(), "value": str()}, "element_id", "role", "name", "tag", "disabled", "href", "value")},
-		"frames":       map[string]any{"type": "array", "items": object(map[string]any{"frame_id": str(), "url": str()}, "frame_id", "url")},
-		"events":       map[string]any{"type": "array", "items": object(map[string]any{"event": str(), "at": str(), "url": str(), "detail": str()}, "event", "at")},
-		"mime_type":    str(), "artifact_path": str(), "path": str(), "download_id": str(), "bytes": integer(0, 1<<30),
+		"confirmation":   enum("action_dispatched", "condition_matched", "state_verified", "control_value_verified"),
+		"selected_value": str(), "selected_label": str(),
+		"tabs":      map[string]any{"type": "array", "items": object(map[string]any{"tab_id": str(), "url": str()}, "tab_id", "url")},
+		"elements":  map[string]any{"type": "array", "items": object(map[string]any{"element_id": str(), "role": str(), "name": str(), "tag": str(), "disabled": boolean(), "href": str(), "value": str(), "context": str(), "options": map[string]any{"type": "array", "items": option}, "options_truncated": boolean()}, "element_id", "role", "name", "tag", "disabled", "href", "value")},
+		"frames":    map[string]any{"type": "array", "items": object(map[string]any{"frame_id": str(), "url": str()}, "frame_id", "url")},
+		"events":    map[string]any{"type": "array", "items": object(map[string]any{"event": str(), "at": str(), "url": str(), "detail": str()}, "event", "at")},
+		"mime_type": str(), "artifact_path": str(), "path": str(), "download_id": str(), "bytes": integer(0, 1<<30),
 		"viewport_width": integer(1, 100000), "viewport_height": integer(1, 100000),
 		"image_width": integer(1, 100000), "image_height": integer(1, 100000),
 		"downloads":     map[string]any{"type": "array", "items": object(map[string]any{"download_id": str(), "status": str(), "bytes": integer(0, 1<<30)}, "download_id", "status", "bytes")},
@@ -33,6 +35,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		"code": str(), "message": str(), "details": object(map[string]any{
 			"operation_id": str(), "browser_session_id": str(), "tab_id": str(), "frame_id": str(), "snapshot_id": str(), "matches": integer(0, 10000),
 			"recovery": enum("refresh_snapshot", "inspect_options", "inspect_locator", "verify_outcome", "inspect_diagnostics"),
+			"options":  map[string]any{"type": "array", "items": option},
 		}),
 	}, "code", "message")
 	delete(output, "required")
@@ -48,7 +51,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		{"browser_navigate", "Navigate HTTP/HTTPS or history. Redirects follow the locally configured URL scope.", map[string]any{"action": enum("url", "back", "forward", "reload"), "url": str()}, []string{"browser_session_id", "action", "request_key"}, false, false},
 		{"browser_snapshot", "Read bounded page text and interactive elements, including open shadow roots. Element IDs require this snapshot_id and frame_id.", map[string]any{}, []string{"browser_session_id"}, false, true},
 		{"browser_screenshot", "Return a bounded JPEG as MCP image content, optionally saving a local artifact.", map[string]any{"full_page": boolean(), "save": boolean()}, []string{"browser_session_id"}, false, true},
-		{"browser_interact", "Click, fill, select, hover, press, scroll, drag, handle a dialog or explicitly click viewport coordinates. Locators must match exactly one element. External changes require the user's authorization.", map[string]any{"action": enum("click", "fill", "select", "hover", "press", "scroll", "drag", "coordinates", "dialog"), "text": str(), "value": str(), "key": enum("Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Space"), "accept": boolean(), "x": integer(-100000, 100000), "y": integer(-100000, 100000), "end_x": integer(0, 100000), "end_y": integer(0, 100000), "viewport_width": integer(1, 100000), "viewport_height": integer(1, 100000)}, []string{"browser_session_id", "action", "request_key"}, true, false},
+		{"browser_interact", "Click, fill, select, hover, press, scroll, drag, handle a dialog or explicitly click viewport coordinates. Locators must match exactly one element. External changes require the user's authorization.", map[string]any{"action": enum("click", "fill", "select", "hover", "press", "scroll", "drag", "coordinates", "dialog"), "text": str(), "value": str(), "select_by": enum("auto", "value", "label"), "key": enum("Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Space"), "accept": boolean(), "x": integer(-100000, 100000), "y": integer(-100000, 100000), "end_x": integer(0, 100000), "end_y": integer(0, 100000), "viewport_width": integer(1, 100000), "viewport_height": integer(1, 100000)}, []string{"browser_session_id", "action", "request_key"}, true, false},
 		{"browser_wait", "Wait up to 25 seconds for load, exact URL, text or a unique visible element. Poll browser_control with operation_id if status is running.", map[string]any{"condition": enum("load", "url", "text", "element"), "text": str(), "url": str(), "timeout_seconds": integer(1, 25)}, []string{"browser_session_id", "condition"}, true, true},
 		{"browser_files", "Upload a permitted file, enable downloads, read download status or save a completed download without overwriting.", map[string]any{"action": enum("upload", "enable_downloads", "downloads", "save_download"), "path": str(), "download_id": str()}, []string{"browser_session_id", "action"}, true, false},
 		{"browser_diagnostics", "Read bounded console errors and failed requests without headers, bodies, cookies or query secrets.", map[string]any{}, []string{"browser_session_id"}, false, true},
