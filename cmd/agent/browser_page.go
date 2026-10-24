@@ -23,6 +23,9 @@ func (b *browserManager) pageFrame(ctx context.Context, t *browserTab, wanted st
 		}
 	}
 	if frame == nil {
+		if wanted == "" {
+			return nil, toolErr("navigation_pending", browserFailureMessage("navigation_pending"))
+		}
 		return nil, toolErr("unknown_frame", "frame does not belong to this tab")
 	}
 	u, _ := frame["url"].(string)
@@ -100,16 +103,21 @@ func browserJS(value any) string { data, _ := json.Marshal(value); return string
 func (b *browserManager) snapshot(ctx context.Context, t *browserTab, args map[string]any) (any, error) {
 	frameID, _ := optionalString(args, "frame_id")
 	id := browserID("snapshot_")
-	expression := `(()=>{` + browserDOM + `
-const id=` + browserJS(id) + `,nodes=all.filter(el=>role(el)&&el.getClientRects().length).slice(0,300);
-globalThis.__webcodex={id,nodes,document,url:location.href};
-return {snapshot_id:id,url:location.href,title:document.title,viewport_width:innerWidth,viewport_height:innerHeight,text:(document.body?.innerText||'').slice(0,12000),elements:nodes.map((el,i)=>({element_id:String(i),role:role(el),name:name(el),tag:el.tagName.toLowerCase(),disabled:!!el.disabled,href:el.tagName==='A'?el.href.split(/[?#]/)[0]:'',value:el.type==='password'?'':String(el.value??(el.isContentEditable?el.innerText:'')).slice(0,256),context:fieldContext(el),...(el.tagName==='SELECT'?{options:selectOptions(el),options_truncated:el.options.length>100}:{})})),truncated:all.length>=10000||nodes.length>=300||(document.body?.innerText||'').length>12000};})()`
+	container, _ := optionalString(args, "container_selector")
+	page, err := b.pageFrame(ctx, t, frameID)
+	if err != nil {
+		return nil, err
+	}
+	canonicalFrame, _ := page["id"].(string)
+	expression := browserSnapshotExpression(id, container)
 	var result map[string]any
 	if err := b.eval(ctx, t, frameID, expression, &result); err != nil {
 		return nil, err
 	}
 	u, _ := result["url"].(string)
 	result["url"] = safeBrowserURL(u)
+	result["frame_id"] = canonicalFrame
+	result["observed_at"] = time.Now().UTC().Format(timeFormat)
 	frames := []map[string]any{}
 	if available, err := t.frames(ctx); err == nil {
 		for _, f := range available {
@@ -135,23 +143,40 @@ return {snapshot_id:id,url:location.href,title:document.title,viewport_width:inn
 	if frameID != "" {
 		axParams["frameId"] = frameID
 	}
-	if err := t.command(ctx, "Accessibility.getFullAXTree", axParams, &ax); err == nil {
-		for _, node := range ax.Nodes[:min(200, len(ax.Nodes))] {
-			name, _ := truncateUTF8(node.Name.Value, 256)
-			accessibility = append(accessibility, map[string]any{"node_id": node.ID, "role": node.Role.Value, "name": name, "children": node.Children})
+	if container == "" {
+		if err := t.command(ctx, "Accessibility.getFullAXTree", axParams, &ax); err == nil {
+			result["accessibility_status"] = "available"
+			if len(ax.Nodes) > 200 {
+				snapshotReason(result, "accessibility_limit")
+			}
+			for _, node := range ax.Nodes[:min(200, len(ax.Nodes))] {
+				name, _ := truncateUTF8(node.Name.Value, 256)
+				accessibility = append(accessibility, map[string]any{"node_id": node.ID, "role": node.Role.Value, "name": name, "children": node.Children})
+			}
+		}
+	}
+	if result["accessibility_status"] == nil {
+		result["accessibility_status"] = "unavailable"
+		if container != "" {
+			result["accessibility_status"] = "omitted_for_scope"
 		}
 	}
 	result["accessibility"] = accessibility
+	counts := result["counts"].(map[string]any)
+	counts["ax_found"] = len(ax.Nodes)
 	t.eventMu.Lock()
 	t.snapshot = id
-	t.snapshotFrame = frameID
+	t.snapshotFrame = canonicalFrame
+	t.snapshotMain = frameID == ""
 	t.eventMu.Unlock()
 	for {
+		counts["elements_returned"] = len(result["elements"].([]any))
+		counts["ax_returned"] = len(accessibility)
 		encoded, _ := json.Marshal(result)
 		if len(encoded) <= min(b.executor.maxResponse/4, 65536) {
 			break
 		}
-		result["truncated"] = true
+		snapshotReason(result, "response_budget")
 		if len(accessibility) > 0 {
 			accessibility = accessibility[:len(accessibility)/2]
 			result["accessibility"] = accessibility
@@ -198,7 +223,7 @@ func (b *browserManager) locator(t *browserTab, args map[string]any) (string, er
 			return "", toolErr("invalid_arguments", "snapshot element IDs already identify their exact field")
 		}
 		t.eventMu.Lock()
-		stale := snapshot == "" || snapshot != t.snapshot || frame != t.snapshotFrame
+		stale := snapshot == "" || snapshot != t.snapshot || (frame != t.snapshotFrame && !(frame == "" && t.snapshotMain))
 		t.eventMu.Unlock()
 		if stale {
 			return "", toolErr("stale_snapshot", browserFailureMessage("stale_snapshot"))
@@ -379,11 +404,21 @@ func (b *browserManager) interact(ctx context.Context, s *browserSession, t *bro
 }
 
 func (b *browserManager) elementPoint(ctx context.Context, t *browserTab, frame, locator string) (float64, float64, error) {
+	ownerFrame := frame
 	if frame != "" {
+		frames, err := t.frames(ctx)
+		if err != nil {
+			return 0, 0, err
+		}
+		if len(frames) > 0 && frames[0]["id"] == frame {
+			ownerFrame = ""
+		}
+	}
+	if ownerFrame != "" {
 		var owner struct {
 			ID int `json:"backendNodeId"`
 		}
-		if err := t.command(ctx, "DOM.getFrameOwner", map[string]any{"frameId": frame}, &owner); err != nil {
+		if err := t.command(ctx, "DOM.getFrameOwner", map[string]any{"frameId": ownerFrame}, &owner); err != nil {
 			return 0, 0, err
 		}
 		if err := t.command(ctx, "DOM.scrollIntoViewIfNeeded", map[string]any{"backendNodeId": owner.ID}, nil); err != nil {
@@ -394,11 +429,11 @@ func (b *browserManager) elementPoint(ctx context.Context, t *browserTab, frame,
 	if err := b.eval(ctx, t, frame, `(async()=>{`+locator+`if(el.disabled)wcFail('element_disabled');el.scrollIntoView({block:'center'});await Promise.race([new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))),new Promise(resolve=>setTimeout(resolve,200))]);if(!el.isConnected)wcFail('element_detached');const r=el.getBoundingClientRect();if(!r.width||!r.height)wcFail('element_hidden');const x=r.x+r.width/2,y=r.y+r.height/2;let hit=document.elementFromPoint(x,y);while(hit?.shadowRoot){const inner=hit.shadowRoot.elementFromPoint(x,y);if(!inner||inner===hit)break;hit=inner}let covered=true;for(let node=hit;node;node=node.getRootNode()?.host){if(node===el||el.contains(node)){covered=false;break}}if(covered)wcFail('element_obscured');return {X:x,Y:y}})()`, &point); err != nil {
 		return 0, 0, err
 	}
-	if frame != "" {
+	if ownerFrame != "" {
 		var owner struct {
 			ID int `json:"backendNodeId"`
 		}
-		if err := t.command(ctx, "DOM.getFrameOwner", map[string]any{"frameId": frame}, &owner); err != nil {
+		if err := t.command(ctx, "DOM.getFrameOwner", map[string]any{"frameId": ownerFrame}, &owner); err != nil {
 			return 0, 0, err
 		}
 		var box struct {
@@ -416,63 +451,6 @@ func (b *browserManager) elementPoint(ctx context.Context, t *browserTab, frame,
 		point.Y += box.Model.Content[1]
 	}
 	return point.X, point.Y, nil
-}
-
-func (b *browserManager) wait(ctx context.Context, t *browserTab, args map[string]any) (any, error) {
-	condition, _ := requiredString(args, "condition")
-	frame, _ := optionalString(args, "frame_id")
-	seconds, err := optionalInt(args, "timeout_seconds", 10, 1, 25)
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
-	defer cancel()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		expression := `document.readyState==='complete'`
-		switch condition {
-		case "text":
-			text, err := requiredString(args, "text")
-			if err != nil {
-				return nil, err
-			}
-			expression = `(document.body?.innerText||'').includes(` + browserJS(text) + `)`
-		case "url":
-			raw, err := requiredString(args, "url")
-			if err != nil {
-				return nil, err
-			}
-			if err := b.checkURL(raw); err != nil {
-				return nil, err
-			}
-			expression = `location.href===` + browserJS(raw)
-		case "element":
-			locator, err := b.locator(t, args)
-			if err != nil {
-				return nil, err
-			}
-			expression = `(()=>{` + locator + `return !!el.getClientRects().length})()`
-		case "load":
-		default:
-			return nil, toolErr("invalid_arguments", "unknown wait condition")
-		}
-		var ready bool
-		if err := b.eval(ctx, t, frame, expression, &ready); err == nil && ready {
-			return map[string]any{"status": "completed"}, nil
-		}
-		t.eventMu.Lock()
-		dialog := t.dialog
-		t.eventMu.Unlock()
-		if dialog {
-			return map[string]any{"status": "waiting_user", "reason": "browser_dialog"}, nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil, toolErr("wait_timeout", "browser wait ended without matching condition")
-		case <-ticker.C:
-		}
-	}
 }
 
 func (b *browserManager) tabAction(ctx context.Context, name string, s *browserSession, t *browserTab, args map[string]any) (any, error) {

@@ -68,6 +68,7 @@ type browserTab struct {
 	eventMu                 sync.Mutex
 	worlds                  map[string]int
 	snapshot, snapshotFrame string
+	snapshotMain            bool
 	diagnostics             []map[string]any
 	dialog                  bool
 	blocked                 bool

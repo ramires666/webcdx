@@ -126,6 +126,11 @@ func newBrowserFixture(t *testing.T, html string) *browserFixture {
 func (f *browserFixture) call(name string, args map[string]any) (any, error) {
 	f.t.Helper()
 	args["browser_session_id"], args["tab_id"] = f.session, f.tab
+	// Match the JSON number types used by real tools/call requests.
+	encoded, _ := json.Marshal(args)
+	if err := json.Unmarshal(encoded, &args); err != nil {
+		f.t.Fatal(err)
+	}
 	result, err := f.b.call(f.ctx, name, args)
 	for err == nil {
 		object, ok := result.(map[string]any)
