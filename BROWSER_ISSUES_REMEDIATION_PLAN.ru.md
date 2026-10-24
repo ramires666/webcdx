@@ -257,3 +257,7 @@ Managed browser tests включаются отдельно через `WEBCODEX
 - `go test -json ./...` вне ограничений sandbox: 97 тестов успешно, 0 failures; пакеты agent/Gate прошли. `TestBrowserManagedEndToEnd` и `TestInstalledPersonalBrowserLive` пропущены без opt-in. `internal/protocol` не содержит тестов. Обычный прогон в sandbox ранее завершился ошибками доступа к остановке тестовых процессов и кешу Go; повтор вне этих ограничений прошёл, поэтому это не записано как новый дефект проекта.
 - Документ проверен на корректное чтение UTF-8, отсутствие replacement characters и trailing whitespace, парность fenced code blocks; состав коммита и `git diff --check` проверяются перед записью.
 - Реальный LinkedIn/GitHub и личный браузер в этом этапе не использовались; preview/reorder не воспроизводились повторно. Отсутствующие trace и версии нельзя заменить предположениями.
+
+## 6. Выполнение
+
+- **Этап 1 завершён:** классификация проверяет полный ограниченный буфер; добавлены регрессии 2/3/4-байтовых символов около 8192, BOM/CRLF, NUL/повреждения после 8192 и UTF-8 отчёта >30 KB через write/read/edit/search/preview. Targeted Go tests прошли.

@@ -480,11 +480,9 @@ func truncateUTF8(value string, maxBytes int) (string, bool) {
 }
 
 func isBinary(data []byte) bool {
-	sample := data
-	if len(sample) > 8192 {
-		sample = sample[:8192]
-	}
-	return bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample)
+	// File readers already enforce a size limit and return complete buffers.
+	// Sampling can split a UTF-8 rune and incorrectly reject valid text.
+	return bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data)
 }
 
 func skippedDirectory(name string) bool {
