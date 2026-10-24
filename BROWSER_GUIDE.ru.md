@@ -203,3 +203,65 @@ go test -run TestBrowserManagedEndToEnd -count=1 ./cmd/agent
 Автотест использует локальный сайт и отдельный временный профиль;
 живые аккаунты не используются. Откат: выключить браузерную функцию и
 подключить `/mcp/v4`; постоянный/личный профиль не удалять.
+
+## Устойчивое заполнение форм и восстановление после ошибки
+
+`browser_snapshot` возвращает `observed_at`, `frame_id`, `document_generation`,
+`ready_state`, `counts` и `truncation_reasons`. `ready_state=complete` означает
+загрузку документа, но не готовность About, autocomplete или модалки. Ждите
+конкретный элемент/текст через `browser_wait`, затем читайте новый snapshot.
+`container_selector` у snapshot ограничивает чтение секцией; AX для такого
+снимка явно помечается `omitted_for_scope`. Новый snapshot заменяет старые IDs
+вкладки, включая снимки других frames.
+
+У native select в `elements` есть `options` с label/value/disabled/selected
+и `context` ближайшей группы/fieldset. Для Start Month можно вызвать:
+
+```json
+{"browser_session_id":"<session>","tab_id":"<tab>","action":"select","role":"combobox","name":"Month","context":"Start date","value":"October","select_by":"label","request_key":"start-month-unique"}
+```
+
+`select_by=auto` (по умолчанию) сначала ищет точный value, затем единственный
+точный label; `value` и `label` задают явный режим. Нечётких совпадений нет.
+Вместо context можно задать уникальный CSS `container_selector`. Пароли, MFA
+и CAPTCHA по-прежнему вводятся пользователем. `fill` поддерживает обычные
+поля и contenteditable, включая очистку.
+
+Для `browser_wait` доступны `condition=value` с selector/value, а для
+`condition=element` — `state=visible|enabled|absent`. Ошибочный селектор,
+неоднозначность и запрет доступа возвращаются сразу, а не маскируются timeout.
+
+Для проверки результата действия у `browser_interact` можно задать:
+
+```json
+{"browser_session_id":"<session>","tab_id":"<tab>","action":"click","selector":"button.save","verify_selector":"#saved-project","verify_text":"VectorPlay","verify_timeout_seconds":10,"request_key":"save-project-unique"}
+```
+
+`confirmation=action_dispatched` подтверждает отправку UI-действия;
+`control_value_verified` — выбранное значение select; `state_verified` —
+выполнение заданного условия на текущей странице. Долговременное сохранение
+проверяйте отдельным чтением сохранённой записи/страницы. Условие проверки
+должно отличать ожидаемый результат от уже существовавшего текста.
+
+Если проверка после клика не прошла, возвращается `state_verification_failed`
+с `recovery=verify_outcome` и исходным `verification_error_code`. Клик мог
+уже сработать: новый Save/Post/Delete автоматически не выполняйте.
+Потерянный ответ восстанавливайте тем же request_key и теми же аргументами;
+status и повтор этого ключа не отправляют действие снова. Изменённый snapshot
+или аргументы требуют нового ключа только после проверки предыдущего исхода.
+
+Для необязательных media: сохраните подготовленные поля в разрешённом локальном
+черновике, сохраните и проверьте основную запись, затем отдельно добавляйте media,
+если сайт позволяет такой порядок. После preview 500/timeout получите fresh
+snapshot, закройте модалку через доступный Back/Cancel и проверьте поля.
+Не перезагружайте несохранённую форму автоматически. Если один повтор поиска
+не помог, остановите сценарий и сохраните диагностику. Bridge не исправляет
+сервер preview LinkedIn и не создаёт недоступные в UI способы вложения ссылок.
+
+`error.details` содержит operation/session/tab/frame/snapshot IDs и направление
+восстановления. `browser_diagnostics` принимает необязательный `operation_id`:
+результат связывает ошибки с запросами и операцией при начале запроса. Это
+временная корреляция, не доказательство причинности. Возвращаются origin без
+путей/query, HTTP status, категория ошибки и длительность при известном старте;
+аргументы console, headers/bodies и тексты форм исключены. Последние 100 событий
+и до 256 request traces ограничены; `dropped_events` объясняет усечение.

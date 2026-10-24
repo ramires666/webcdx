@@ -289,6 +289,9 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 		} else {
 			op.Result, _ = result.(map[string]any)
 		}
+		if op.Result != nil {
+			op.Result["operation_id"] = op.ID
+		}
 		if err := b.saveOperation(op); err != nil {
 			op.Status = "failed"
 			op.ErrorCode = "outcome_unknown"

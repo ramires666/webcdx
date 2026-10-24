@@ -535,7 +535,7 @@ func (b *browserManager) tabAction(ctx context.Context, name string, s *browserS
 	case "browser_screenshot":
 		return b.screenshot(ctx, s, t, args)
 	case "browser_interact":
-		return b.interact(ctx, s, t, args)
+		return b.verifiedInteract(ctx, s, t, args)
 	case "browser_wait":
 		return b.wait(ctx, t, args)
 	case "browser_diagnostics":

@@ -99,11 +99,19 @@ func newBrowserFixture(t *testing.T, html string) *browserFixture {
 	if os.Getenv("WEBCODEX_BROWSER_TEST") != "1" {
 		t.Skip("set WEBCODEX_BROWSER_TEST=1 for local browser fixtures")
 	}
-	e, root := testExecutor(t)
-	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newBrowserFixtureHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte("<!doctype html><title>Fixture</title><div>fixture ready</div>" + html))
 	}))
+}
+
+func newBrowserFixtureHandler(t *testing.T, handler http.Handler) *browserFixture {
+	t.Helper()
+	if os.Getenv("WEBCODEX_BROWSER_TEST") != "1" {
+		t.Skip("set WEBCODEX_BROWSER_TEST=1 for local browser fixtures")
+	}
+	e, root := testExecutor(t)
+	site := httptest.NewServer(handler)
 	t.Cleanup(site.Close)
 	b, err := newBrowserManager(e, browserConfig{Enabled: true, Dir: filepath.Join(root, "fixture-browser"), Executable: os.Getenv("WEBCODEX_BROWSER_PATH"), AllowLocal: true, Headless: true})
 	if err != nil {

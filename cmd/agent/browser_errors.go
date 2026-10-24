@@ -141,7 +141,7 @@ func (op *browserOperation) fail(err error, args map[string]any) {
 	op.ErrorDetails["recovery"] = browserErrorRecovery(failure.code)
 	for key, value := range failure.details {
 		switch key {
-		case "browser_session_id", "tab_id", "frame_id", "snapshot_id", "matches":
+		case "browser_session_id", "tab_id", "frame_id", "snapshot_id", "matches", "verification_error_code":
 			op.ErrorDetails[key] = value
 		case "options":
 			op.errorTransient = map[string]any{"options": value}
