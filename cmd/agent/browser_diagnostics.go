@@ -58,7 +58,8 @@ func (b *browserManager) recordBrowserEvent(t *browserTab, method string, event 
 		id = ""
 	}
 	switch method {
-	case "Page.frameNavigated", "Page.navigatedWithinDocument", "WebCodex.detached":
+	case "Page.frameNavigated", "Page.navigatedWithinDocument", "Runtime.executionContextsCleared", "Runtime.executionContextDestroyed", "WebCodex.detached":
+		t.frameEpoch++
 		t.snapshot = ""
 		t.worlds = map[string]int{}
 		if method == "WebCodex.detached" {

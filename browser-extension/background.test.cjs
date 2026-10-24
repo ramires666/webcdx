@@ -430,3 +430,72 @@ test('profile identity and local alias persist without expanding page access',as
   assert.equal(restarted.sent.find(x=>x.kind==='identity').profile_id,identity.profile_id);
   assert.equal((await restarted.message({type:'status'})).alias,'edge-work');
 });
+
+test('scope update burst coalesces into one catalogue query',async()=>{
+  const e=await environment();
+  e.run('continuous=true');
+  let queries=0;
+  e.chrome.tabs.query=async()=>{queries++;return [...e.tabs.values()]};
+  const burst=e.run(`(()=>{const updates=Array.from({length:32},()=>scopeUpdate());return {same:updates.every(update=>update===updates[0]),updates}})()`);
+  assert.equal(burst.same,true);
+  await Promise.all(burst.updates);
+  assert.equal(queries,1);
+});
+
+test('scope changes during publication schedule one fresh latest catalogue',async()=>{
+  const e=await environment();
+  e.run('continuous=true');
+  const original={...e.tabs.get(7),title:'old'};
+  const resolvers=[];
+  let queries=0;
+  e.chrome.tabs.query=()=>{queries++;return new Promise(resolve=>resolvers.push(resolve))};
+  const first=e.run('scopeUpdate()');
+  await e.flush();
+  assert.equal(queries,1);
+
+  e.tabs.get(7).title='latest';
+  const pending=e.run(`(()=>{const updates=Array.from({length:8},()=>scopeUpdate());return {same:updates.every(update=>update===updates[0]),updates}})()`);
+  assert.equal(pending.same,true);
+  resolvers[0]([original]);
+  for(let i=0;i<20&&queries<2;i++)await e.flush();
+  assert.equal(queries,2);
+  resolvers[1]([...e.tabs.values()]);
+  await Promise.all([first,...pending.updates]);
+  assert.equal(queries,2);
+  const scopes=e.sent.filter(message=>message.kind==='scope');
+  assert.equal(scopes.at(-1).tabs[0].title,'latest');
+});
+
+test('scope query failure rejects its drain and a later update recovers',async()=>{
+  const e=await environment();
+  e.run('continuous=true');
+  let queries=0;
+  e.chrome.tabs.query=async()=>{
+    if(++queries===1)throw Error('query failed');
+    return [...e.tabs.values()];
+  };
+  await assert.rejects(e.run('scopeUpdate()'),/query failed/);
+  await e.run('scopeUpdate()');
+  assert.equal(queries,2);
+  assert.equal(e.sent.filter(message=>message.kind==='scope').length,1);
+});
+
+test('local pause guards commands while scope publication is delayed',async()=>{
+  const {e,send,command}=await connectedPersonal();
+  e.run('continuous=true');
+  let resolveQuery;
+  e.chrome.tabs.query=()=>new Promise(resolve=>{resolveQuery=resolve});
+  const pause=e.message({type:'pause'});
+  for(let i=0;i<20&&!resolveQuery;i++)await e.flush();
+  assert.equal(typeof resolveQuery,'function');
+  assert.equal(e.run('paused'),true);
+  assert.equal(e.run('localPaused'),true);
+
+  send(command('pause-guarded-input','Input.dispatchMouseEvent',{params:{type:'mousePressed',x:1,y:1}}));
+  await e.flush();await e.flush();
+  assert.match(responseFor(e,'pause-guarded-input').error,/local control paused|cancelled/i);
+  assert.equal(e.commands.some(call=>call.method.startsWith('Input.')),false);
+
+  resolveQuery([...e.tabs.values()]);
+  await pause;
+});

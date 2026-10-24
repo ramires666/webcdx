@@ -54,6 +54,7 @@ func (b *browserManager) eval(ctx context.Context, t *browserTab, frameID, expre
 	}()
 	t.eventMu.Lock()
 	world := t.worlds[id]
+	epoch := t.frameEpoch
 	t.eventMu.Unlock()
 	if world == 0 {
 		var res struct {
@@ -73,7 +74,9 @@ func (b *browserManager) eval(ctx context.Context, t *browserTab, frameID, expre
 		} `json:"result"`
 		Exception json.RawMessage `json:"exceptionDetails"`
 	}
-	if err := t.commandFrame(ctx, id, "Runtime.evaluate", map[string]any{"expression": browserEvalExpression(expression), "contextId": world, "returnByValue": true, "awaitPromise": true, "silent": true, "userGesture": ctx.Value(browserUserGesture{}) == true}, &response); err != nil {
+	url, _ := frame["url"].(string)
+	guarded := `(()=>{if(location.href!==` + browserJS(url) + `){const e=new Error();e.webcodexCode='frame_changed';throw e}return (` + expression + `)})()`
+	if err := t.commandFrame(ctx, id, "Runtime.evaluate", map[string]any{"expression": browserEvalExpression(guarded), "contextId": world, "returnByValue": true, "awaitPromise": true, "silent": true, "userGesture": ctx.Value(browserUserGesture{}) == true}, &response); err != nil {
 		var coded *codedError
 		if errors.As(err, &coded) && coded.code == "frame_changed" {
 			t.eventMu.Lock()
@@ -83,24 +86,29 @@ func (b *browserManager) eval(ctx context.Context, t *browserTab, frameID, expre
 		}
 		return err
 	}
+	if browserFrameEpoch(t) != epoch {
+		return toolErr("frame_changed", browserFailureMessage("frame_changed"))
+	}
 	if len(response.Exception) > 0 {
 		return toolErr("page_evaluation_failed", browserFailureMessage("page_evaluation_failed"))
 	}
 	return browserEvalResult(response.Result.Value, result)
 }
 
-const browserDOM = browserFormDOM + `
+const browserDOMBase = browserFormDOM + `
 const all=[];
 function walk(root){for(const el of root.querySelectorAll('*')){if(all.length>=10000)break;all.push(el);if(el.shadowRoot)walk(el.shadowRoot)}}
-walk(document);
 function role(el){return el.getAttribute('role')||({A:'link',BUTTON:'button',SELECT:'combobox',TEXTAREA:'textbox'}[el.tagName])||(el.tagName==='INPUT'?(el.type==='checkbox'?'checkbox':el.type==='radio'?'radio':'textbox'):el.isContentEditable?'textbox':'')}
 function labelText(label){const copy=label.cloneNode(true);for(const child of copy.querySelectorAll('input,select,textarea,button,[contenteditable]'))child.remove();return copy.textContent.trim()}
 function name(el){return (el.getAttribute('aria-label')||(el.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>document.getElementById(id)?.textContent||'').join(' ').trim()||(el.labels&&[...el.labels].map(labelText).join(' '))||el.getAttribute('placeholder')||el.innerText||el.getAttribute('alt')||'').trim().slice(0,256)}
 `
 
+const browserDOM = browserDOMBase + `walk(document);`
+
 func browserJS(value any) string { data, _ := json.Marshal(value); return string(data) }
 
 func (b *browserManager) snapshot(ctx context.Context, t *browserTab, args map[string]any) (any, error) {
+	ctx = withBrowserFrameReads(ctx)
 	frameID, _ := optionalString(args, "frame_id")
 	id := browserID("snapshot_")
 	container, _ := optionalString(args, "container_selector")
@@ -143,7 +151,7 @@ func (b *browserManager) snapshot(ctx context.Context, t *browserTab, args map[s
 	if frameID != "" {
 		axParams["frameId"] = frameID
 	}
-	if container == "" {
+	if container == "" && args["detail"] != "light" {
 		if err := t.command(ctx, "Accessibility.getFullAXTree", axParams, &ax); err == nil {
 			result["accessibility_status"] = "available"
 			if len(ax.Nodes) > 200 {
@@ -159,6 +167,8 @@ func (b *browserManager) snapshot(ctx context.Context, t *browserTab, args map[s
 		result["accessibility_status"] = "unavailable"
 		if container != "" {
 			result["accessibility_status"] = "omitted_for_scope"
+		} else if args["detail"] == "light" {
+			result["accessibility_status"] = "omitted_by_request"
 		}
 	}
 	result["accessibility"] = accessibility
@@ -454,6 +464,7 @@ func (b *browserManager) elementPoint(ctx context.Context, t *browserTab, frame,
 }
 
 func (b *browserManager) tabAction(ctx context.Context, name string, s *browserSession, t *browserTab, args map[string]any) (any, error) {
+	ctx = withBrowserFrameReads(ctx)
 	frame, _ := optionalString(args, "frame_id")
 	page, err := b.pageFrame(ctx, t, frame)
 	if err != nil {

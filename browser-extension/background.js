@@ -13,7 +13,8 @@ const downloads = new Map();
 const childSessions = new Map();
 const urlChecks = new Map();
 let port, paused = false, localPaused = false, allowLocal = false, allowNew = false, continuous = false, connected = false;
-let scopeSerial = Promise.resolve(), settingsWrites = Promise.resolve(), ready, reconnectTimer, reconnectDelay = 2000, accessEpoch = 0;
+let scopeScheduled = false, scopePublishing, scopeQueued;
+let settingsWrites = Promise.resolve(), ready, reconnectTimer, reconnectDelay = 2000, accessEpoch = 0;
 const methods = new Set(['Page.enable','Runtime.enable','Network.enable','Page.navigate','Page.getFrameTree','Page.createIsolatedWorld','Runtime.evaluate','Page.reload','Page.getNavigationHistory','Page.navigateToHistoryEntry','Page.bringToFront','Page.captureScreenshot','Page.getLayoutMetrics','Page.handleJavaScriptDialog','Input.dispatchMouseEvent','Input.dispatchKeyEvent','DOM.getFrameOwner','DOM.getBoxModel','DOM.setFileInputFiles','Accessibility.getFullAXTree']);
 methods.add('DOM.scrollIntoViewIfNeeded');
 
@@ -92,9 +93,41 @@ async function publishScope() {
   await chrome.action.setBadgeText({text:paused ? 'PAUSE' : continuous ? connected ? 'AUTO' : 'WAIT' : attached.size ? 'ON' : ''});
   await chrome.action.setBadgeBackgroundColor({color:paused ? '#b45309' : '#0369a1'});
 }
+function newScopeBatch() {
+  let resolve, reject;
+  const promise = new Promise((ok,fail) => { resolve=ok;reject=fail; });
+  return {promise,resolve,reject};
+}
+async function drainScopeUpdates() {
+  scopeScheduled = false;
+  if (scopePublishing || !scopeQueued) return;
+  const batch = scopeQueued;
+  scopeQueued = undefined;
+  scopePublishing = batch;
+  try {
+    await publishScope();
+    batch.resolve();
+  } catch (error) {
+    batch.reject(error);
+  } finally {
+    scopePublishing = undefined;
+    if (scopeQueued && !scopeScheduled) {
+      scopeScheduled = true;
+      Promise.resolve().then(drainScopeUpdates);
+    }
+  }
+}
 function scopeUpdate() {
-  scopeSerial = scopeSerial.catch(() => {}).then(publishScope);
-  return scopeSerial;
+  if (scopePublishing) {
+    if (!scopeQueued) scopeQueued = newScopeBatch();
+    return scopeQueued.promise;
+  }
+  if (!scopeQueued) scopeQueued = newScopeBatch();
+  if (!scopeScheduled) {
+    scopeScheduled = true;
+    Promise.resolve().then(drainScopeUpdates);
+  }
+  return scopeQueued.promise;
 }
 async function releaseAttachments() {
   accessEpoch++; invalidateCommands();
@@ -300,7 +333,7 @@ chrome.debugger.onEvent.addListener(async (source,method,event) => {
     if (!permitted(tabURL(tab),scope,scope.created)) { attached.delete(tab.id); try { await chrome.debugger.detach({tabId:tab.id}); } catch {} }
     await scopeUpdate();
   }
-  if (!['Page.frameNavigated','Page.navigatedWithinDocument','Page.javascriptDialogOpening','Page.javascriptDialogClosed','Runtime.exceptionThrown','Runtime.consoleAPICalled','Network.loadingFailed','Network.responseReceived','Network.requestWillBeSent','Network.loadingFinished'].includes(method)) return;
+  if (!['Page.frameNavigated','Page.navigatedWithinDocument','Page.javascriptDialogOpening','Page.javascriptDialogClosed','Runtime.executionContextsCleared','Runtime.executionContextDestroyed','Runtime.exceptionThrown','Runtime.consoleAPICalled','Network.loadingFailed','Network.responseReceived','Network.requestWillBeSent','Network.loadingFinished'].includes(method)) return;
   const sanitized = {};
   if (event.type) sanitized.type = event.type;
   if (event.requestId) sanitized.requestId = `${source.sessionId||'root'}:${String(event.requestId).slice(0,120)}`;

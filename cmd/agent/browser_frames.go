@@ -7,6 +7,20 @@ import (
 )
 
 func (t *browserTab) frames(ctx context.Context) ([]map[string]any, error) {
+	epoch := browserFrameEpoch(t)
+	cache, _ := ctx.Value(browserFrameReadContext{}).(*browserFrameRead)
+	if cache != nil && cache.tab == t && cache.epoch == epoch && cache.frames != nil {
+		return cache.frames, nil
+	}
+	remember := func(frames []map[string]any) ([]map[string]any, error) {
+		if browserFrameEpoch(t) != epoch {
+			return nil, toolErr("frame_changed", browserFailureMessage("frame_changed"))
+		}
+		if cache != nil {
+			cache.tab, cache.epoch, cache.frames = t, epoch, frames
+		}
+		return frames, nil
+	}
 	var tree struct {
 		FrameTree map[string]any `json:"frameTree"`
 	}
@@ -42,7 +56,7 @@ func (t *browserTab) frames(ctx context.Context) ([]map[string]any, error) {
 				frames = append(frames, frame)
 			}
 		}
-		return frames, nil
+		return remember(frames)
 	}
 	targets, err := chromedp.Targets(t.ctx)
 	if err != nil {
@@ -71,7 +85,7 @@ func (t *browserTab) frames(ctx context.Context) ([]map[string]any, error) {
 			break
 		}
 	}
-	return frames, nil
+	return remember(frames)
 }
 
 func (t *browserTab) commandFrame(ctx context.Context, frameID, method string, params, result any) error {

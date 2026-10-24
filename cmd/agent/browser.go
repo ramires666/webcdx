@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/jpeg"
 	"io"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -31,22 +32,23 @@ type browserConfig struct {
 }
 
 type browserManager struct {
-	mu          sync.Mutex
-	config      browserConfig
-	executor    *nativeExecutor
-	sessions    map[string]*browserSession
-	operations  map[string]*browserOperation
-	journal     map[string]browserJournalEntry
-	cleanupStop context.CancelFunc
-	cleanupDone chan struct{}
-	closed      bool
-	listener    *browserIPCListener
-	bridge      *browserBridge
-	bridges     map[string]*browserBridge
-	bridgePeers map[io.ReadWriteCloser]bool
-	bridgeWG    sync.WaitGroup
-	bridgePath  string
-	artifactMu  sync.Mutex
+	mu              sync.Mutex
+	config          browserConfig
+	executor        *nativeExecutor
+	sessions        map[string]*browserSession
+	operations      map[string]*browserOperation
+	journal         map[string]browserJournalEntry
+	cleanupStop     context.CancelFunc
+	cleanupDone     chan struct{}
+	closed          bool
+	listener        *browserIPCListener
+	bridge          *browserBridge
+	bridges         map[string]*browserBridge
+	bridgePeers     map[io.ReadWriteCloser]bool
+	bridgeWG        sync.WaitGroup
+	bridgePath      string
+	artifactMu      sync.Mutex
+	pendingCleanups []<-chan struct{}
 }
 
 type browserSession struct {
@@ -83,6 +85,7 @@ type browserTab struct {
 	personalReady           bool
 	frameContexts           map[string]context.Context
 	pageTitle, pageURL      string // cached display metadata, protected by eventMu
+	frameEpoch              uint64
 }
 
 type browserOperation struct {
@@ -239,6 +242,10 @@ func (b *browserManager) call(ctx context.Context, name string, args map[string]
 	if b.closed {
 		b.mu.Unlock()
 		return nil, toolErr("disconnected", "browser manager closed")
+	}
+	if browserMutation(name, args) && b.cleanupsPendingLocked() {
+		b.mu.Unlock()
+		return nil, toolErr("browser_busy", "managed browser cleanup is still finishing")
 	}
 	if keyHash != "" {
 		entry, ok := b.journal[keyHash]
@@ -576,7 +583,7 @@ func (b *browserManager) open(ctx context.Context, args map[string]any) (any, er
 	if active >= 4 {
 		b.mu.Unlock()
 		if clean {
-			_ = os.RemoveAll(profile)
+			_ = removeBrowserCleanProfile(filepath.Join(b.config.Dir, "profiles"), profile)
 		}
 		return nil, toolErr("limit_reached", "at most four browser sessions")
 	}
@@ -601,13 +608,27 @@ func (b *browserManager) open(ctx context.Context, args map[string]any) (any, er
 	var closeOnce sync.Once
 	s.cancel = func() {
 		closeOnce.Do(func() {
-			shutdown, done := context.WithTimeout(root, 10*time.Second)
-			_ = chromedp.Cancel(shutdown)
-			done()
-			stopRoot()
-			stopAlloc()
-			if clean {
-				_ = os.RemoveAll(profile)
+			pending := browserCleanup(func() {
+				shutdown, done := context.WithTimeout(root, 2*time.Second)
+				_ = chromedp.Cancel(shutdown)
+				done()
+				stopRoot()
+				stopAlloc()
+				if clean {
+					if err := removeBrowserCleanProfile(filepath.Join(b.config.Dir, "profiles"), profile); err != nil {
+						log.Print("⚠ Не удалось удалить временный профиль браузера")
+					}
+				}
+			}, func() {
+				if browser := chromedp.FromContext(root).Browser; browser != nil && browser.Process() != nil {
+					_ = browser.Process().Kill()
+				}
+			}, 3*time.Second)
+			if pending != nil {
+				b.mu.Lock()
+				b.pendingCleanups = append(b.pendingCleanups, pending)
+				b.mu.Unlock()
+				log.Print("⚠ Закрытие запущенного агентом браузера задерживается; новые изменения временно приостановлены")
 			}
 		})
 	}
@@ -737,7 +758,7 @@ func (b *browserManager) setupTab(ctx context.Context, t *browserTab) error {
 			return err
 		}
 	}
-	for _, method := range []string{"Page.frameNavigated", "Page.navigatedWithinDocument", "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Network.loadingFailed", "Network.responseReceived", "Network.requestWillBeSent", "Network.loadingFinished"} {
+	for _, method := range []string{"Page.frameNavigated", "Page.navigatedWithinDocument", "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Runtime.executionContextsCleared", "Runtime.executionContextDestroyed", "Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Network.loadingFailed", "Network.responseReceived", "Network.requestWillBeSent", "Network.loadingFinished"} {
 		events, stop := chromedp.FromContext(t.ctx).Target.Subscribe(method)
 		go func(method string) {
 			defer stop()
@@ -801,7 +822,7 @@ func (b *browserManager) execute(ctx context.Context, name string, args map[stri
 		b.mu.Unlock()
 		return nil, toolErr("access_paused", "browser session paused or disconnected")
 	}
-	callCtx, cancel := context.WithCancel(ctx)
+	callCtx, cancel := context.WithCancel(withBrowserFrameReads(ctx))
 	s.active = cancel
 	b.mu.Unlock()
 	defer func() { cancel(); b.mu.Lock(); s.active = nil; b.mu.Unlock() }()

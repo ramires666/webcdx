@@ -12,7 +12,7 @@ const browserCommandProtocol = 2
 // whether the page changed. Recover by inspecting state, never by replaying it.
 func browserUncertainTransport(code string) bool {
 	switch code {
-	case "scope_changed", "command_expired", "cancelled_before_dispatch", "access_paused", "disconnected", "response_too_large":
+	case "scope_changed", "frame_changed", "command_expired", "cancelled_before_dispatch", "access_paused", "disconnected", "response_too_large":
 		return true
 	}
 	return false

@@ -1,10 +1,10 @@
 package main
 
 func browserSnapshotExpression(id, container string) string {
-	return `(()=>{` + browserDOMFailure + browserDOM + `
+	return `(()=>{` + browserDOMFailure + browserDOMBase + `
 let root=document.body;
 const selector=` + browserJS(container) + `;
-if(selector){let groups;try{groups=[...document.querySelectorAll(selector)].filter(visible)}catch(e){wcFail('invalid_selector')}if(!groups.length)wcFail('element_not_found',0);if(groups.length!==1)wcFail('ambiguous_locator',groups.length);root=groups[0];all.length=0;all.push(root);walk(root)}
+if(selector){let groups;try{groups=[...document.querySelectorAll(selector)].filter(visible)}catch(e){wcFail('invalid_selector')}if(!groups.length)wcFail('element_not_found',0);if(groups.length!==1)wcFail('ambiguous_locator',groups.length);root=groups[0];all.push(root);walk(root)}else{walk(document)}
 const id=` + browserJS(id) + `,found=all.filter(el=>role(el)&&visible(el)),nodes=found.slice(0,300),text=root?.innerText||'',reasons=[];
 globalThis.__webcodex={id,nodes,document,url:location.href};
 globalThis.__webcodexGeneration??=id;
