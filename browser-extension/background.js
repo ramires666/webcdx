@@ -301,7 +301,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     await settingsLoaded;
     if (message.type==='identity') {
       const alias=String(message.alias??'').trim();
-      if(Array.from(alias).length>64||/\p{Cc}/u.test(alias))throw Error('????????? ?????? ???? ?? ??????? 64 ???????? ? ??? ??????????? ??????');
+      if(Array.from(alias).length>64||/\p{Cc}/u.test(alias))throw Error('Название должно содержать не больше 64 символов и не иметь управляющих знаков');
       profileAlias=alias;settingsWrites=settingsWrites.catch(()=>{}).then(()=>chrome.storage.local.set({[PROFILE_KEY]:{id:profileID,alias:profileAlias}}));await settingsWrites;publishIdentity();
     } else if (message.type === 'attach') {
       if (continuous) await disconnect();
