@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -347,6 +349,18 @@ func testBrowserThroughMCP(t *testing.T, srv *server, endpoint, token string) {
 	for _, item := range image["content"].([]any) {
 		if item.(map[string]any)["type"] == "image" {
 			found = true
+			data, err := base64.StdEncoding.DecodeString(item.(map[string]any)["data"].(string))
+			if err != nil {
+				t.Fatal(err)
+			}
+			dimensions, err := jpeg.DecodeConfig(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata := image["structuredContent"].(map[string]any)
+			if metadata["image_width"] != float64(dimensions.Width) || metadata["image_height"] != float64(dimensions.Height) || metadata["image_payload_available"] != true {
+				t.Fatal("Gate image payload disagrees with metadata")
+			}
 		}
 	}
 	if !found {

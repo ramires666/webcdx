@@ -14,6 +14,25 @@ const browserArtifactMax = 256 << 20
 var browserArtifactName = regexp.MustCompile(`^image_[0-9a-f]{24}\.jpg$`)
 var browserSessionName = regexp.MustCompile(`^browser_[0-9a-f]{24}$`)
 
+func (b *browserManager) browserArtifactAvailable(path string) bool {
+	if filepath.Clean(filepath.Dir(path)) != filepath.Join(b.config.Dir, "artifacts") || !browserArtifactName.MatchString(filepath.Base(path)) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func (b *browserManager) browserImageMetadata(result map[string]any, payload bool) map[string]any {
+	metadata := map[string]any{}
+	for key, value := range result {
+		metadata[key] = value
+	}
+	metadata["image_payload_available"] = payload
+	path, _ := metadata["artifact_path"].(string)
+	metadata["artifact_available"] = b.browserArtifactAvailable(path)
+	return metadata
+}
+
 func (b *browserManager) cleanArtifacts() (int64, error) {
 	var total int64
 	root := filepath.Join(b.config.Dir, "artifacts")

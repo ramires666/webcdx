@@ -171,6 +171,10 @@ func (f *browserFixture) must(name string, args map[string]any) any {
 	f.t.Helper()
 	result, err := f.call(name, args)
 	if err != nil {
+		var coded *codedError
+		if errors.As(err, &coded) {
+			f.t.Fatalf("%s (%s): %v", name, coded.code, err)
+		}
 		f.t.Fatalf("%s: %v", name, err)
 	}
 	return result

@@ -344,7 +344,10 @@ func (b *browserManager) operationResult(op *browserOperation) (any, error) {
 		return nil, &codedError{code: op.ErrorCode, message: message, details: details}
 	}
 	if op.image != "" {
-		return browserImage{op.Result, op.image}, nil
+		return browserImage{b.browserImageMetadata(op.Result, true), op.image}, nil
+	}
+	if op.Result["mime_type"] == "image/jpeg" {
+		return b.browserImageMetadata(op.Result, false), nil
 	}
 	return op.Result, nil
 }
@@ -932,10 +935,16 @@ func (b *browserManager) screenshot(ctx context.Context, s *browserSession, t *b
 	params := map[string]any{"format": "jpeg", "quality": 60, "captureBeyondViewport": full}
 	if full {
 		var metrics struct {
-			Size struct{ Width, Height float64 } `json:"cssContentSize"`
+			Size struct {
+				Width  float64 `json:"width"`
+				Height float64 `json:"height"`
+			} `json:"cssContentSize"`
 		}
 		if err := t.command(ctx, "Page.getLayoutMetrics", map[string]any{}, &metrics); err != nil {
 			return nil, err
+		}
+		if metrics.Size.Width <= 0 || metrics.Size.Height <= 0 {
+			return nil, toolErr("invalid_image_dimensions", "page layout has no positive screenshot dimensions")
 		}
 		if metrics.Size.Width*metrics.Size.Height > 50_000_000 {
 			return nil, toolErr("image_too_large", "page exceeds 50 megapixels; use viewport")
@@ -948,6 +957,10 @@ func (b *browserManager) screenshot(ctx context.Context, s *browserSession, t *b
 	data, err := base64.StdEncoding.DecodeString(result.Data)
 	if err != nil {
 		return nil, toolErr("browser_failed", "invalid screenshot")
+	}
+	original, err := jpeg.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, toolErr("browser_failed", "decode original screenshot dimensions")
 	}
 	truncated := false
 	budget := min(b.executor.maxResponse/2, 1<<20)
@@ -975,6 +988,12 @@ func (b *browserManager) screenshot(ctx context.Context, s *browserSession, t *b
 		truncated = true
 	}
 	metadata := map[string]any{"browser_session_id": s.id, "tab_id": t.id, "status": "completed", "mime_type": "image/jpeg", "truncated": truncated}
+	metadata["original_image_width"], metadata["original_image_height"] = original.Width, original.Height
+	metadata["image_bytes"], metadata["image_scaled"], metadata["image_payload_available"], metadata["artifact_available"] = len(data), truncated, true, false
+	metadata["capture_mode"] = "viewport"
+	if full {
+		metadata["capture_mode"] = "full_page"
+	}
 	dimensions, err := jpeg.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return nil, toolErr("browser_failed", "decode screenshot dimensions")
@@ -997,6 +1016,7 @@ func (b *browserManager) screenshot(ctx context.Context, s *browserSession, t *b
 			return nil, toolErr("io_error", "save screenshot", err)
 		}
 		metadata["artifact_path"] = path
+		metadata["artifact_available"] = true
 	}
 	return browserImage{metadata, base64.StdEncoding.EncodeToString(data)}, nil
 }

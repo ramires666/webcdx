@@ -35,6 +35,7 @@ func browserToolSchemas() []mcpToolDefinition {
 		"mime_type":            str(), "artifact_path": str(), "path": str(), "download_id": str(), "bytes": integer(0, 1<<30),
 		"viewport_width": integer(1, 100000), "viewport_height": integer(1, 100000),
 		"image_width": integer(1, 100000), "image_height": integer(1, 100000),
+		"original_image_width": integer(1, 100000), "original_image_height": integer(1, 100000), "image_bytes": integer(0, 1<<30), "image_scaled": boolean(), "image_payload_available": boolean(), "artifact_available": boolean(), "capture_mode": enum("viewport", "full_page"),
 		"downloads":     map[string]any{"type": "array", "items": object(map[string]any{"download_id": str(), "status": str(), "bytes": integer(0, 1<<30)}, "download_id", "status", "bytes")},
 		"accessibility": map[string]any{"type": "array", "items": object(map[string]any{"node_id": str(), "role": str(), "name": str(), "children": map[string]any{"type": []string{"array", "null"}, "items": str()}}, "node_id", "role", "name", "children")},
 	}, "status", "truncated")
