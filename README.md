@@ -173,9 +173,6 @@ meaningful progress about every 10–20 seconds. Chat updates depend on the clie
 following these instructions; no messages are pushed into a completed chat.
 A successful tool response does not mean the process has finished successfully.
 
-See [the development plan](EXECUTION_TRANSPARENCY.ru.md) for the minimal and
-expanded versions.
-
 ## Security
 
 Open **Monitoring** on the agent's admin page (`/admin/agents/<id>/commands`)
