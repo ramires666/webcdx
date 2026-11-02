@@ -9,7 +9,7 @@
 ## 2. Запустите бинарник на рабочем компьютере
 
 Скачайте готовый .bat/.ps1 при создании агента или ротации токена: в нём уже
-есть каталоги из карточки и `WEBCODEX_BROWSER_ENABLED=1`. Настройка каталогов
+есть каталоги из карточки. Настройка каталогов
 в локальном скрипте перекрывает дефолт Gate; удалите её, если хотите загружать
 каталоги из админки при каждом запуске. После изменения перезапустите агент.
 Недоступный диск не открывает доступ; подключите его и перезапустите агент.
@@ -20,10 +20,24 @@ Windows PowerShell:
 $env:WEBCODEX_GATE_URL = "https://<ваш-домен>"
 $env:WEBCODEX_AGENT_TOKEN = "<agent token>"
 $env:WEBCODEX_ALLOWED_ROOTS = "C:\projects;W:\"
-$env:WEBCODEX_BROWSER_ENABLED = "1"
+$env:WEBCODEX_BROWSER_BACKEND = "mcp"
+$env:WEBCODEX_BROWSER_MCP_URL = "http://localhost:8090/mcp"
+$env:WEBCODEX_BROWSER_MCP_TOKEN_FILE = "W:\_python\uebagent\runtime\access\mcp-token.txt"
 $env:WEBCODEX_LOG_DIR = "$PSScriptRoot\logs"
 ./webcodex-agent.exe
 ```
+
+`WEBCODEX_BROWSER_BACKEND=mcp` выбирает задачи uebagent; это также значение
+по умолчанию. `WEBCODEX_BROWSER_MCP_URL` задаёт локальный адрес MCP по
+Streamable HTTP. `WEBCODEX_BROWSER_MCP_TOKEN_FILE` указывает файл с локальным
+Bearer-токеном; не помещайте сам токен в скрипт или журнал.
+Если в старом скрипте есть `WEBCODEX_BROWSER_ENABLED=0`, эта настройка
+отключит все браузерные инструменты. Удалите её или задайте `1`, чтобы
+использовать выбранный backend. После изменения настроек перезапустите
+локальный агент. Список инструментов появится после запуска uebagent;
+обновите список или переподключите MCP-клиент.
+См. [инструкцию интеграции uebagent](docs/uebagent-integration.ru.md): там
+описаны имена инструментов, поведение при сбоях и обновление.
 
 Linux:
 
@@ -57,9 +71,10 @@ export WEBCODEX_LOG_DIR="/var/log/webcodex-agent"
 
 Это MCP endpoint, а не OpenAPI schema. После подключения начните новый чат:
 v5 предоставляет файловые и командные операции, `list_commands`,
-`list_allowed_roots` и инструмент Gate `list_agents`, а при `WEBCODEX_BROWSER_ENABLED=1` — ещё десять браузерных.
+`list_allowed_roots` и инструмент Gate `list_agents`, а при доступном локальном
+uebagent MCP — семь `browser_task_*` инструментов.
 Tool policy может скрывать часть списка. `exec_command` v5 требует `request_key`.
-Для личных вкладок и установки расширения следуйте [инструкции браузера](BROWSER_GUIDE.ru.md).
+Для личных вкладок в штатном браузере WebCodex выберите `WEBCODEX_BROWSER_BACKEND=native` и следуйте [инструкции браузера](BROWSER_GUIDE.ru.md).
 Вызовите `list_agents`, выберите компьютер и передавайте его `agent_id` в
 каждом вызове, включая продолжение командных и браузерных сессий. Чтобы узнать
 действующие каталоги, вызовите `list_allowed_roots` с тем же `agent_id`.

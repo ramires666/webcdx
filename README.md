@@ -6,11 +6,16 @@ Main features:
 
 - **File management:** read, write, search, edit, move, and delete files within configured roots.
 - **Command execution:** run shell commands, track background processes, inspect logs, and cancel tasks.
-- **Browser control:** navigate tabs, interact with pages, capture screenshots, and transfer files using clean, persistent, or signed-in personal sessions.
+- **Browser tasks:** send bounded tasks by default to the existing uebagent MCP and its Docker Camoufox executor. The built-in WebCodex browser remains available as an explicit native backend.
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
 Russian documentation: [README.ru.md](README.ru.md) · [User guide](USER_GUIDE.ru.md)
+
+For the default uebagent browser integration, see
+[the integration guide](docs/uebagent-integration.ru.md). The separate
+[native browser guide](BROWSER_GUIDE.ru.md) applies only when
+`WEBCODEX_BROWSER_BACKEND=native` is selected.
 
 ```text
 MCP client ── HTTPS + OAuth ──> Gate ── outbound NDJSON stream ──> Local agent
@@ -22,15 +27,15 @@ MCP client ── HTTPS + OAuth ──> Gate ── outbound NDJSON stream ─�
 
 `/mcp/v4` exposes eleven file and command operations plus `list_allowed_roots`. `/mcp/v3` retains its seven original operations plus root discovery. Gate also provides `list_agents`.
 
-`/mcp/v5` adds `list_commands`, safe Retry keys and, when enabled locally,
-ten browser tools with clean/persistent/personal modes. See
-[browser setup and verification](BROWSER_GUIDE.ru.md). v3/v4 remain compatible.
+`/mcp/v5` adds `list_commands`, safe Retry keys and, when the configured local
+uebagent endpoint is available, seven `browser_task_*` tools. The native
+clean/persistent/personal browser remains an explicit opt-in. See
+[uebagent setup](docs/uebagent-integration.ru.md). v3/v4 remain compatible.
 
-For your signed-in Chrome/Edge profile, enable **permanent access** once in the
-WebCodex Local Browser extension. It reconnects automatically after browser or
-agent restarts and makes website tabs available without per-tab approval.
-Local pause persists; Disconnect disables the saved grant. Tab control attaches
-on demand, and personal sessions can be reused across chats.
+For the native WebCodex backend only (`WEBCODEX_BROWSER_BACKEND=native`), a
+signed-in Chrome/Edge profile can use the extension's **permanent access**
+setting. See [the native browser guide](BROWSER_GUIDE.ru.md) before enabling
+it. The default uebagent backend uses its separate Docker Camoufox profile.
 
 Browser history no longer blocks new actions when full: the agent automatically
 evicts completed results from its 4,096-entry memory cache. Mutation results and

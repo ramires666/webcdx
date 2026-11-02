@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"webcodex/internal/buildinfo"
 	"webcodex/internal/protocol"
 )
 
@@ -22,7 +24,8 @@ type mcpRunner interface {
 
 // streamOnce holds one outbound NDJSON connection and dispatches gate requests concurrently.
 func streamOnce(ctx context.Context, client *http.Client, gateURL, token string, runner mcpRunner) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gateURL+"/agent/stream", nil)
+	streamURL := gateURL + "/agent/stream?version=" + url.QueryEscape(buildinfo.Version)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
 	if err != nil {
 		return fmt.Errorf("create stream request: %w", err)
 	}
@@ -36,6 +39,8 @@ func streamOnce(ctx context.Context, client *http.Client, gateURL, token string,
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("stream status %s", resp.Status)
 	}
+	gateVersion := buildinfo.DisplayPeer(resp.Header.Get("X-WebCodex-Version"))
+	log.Printf("connected to Gate; agent version=%s gate version=%s", buildinfo.Version, gateVersion)
 	log.Printf("Агент подключён. Жду действий модели.")
 
 	scanner := bufio.NewScanner(resp.Body)

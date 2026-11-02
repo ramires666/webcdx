@@ -10,9 +10,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"webcodex/internal/buildinfo"
 )
 
 func main() {
+	log.Printf("webcodex-agent version=%s", buildinfo.Version)
 	if env("WEBCODEX_DEBUG", env("WEBCODEX_VERBOSE", "0")) == "0" {
 		log.SetFlags(0)
 	}

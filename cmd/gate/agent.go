@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"webcodex/internal/buildinfo"
 	"webcodex/internal/protocol"
 )
 
@@ -44,6 +45,7 @@ func (s *server) handleAgentStream(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-WebCodex-Version", buildinfo.Version)
 
 	if _, err := fmt.Fprintln(w); err != nil {
 		return
@@ -51,7 +53,7 @@ func (s *server) handleAgentStream(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	streamCtx, stream, replaced := rt.activateAgentStream(r.Context())
-	log.Printf("agent stream connected agent=%s replaced=%t", agent.ID, replaced)
+	log.Printf("agent stream connected agent=%s replaced=%t agent_version=%s gate_version=%s", agent.ID, replaced, buildinfo.DisplayPeer(r.URL.Query().Get("version")), buildinfo.Version)
 	go func(id string) {
 		_ = s.store.UpdateLastSeen(context.Background(), id, time.Now().UTC())
 	}(agent.ID)

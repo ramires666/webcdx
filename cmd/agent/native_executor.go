@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,8 @@ type executorConfig struct {
 	MaxLogBytes      int64
 	MaxResponseBytes int
 	Verbose          bool
+	BrowserBackend   string
+	RemoteBrowser    remoteBrowserMCPConfig
 	Browser          browserConfig
 }
 
@@ -54,6 +57,8 @@ type nativeExecutor struct {
 	maxLogBytes      int64
 	maxResponse      int
 	verbose          bool
+	browserBackend   string
+	remoteBrowser    *remoteBrowserMCP
 	execMu           sync.Mutex
 	browser          *browserManager
 
@@ -103,8 +108,23 @@ func newNativeExecutor(roots string) (*nativeExecutor, error) {
 		return nil, err
 	}
 	browserDir := filepath.Join(configDir, "webcodex", "browser", commandHash(map[string]string{"gate": env("WEBCODEX_GATE_URL", ""), "agent": env("WEBCODEX_AGENT_TOKEN", "")})[:16])
+	backend, browserEnabled, err := browserBackendFromEnvironment()
+	if err != nil {
+		return nil, err
+	}
+	browserConfig := browserConfig{Enabled: backend == "native" && browserEnabled, Executable: env("WEBCODEX_BROWSER_PATH", ""), Dir: env("WEBCODEX_BROWSER_DIR", browserDir), AllowLocal: env("WEBCODEX_BROWSER_ALLOW_LOCAL", "0") == "1", Personal: env("WEBCODEX_BROWSER_PERSONAL_ENABLED", "0") == "1", DownloadDir: env("WEBCODEX_BROWSER_DOWNLOAD_DIR", "")}
+	remoteConfig := remoteBrowserMCPConfig{}
+	if backend == "mcp" {
+		remoteConfig = remoteBrowserMCPConfig{
+			URL:       env("WEBCODEX_BROWSER_MCP_URL", "http://localhost:8090/mcp"),
+			TokenFile: env("WEBCODEX_BROWSER_MCP_TOKEN_FILE", ""),
+			Timeout:   durationEnv("WEBCODEX_BROWSER_MCP_TIMEOUT", 30*time.Second),
+		}
+	}
 	return newNativeExecutorWithConfig(executorConfig{
-		Browser:          browserConfig{Enabled: env("WEBCODEX_BROWSER_ENABLED", "0") == "1", Executable: env("WEBCODEX_BROWSER_PATH", ""), Dir: env("WEBCODEX_BROWSER_DIR", browserDir), AllowLocal: env("WEBCODEX_BROWSER_ALLOW_LOCAL", "0") == "1", Personal: env("WEBCODEX_BROWSER_PERSONAL_ENABLED", "0") == "1", DownloadDir: env("WEBCODEX_BROWSER_DOWNLOAD_DIR", "")},
+		BrowserBackend:   backend,
+		RemoteBrowser:    remoteConfig,
+		Browser:          browserConfig,
 		AllowedRoots:     splitPathList(roots),
 		LogDir:           logDir,
 		ProcessTTL:       durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour),
@@ -127,6 +147,15 @@ func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error)
 	if config.MaxResponseBytes <= 0 {
 		config.MaxResponseBytes = defaultResponseMax
 	}
+	// Configurations created directly by existing unit tests retain the native
+	// browser manager. Production startup always resolves an explicit backend
+	// from environment variables above.
+	if config.BrowserBackend == "" {
+		config.BrowserBackend = "native"
+	}
+	if config.BrowserBackend != "mcp" && config.BrowserBackend != "native" && config.BrowserBackend != "disabled" {
+		return nil, fmt.Errorf("unsupported browser backend %q", config.BrowserBackend)
+	}
 	if config.LogDir == "" {
 		return nil, errors.New("log directory is required")
 	}
@@ -140,8 +169,16 @@ func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error)
 	e := &nativeExecutor{
 		logDir: filepath.Clean(logDir), processTTL: config.ProcessTTL,
 		maxLogBytes: config.MaxLogBytes, maxResponse: config.MaxResponseBytes,
-		verbose:  config.Verbose,
-		sessions: make(map[string]*processSession), stop: make(chan struct{}),
+		verbose:        config.Verbose,
+		browserBackend: config.BrowserBackend,
+		sessions:       make(map[string]*processSession), stop: make(chan struct{}),
+	}
+	if config.BrowserBackend == "mcp" {
+		remote, err := newRemoteBrowserMCP(config.RemoteBrowser)
+		if err != nil {
+			return nil, fmt.Errorf("configure remote browser MCP: %w", err)
+		}
+		e.remoteBrowser = remote
 	}
 	for _, root := range config.AllowedRoots {
 		root = strings.TrimSpace(root)
@@ -166,9 +203,11 @@ func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error)
 	if err := e.restoreSessions(); err != nil {
 		return nil, fmt.Errorf("restore command sessions: %w", err)
 	}
-	e.browser, err = newBrowserManager(e, config.Browser)
-	if err != nil {
-		e.browser = browserDegradedManager(e, config.Browser, err)
+	if config.BrowserBackend == "native" {
+		e.browser, err = newBrowserManager(e, config.Browser)
+		if err != nil {
+			e.browser = browserDegradedManager(e, config.Browser, err)
+		}
 	}
 	go e.cleanupLoop()
 	return e, nil
@@ -189,6 +228,9 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (jso
 		instructions := protocol.ExecutionInstructions
 		if version == "v5" {
 			instructions += protocol.V5Instructions
+			if e.browserBackend == "mcp" {
+				instructions += " Browser tasks use uebagent's autonomous Docker Camoufox MCP tools: start a task, poll its status/events, and read its result. Cookie synchronization defaults to off."
+			}
 		}
 		return rpcResult(message.ID, map[string]any{
 			"protocolVersion": "2025-06-18",
@@ -200,8 +242,26 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (jso
 		return rpcResult(message.ID, map[string]any{}), nil
 	case "tools/list":
 		tools := localTools(version)
-		if version == "v5" && e.browser.config.Enabled {
-			tools = append(tools, browserToolSchemas()...)
+		if version == "v5" {
+			switch e.browserBackend {
+			case "mcp":
+				if e.remoteBrowser != nil {
+					discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					remoteTools, err := e.remoteBrowser.Tools(discoveryCtx)
+					cancel()
+					if err != nil {
+						// Keep local filesystem and command tools available; the next
+						// tools/list request retries remote discovery.
+						logRemoteBrowserDiscoveryFailure()
+					} else {
+						tools = append(tools, remoteTools...)
+					}
+				}
+			case "native":
+				if e.browser != nil && e.browser.config.Enabled {
+					tools = append(tools, browserToolSchemas()...)
+				}
+			}
 		}
 		return rpcResult(message.ID, map[string]any{"tools": tools}), nil
 	case "tools/call":
@@ -214,6 +274,21 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (jso
 		}
 		if call.Arguments == nil {
 			call.Arguments = map[string]any{}
+		}
+		if version == "v5" && isRemoteBrowserTool(call.Name) && e.browserBackend == "mcp" {
+			if e.remoteBrowser == nil {
+				return toolResult(message.ID, nil, toolErr("browser_mcp_unavailable", "remote browser MCP is not configured")), nil
+			}
+			if call.Name == "browser_task_start" {
+				if _, ok := call.Arguments["sync_cookies"]; !ok {
+					call.Arguments["sync_cookies"] = false
+				}
+			}
+			result, err := e.remoteBrowser.Call(ctx, call.Name, call.Arguments)
+			if err != nil {
+				return toolResult(message.ID, nil, toolErr("browser_mcp_unavailable", "remote browser MCP call failed", err)), nil
+			}
+			return rpcResult(message.ID, result), nil
 		}
 		result, err := e.executeTool(ctx, version, call.Name, call.Arguments)
 		return toolResult(message.ID, result, err), nil
@@ -233,9 +308,32 @@ func contractVersion(params json.RawMessage) string {
 	return "v3"
 }
 
+func browserBackendFromEnvironment() (backend string, enabled bool, err error) {
+	backend = strings.ToLower(strings.TrimSpace(os.Getenv("WEBCODEX_BROWSER_BACKEND")))
+	if backend == "" {
+		backend = "mcp"
+	}
+	switch backend {
+	case "mcp", "native", "disabled":
+	default:
+		return "", false, fmt.Errorf("WEBCODEX_BROWSER_BACKEND must be mcp, native, or disabled")
+	}
+	if value, set := os.LookupEnv("WEBCODEX_BROWSER_ENABLED"); set && strings.TrimSpace(value) == "0" {
+		return "disabled", false, nil
+	}
+	return backend, backend == "native", nil
+}
+
+func logRemoteBrowserDiscoveryFailure() {
+	log.Print("remote browser MCP tools unavailable; check WEBCODEX_BROWSER_MCP_URL and WEBCODEX_BROWSER_MCP_TOKEN_FILE; local tools remain available and discovery will retry")
+}
+
 func (e *nativeExecutor) executeTool(ctx context.Context, version, name string, args map[string]any) (any, error) {
 	if version == "v5" {
 		if strings.HasPrefix(name, "browser_") {
+			if e.browser == nil {
+				return nil, toolErr("browser_disabled", "native browser backend is not enabled")
+			}
 			return e.browser.call(ctx, name, args)
 		}
 		var result any

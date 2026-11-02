@@ -10,9 +10,12 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"webcodex/internal/buildinfo"
 )
 
 func main() {
+	log.Printf("webcodex-gate version=%s", buildinfo.Version)
 	srv, err := newServer()
 	if err != nil {
 		log.Fatalf("initialize server: %v", err)
