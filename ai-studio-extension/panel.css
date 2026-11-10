@@ -1,0 +1,25 @@
+:root { color-scheme: light dark; font: 14px/1.45 system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 280px; color: CanvasText; background: Canvas; }
+main { padding: 14px; }
+header h1 { margin: 0; font-size: 20px; }
+header p, .hint { margin: 2px 0 12px; color: GrayText; }
+section { border-top: 1px solid color-mix(in srgb, CanvasText 18%, transparent); margin-top: 14px; padding-top: 10px; }
+h2 { margin: 0 0 8px; font-size: 16px; }
+label, section > p { display: block; margin: 8px 0 4px; font-weight: 600; }
+input:not([type=checkbox]), textarea { display: block; width: 100%; border: 1px solid GrayText; border-radius: 5px; padding: 8px; color: CanvasText; background: Canvas; font: inherit; }
+textarea { resize: vertical; }
+.row { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+button { min-height: 34px; padding: 6px 10px; border: 1px solid ButtonBorder; border-radius: 5px; color: ButtonText; background: ButtonFace; font: inherit; cursor: pointer; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+button:disabled { opacity: .55; cursor: not-allowed; }
+button.secondary { background: Canvas; }
+button.danger { color: #b42318; }
+.check { display: flex; align-items: flex-start; gap: 8px; font-weight: 400; }
+.check input { margin-top: 4px; }
+.choices { display: grid; gap: 4px; max-height: 150px; overflow: auto; }
+.choices label { display: flex; gap: 8px; margin: 0; font-weight: 400; overflow-wrap: anywhere; }
+.hint { font-size: 12px; }
+.wrap { display: block; overflow-wrap: anywhere; font-size: 12px; }
+.output { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; border-radius: 5px; background: color-mix(in srgb, CanvasText 7%, Canvas); }
+.error { color: #b42318; }

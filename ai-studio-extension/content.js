@@ -1,0 +1,38 @@
+(() => {
+  'use strict';
+  if (window.top !== window || location.origin !== 'https://aistudio.google.com') return;
+  const adapter=WebCodexStudio.createAdapter(document,location);
+  let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', observerTimer=0, stopping=false, sawModel=false, attempted=new Set();
+  const send=(type,data={})=>chrome.runtime.sendMessage({type,sessionId,...data});
+  function snapshot(operationId){const s=adapter.inspect();return {supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,delivered:operationId?adapter.hasDelivery(operationId):undefined};}
+  async function observe(){if(!sessionId)return;const s=adapter.inspect();if(s.conversationKey!==conversationKey||!s.supported){await send('studio.snapshot',snapshot());return;}
+    if(sawModel&&!s.latestModel){await send('studio.snapshot',{...snapshot(),supported:false,error:'Conversation was replaced'});return;}
+    if(s.latestModel)sawModel=true;
+    if(s.generating)return;
+    if(stopping){stopping=false;lastText=s.latestModel?.text||'';return;}
+    const model=s.latestModel;if(!model||model.text===baselineText||!model.text||model.text===lastText)return;
+    lastText=model.text;if(attempted.has(lastText))return;attempted.add(lastText);await send('studio.call',{text:lastText,conversationKey,generating:s.generating});
+  }
+  const schedule=()=>{clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(()=>{}),250);};
+  document.addEventListener('click',event=>{const button=event.target?.closest?.('button');const label=((button?.getAttribute('aria-label')||'')+' '+(button?.getAttribute('title')||'')+' '+(button?.innerText||'')).trim().toLowerCase();if(/\b(stop|cancel)\b|остановить|отмена/.test(label))stopping=true;},true);
+  const observer=new MutationObserver(schedule);observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true});
+  setInterval(()=>{if(sessionId)send('studio.tick',snapshot()).catch(()=>{});},2000);
+  chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
+    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm'].includes(m.type)){reply({ok:false});return;}
+    if(m.type==='studio.arm'){
+      const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error});return;}
+      sessionId=m.sessionId;conversationKey=s.conversationKey;baselineText=s.latestModel?.text||'';lastText=baselineText;lastDelivered='';stopping=false;sawModel=!!s.latestModel;attempted.clear();reply(snapshot());return;
+    }
+    if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
+    if(m.type==='studio.disarm'){sessionId='';reply({ok:true});return;}
+    if(m.type==='studio.stage'){const s=adapter.inspect();const ok=s.supported&&s.conversationKey===conversationKey&&adapter.stage(m.text);reply({ok,...snapshot()});return;}
+    if(m.type==='studio.snapshot'){reply(snapshot(m.operationId));return;}
+    if(m.type==='studio.deliver'){
+      const s=adapter.inspect(),state=snapshot();if(!s.supported||!s.editorEmpty||s.generating||s.conversationKey!==conversationKey){reply({ok:false,attempted:false,...state});return;}
+      if(!m.submit){const ok=adapter.stage(m.text);reply({ok,attempted:false,...state});return;}
+      if(lastDelivered===m.text){reply({ok:false,attempted:true,...state});return;}
+      let operationId;try{const result=JSON.parse(m.text);if(result.type!=='webcodex-result')throw Error();operationId=result.operation_id;}catch{reply({ok:false,attempted:false,...state});return;}
+      const ok=adapter.submit(m.text);if(ok)lastDelivered=m.text;reply({ok,attempted:ok,confirmed:ok&&adapter.hasDelivery(operationId),...state});return;
+    }
+  });
+})();

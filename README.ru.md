@@ -5,6 +5,7 @@ WebCodex публикует явные операции с файлами и п�
 English: [README.md](README.md) · Пошаговый запуск: [USER_GUIDE.ru.md](USER_GUIDE.ru.md) · [Как обновить сервер](UPDATE_SERVER.ru.md)
 
 План: [MCP в веб-чате Google AI Studio без AI-ключей](docs/ai-studio-mcp-plan.ru.md).
+Реализация alpha: [отдельное расширение AI Studio Bridge](ai-studio-extension/README.ru.md).
 
 ```text
 MCP-клиент ── HTTPS + OAuth ──> Gate ── исходящий NDJSON ──> Local agent
