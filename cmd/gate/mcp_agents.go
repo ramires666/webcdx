@@ -83,6 +83,10 @@ func listAgentsTool() map[string]any {
 }
 
 func (s *server) writeMCPAgents(w http.ResponseWriter, id json.RawMessage, agents []Agent) {
+	writeJSON(w, s.mcpAgentsResponse(id, agents))
+}
+
+func (s *server) mcpAgentsResponse(id json.RawMessage, agents []Agent) map[string]any {
 	items := []map[string]any{}
 	for _, agent := range agents {
 		if !agent.Enabled {
@@ -96,9 +100,9 @@ func (s *server) writeMCPAgents(w http.ResponseWriter, id json.RawMessage, agent
 	}
 	data := map[string]any{"agents": items}
 	encoded, _ := json.Marshal(data)
-	writeJSON(w, map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+	return map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
 		"structuredContent": data, "content": []map[string]any{{"type": "text", "text": string(encoded)}},
-	}})
+	}}
 }
 
 // Strip the routing argument before forwarding to unchanged local agents.

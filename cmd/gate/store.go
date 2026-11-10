@@ -103,7 +103,13 @@ func (s *store) migrate(ctx context.Context) error {
 			return fmt.Errorf("database migration failed: %w", err)
 		}
 	}
-	return s.migrateLegacyClients(ctx)
+	if err := s.migrateLegacyClients(ctx); err != nil {
+		return err
+	}
+	if err := s.initBridgeAuth(ctx); err != nil {
+		return err
+	}
+	return s.initBridgeOperations(ctx)
 }
 
 func (s *store) CreateAgent(ctx context.Context, agent Agent) error {

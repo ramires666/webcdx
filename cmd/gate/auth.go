@@ -56,6 +56,16 @@ func (s *server) authenticateMCP(r *http.Request) (*MCPClient, error) {
 	if !client.Enabled {
 		return nil, errors.New("MCP client disabled")
 	}
+	if strings.HasPrefix(token, "wc_bridge_") {
+		grant, err := s.store.loadBridgeGrant(r.Context(), token)
+		if err != nil {
+			return nil, errors.New("invalid bridge access token")
+		}
+		if origin := r.Header.Get("Origin"); origin != "" && origin != "chrome-extension://"+grant.ExtensionID {
+			return nil, errors.New("bridge origin denied")
+		}
+		client.BridgeGrant = grant
+	}
 	return client, nil
 }
 

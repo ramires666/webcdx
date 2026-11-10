@@ -151,42 +151,25 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var agent *Agent
-	var rt *agentRuntime
-	if msg.Method == "tools/call" {
-		call, err := parseToolCall(body)
-		if err != nil {
-			writeToolCallError(w, msg.ID, err.Error())
-			return
-		}
-		if call.Name == "list_agents" {
-			if len(call.Arguments) != 0 {
-				writeToolCallError(w, msg.ID, "list_agents takes no arguments")
-				return
-			}
-			s.writeMCPAgents(w, msg.ID, agents)
-			return
-		}
-		agent, body, err = selectMCPAgent(body, call, agents)
-		if err != nil {
-			writeToolCallError(w, msg.ID, err.Error())
-			return
-		}
-		rt = s.runtimeFor(agent.ID)
-		policy := newToolPolicy(agent.AllowedTools, agent.DeniedTools)
-		if !policy.allows(call.Name) {
-			log.Printf("mcp tool denied by policy agent=%s tool=%q", agent.ID, call.Name)
-			writeToolCallError(w, msg.ID, fmt.Sprintf("tool not allowed: %q", call.Name))
-			return
-		}
-	}
-
-	agentRequest := body
 	version := "v3"
 	if r.URL.Path == "/mcp/v4" || r.URL.Path == "/mcp/v5" {
 		version = strings.TrimPrefix(r.URL.Path, "/mcp/")
 	}
-	agentRequest, err = markContract(body, version)
+	if msg.Method == "tools/call" {
+		response, err := s.executeMCPTool(r.Context(), client, body, version)
+		if err != nil {
+			writeToolCallError(w, msg.ID, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write(response); err != nil {
+			log.Printf("write mcp response client=%s error=%v", client.ID, err)
+		}
+		log.Printf("mcp response ok client=%s method=%q id=%s bytes=%d elapsed=%s", client.ID, msg.Method, string(msg.ID), len(response), time.Since(started))
+		return
+	}
+
+	agentRequest, err := markContract(body, version)
 	if err != nil {
 		writeRPCError(w, msg.ID, -32602, err.Error())
 		return
@@ -197,47 +180,17 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			writeRPCError(w, msg.ID, -32000, err.Error())
 			return
 		}
-		writeJSON(w, map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": map[string]any{"tools": tools}})
-		return
-	}
-	if rt == nil {
-		writeRPCError(w, msg.ID, -32601, "method not supported")
-		return
-	}
-	resp, err := rt.callAgent(r.Context(), agentRequest, s.timeout)
-	if err != nil {
-		log.Printf(
-			"mcp response error agent=%s method=%q id=%s error=%v elapsed=%s",
-			agent.ID,
-			msg.Method,
-			string(msg.ID),
-			err,
-			time.Since(started),
-		)
-		if msg.Method == "tools/call" {
-			writeToolCallError(w, msg.ID, fmt.Sprintf("execution error: %v", err))
-			return
+		filtered := tools[:0]
+		for _, tool := range tools {
+			name, _ := tool["name"].(string)
+			if bridgeAllows(client, name) {
+				filtered = append(filtered, tool)
+			}
 		}
-		writeRPCError(w, msg.ID, -32000, err.Error())
+		writeJSON(w, map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": map[string]any{"tools": filtered}})
 		return
 	}
-
-	if msg.Method == "tools/call" {
-		resp.Response = ensureToolCallResult(resp.Response, msg.ID)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if _, err := w.Write(resp.Response); err != nil {
-		log.Printf("write mcp response agent=%s error=%v", agent.ID, err)
-	}
-	log.Printf(
-		"mcp response ok agent=%s method=%q id=%s bytes=%d elapsed=%s",
-		agent.ID,
-		msg.Method,
-		string(msg.ID),
-		len(resp.Response),
-		time.Since(started),
-	)
+	writeRPCError(w, msg.ID, -32601, "method not supported")
 }
 
 // handleMCPStream answers the optional MCP GET transport with an SSE stream readiness message.

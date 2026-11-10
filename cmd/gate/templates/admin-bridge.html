@@ -1,0 +1,13 @@
+{{define "admin-bridge.html"}}
+<!doctype html><html lang="ru"><meta charset="utf-8"><title>Chrome extension bridge</title>
+<h1>Chrome extension bridge: {{.Client.Name}}</h1>
+<p>OAuth Client ID: <code>{{.Client.OAuthClientID}}</code></p>
+<form method="post">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>Chrome extension ID <input name="extension_id" value="{{.ExtensionID}}" pattern="[a-p]{32}" maxlength="32"></label>
+<p>Redirect URI: <code>{{.RedirectURI}}</code> (формируется автоматически)</p>
+<label>Разрешённые инструменты, через запятую<br><textarea name="allowed_tools" rows="5" cols="70">{{.AllowedTools}}</textarea></label>
+<p>По умолчанию доступны только инструменты чтения.</p>
+<button type="submit">Сохранить и отозвать выданные bridge токены</button>
+</form></html>
+{{end}}

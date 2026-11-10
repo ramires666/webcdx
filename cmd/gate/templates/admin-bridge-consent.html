@@ -1,0 +1,14 @@
+{{define "admin-bridge-consent.html"}}
+<!doctype html><html lang="ru"><meta charset="utf-8"><title>Подтверждение доступа</title>
+<h1>Разрешить доступ WebCodex?</h1>
+<p>Клиент: {{.Client.Name}} ({{.Client.OAuthClientID}})</p>
+<p>Расширение Chrome: <code>{{.ExtensionID}}</code></p>
+<p>Будут доступны инструменты:</p><ul>{{range .AllowedTools}}<li><code>{{.}}</code></li>{{end}}</ul>
+<form method="post">
+<input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="client_id" value="{{.ClientID}}">
+<input type="hidden" name="redirect_uri" value="{{.RedirectURI}}"><input type="hidden" name="response_type" value="code">
+<input type="hidden" name="code_challenge" value="{{.Challenge}}"><input type="hidden" name="code_challenge_method" value="S256"><input type="hidden" name="state" value="{{.State}}">
+<input type="hidden" name="config_hash" value="{{.ConfigHash}}">
+<button name="decision" value="allow">Разрешить</button><button name="decision" value="deny">Отказать</button>
+</form></html>
+{{end}}

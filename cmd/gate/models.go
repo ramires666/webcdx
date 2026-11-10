@@ -17,13 +17,14 @@ type Agent struct {
 }
 
 type MCPClient struct {
-	ID                    string    `json:"id"`
-	Name                  string    `json:"name"`
-	Enabled               bool      `json:"enabled"`
-	OAuthClientID         string    `json:"oauth_client_id"`
-	OAuthClientSecretHash string    `json:"-"`
-	CreatedAt             time.Time `json:"created_at"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	ID                    string       `json:"id"`
+	Name                  string       `json:"name"`
+	Enabled               bool         `json:"enabled"`
+	OAuthClientID         string       `json:"oauth_client_id"`
+	OAuthClientSecretHash string       `json:"-"`
+	CreatedAt             time.Time    `json:"created_at"`
+	UpdatedAt             time.Time    `json:"updated_at"`
+	BridgeGrant           *bridgeGrant `json:"-"`
 }
 
 // AccessToken represents an active issued bearer token for MCP clients (ChatGPT).

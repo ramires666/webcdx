@@ -20,6 +20,7 @@
 <body><div class="container">
     <a href="/admin">← MCP-подключения и агенты</a>
     <h1>MCP: {{.Client.Name}} ({{.Client.ID}}) — {{if .Client.Enabled}}включено{{else}}отключено{{end}}</h1>
+    <p><a href="/admin/mcp-clients/{{.Client.ID}}/bridge">Настроить расширение AI Studio Bridge</a></p>
     <section class="card">
         <h2>Доступные компьютеры</h2>
         <p>Отметьте агенты, доступные через OAuth-данные этого MCP-подключения. У каждого компьютера отдельный Agent Token. Доступ применяется ко всем активным сессиям этого подключения.</p>
