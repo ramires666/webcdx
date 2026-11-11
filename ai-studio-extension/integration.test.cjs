@@ -62,7 +62,7 @@ function harness(initial = saved(), tabBehavior = {}) {
   const status = () => message({ type: 'bridge.status' });
   const alarm = async () => { listeners.alarm({ name: 'webcodex-recover' }); await status(); };
   const call = async (turn, sender = page) => message({ type: 'studio.call', sessionId: 'session-1', conversationKey: 'chat-1', generating: false, text: '```webcodex-call\n' + JSON.stringify({ v: 1, turn, name: 'read_file', arguments: { path: 'safe.txt' } }) + '\n```' }, sender);
-  return { message, status, call, alarm, listeners, panel, page, calls, pageMessages, db, token: TOKEN, get createCount() { return createCount; }, get deliveryCount() { return deliveryCount; } };
+  return { chrome, message, status, call, alarm, listeners, panel, page, calls, pageMessages, db, token: TOKEN, get createCount() { return createCount; }, get deliveryCount() { return deliveryCount; } };
 }
 function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
 
@@ -88,6 +88,23 @@ test('restored token stays private; tab is bound and one operation delivers adve
 test('restoring a pending approval never dispatches it', async () => {
   const h = harness(saved('waiting_approval', 'write_file')); await h.status(); await h.alarm();
   assert.equal(h.createCount, 0, 'restored approval must wait for explicit user approval');
+});
+
+test('arming injects a missing content receiver only into a verified AI Studio tab', async () => {
+  const initial = saved('stopped');
+  const h = harness(initial, { sendMessage: async (_id, msg) => {
+    if (msg.type === 'studio.arm' && !injections.some(x => x.files)) throw Error('Could not establish connection. Receiving end does not exist.');
+    return { ok: true, supported: true, conversationKey: 'chat-1' };
+  } });
+  const injections = [];
+  h.chrome.scripting = { executeScript: async args => { injections.push(args); } };
+  await h.status();
+  const response = await h.message({ type: 'bridge.arm', consent: true, tabId: 7, agentId: 'agent-1', toolNames: ['read_file'] });
+  assert.equal(response.ok, true);
+  assert.equal(response.state.session.phase, 'waiting_model');
+  assert.equal(injections.length, 2);
+  assert.equal(injections[1].target.tabId, 7);
+  assert.deepEqual(Array.from(injections[1].files), ['protocol.js', 'studio-adapter.js', 'content.js']);
 });
 
 test('expired authorization pauses a pending operation without retrying or losing its key', async () => {

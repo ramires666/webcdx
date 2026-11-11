@@ -23,8 +23,18 @@ function harness() {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const send = message => new Promise(resolve => listeners.message(message, {}, response => resolve(structuredClone(response))));
   const flush = async () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn(); await Promise.resolve(); await Promise.resolve(); };
-  return { state, sent, staged, submitted, send, flush, mutate: () => observerCallback(), click: event => documentListeners.click(event), setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
+  return { state, sent, staged, submitted, send, flush, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
 }
+
+test('reinjection does not reset a live session or duplicate observers', async () => {
+  const h = harness();
+  await h.send({ type: 'studio.arm', sessionId: 's1' });
+  h.reload();
+  assert.equal(h.sent.filter(m => m.type === 'studio.hello').length, 1);
+  h.state.latestModel = { text: 'new reply after reinjection' };
+  h.mutate(); await h.flush();
+  assert.equal(h.sent.filter(m => m.type === 'studio.call').length, 1);
+});
 
 test('ignores history and sends one completed new reply as a call', async () => {
   const h = harness();

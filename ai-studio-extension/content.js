@@ -1,10 +1,13 @@
 (() => {
   'use strict';
   if (window.top !== window || location.origin !== 'https://aistudio.google.com') return;
+  if (window.__webcodexBridgeLoaded) return;
+  window.__webcodexBridgeLoaded = true;
   const adapter=WebCodexStudio.createAdapter(document,location);
   let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, sawModel=false, attempted=new Set();
   const send=(type,data={})=>chrome.runtime.sendMessage({type,sessionId,...data});
-  chrome.runtime.sendMessage({type:'studio.hello'}).catch(()=>{});
+  if (!window.__webcodexBridgeReattach) chrome.runtime.sendMessage({type:'studio.hello'}).catch(()=>{});
+  delete window.__webcodexBridgeReattach;
   function snapshot(operationId){const s=adapter.inspect();return {supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,delivered:operationId?adapter.hasDelivery(operationId):undefined};}
   async function observe(){if(!sessionId)return;const s=adapter.inspect();if(s.conversationKey!==conversationKey||!s.supported){await send('studio.snapshot',snapshot());return;}
     if(sawModel&&!s.latestModel){await send('studio.snapshot',{...snapshot(),supported:false,error:'Conversation was replaced'});return;}

@@ -74,7 +74,14 @@ async function arm(m) {
   const tab=await chrome.tabs.get(m.tabId);if(!tab.url?.startsWith('https://aistudio.google.com/'))throw Error('Active tab must be AI Studio');
   if(!demo&&!state.connected)throw Error('Connect to Gate first');
   state.session={phase:'arming',agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,paused:false,turn:uuid(),instructions:'',customInstructions:'',pendingCall:null,resultText:'',error:'',count:0,budgetStart:Date.now(),tabId:m.tabId,sessionId:uuid(),conversationKey:''};await save();
-  try {const snap=await chrome.tabs.sendMessage(m.tabId,{type:'studio.arm',sessionId:state.session.sessionId});if(!snap?.supported)throw Error(snap?.error||'Unsupported chat');
+  try {let snap;const message={type:'studio.arm',sessionId:state.session.sessionId};
+    try{snap=await chrome.tabs.sendMessage(m.tabId,message);}catch(e){
+      if(!/Receiving end does not exist|Could not establish connection/i.test(String(e.message||e)))throw e;
+      await chrome.scripting.executeScript({target:{tabId:m.tabId},func:()=>{window.__webcodexBridgeReattach=true;}});
+      await chrome.scripting.executeScript({target:{tabId:m.tabId},files:['protocol.js','studio-adapter.js','content.js']});
+      snap=await chrome.tabs.sendMessage(m.tabId,message);
+    }
+    if(!snap?.supported)throw Error(snap?.error||'Unsupported chat');
     state.session.conversationKey=snap.conversationKey;state.session.phase='waiting_model';await stageInstructions();await save();
   } catch(e){state.session.phase='stopped';state.session.error=String(e.message||e);await save();throw e;}
 }
