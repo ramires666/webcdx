@@ -45,6 +45,7 @@
   }
   function render(next) {
     if (!next) return;
+    const previousError = state?.session?.error;
     state = next;
     const session = next.session || {};
     const phaseNames = { idle: 'ожидает запуска', ready: 'готов', active: 'выполняется', running: 'выполняется', waiting_approval: 'ожидает подтверждения', paused: 'на паузе', stopped: 'остановлен', delivery_uncertain: 'передача результата не подтверждена', error: 'ошибка' };
@@ -65,7 +66,7 @@
     if (next.clientId && !$('client-id').value) $('client-id').value = next.clientId;
     $('pending').textContent = session.pendingCall ? JSON.stringify(session.pendingCall, null, 2) : 'Нет ожидающего вызова';
     if (session.instructions !== undefined && document.activeElement !== $('instructions')) $('instructions').value = session.instructions;
-    if (session.error) showError(session.error);
+    if (session.error || previousError) showError(session.error);
     $('result').value = session.resultText || '';
     $('hide-service').checked = !!next.hideServiceMessages;
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;

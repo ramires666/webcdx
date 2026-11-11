@@ -69,6 +69,54 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
 }
 function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
 
+test('sessions continue beyond ten operations and five minutes', async () => {
+  const h = harness(); await h.status(); h.advanceTime(6 * 60 * 1000);
+  let turn = 'turn-1';
+  for (let i = 0; i < 12; i++) {
+    assert.equal((await h.call(turn)).accepted, true);
+    await h.alarm(); await h.alarm();
+    const state = (await h.status()).state.session;
+    assert.equal(state.phase, 'result_ready');
+    turn = JSON.parse(state.resultText).next_turn;
+    assert.equal((await h.message({ type: 'bridge.deliver', submit: true })).ok, true);
+  }
+  const session = (await h.status()).state.session;
+  assert.equal(session.phase, 'waiting_model'); assert.equal(session.paused, false);
+  assert.equal(h.createCount, 12);
+});
+
+test('legacy limit pauses wait for explicit resume and preserve approval and uncertainty guards', async () => {
+  const legacy = saved('paused'); Object.assign(legacy.session, { paused: true, pausedPhase: 'ready', error: 'Session operation limit reached; resume to continue.', pendingCall: { name: 'read_file', arguments: { path: 'safe.txt' }, turn: 'turn-1' } });
+  const consent = { bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: ['read_file'], autoApprove: false } };
+  const resumed = harness(legacy, {}, consent); await resumed.status();
+  assert.equal(resumed.createCount, 0, 'loading the extension does not resume an old operation');
+  assert.equal((await resumed.message({ type: 'bridge.resume' })).ok, true);
+  assert.equal(resumed.createCount, 1, 'explicit resume dispatches a previously approved ready call once');
+  assert.equal((await resumed.status()).state.session.phase, 'recovering');
+
+  for (const flags of [{ userPaused: true }, { resumeBlocked: true }]) {
+    const guarded = saved('paused'); Object.assign(guarded.session, { paused: true, pausedPhase: 'ready', error: 'Session operation limit reached; resume to continue.', pendingCall: { name: 'read_file', arguments: { path: 'safe.txt' }, turn: 'turn-1' }, ...flags });
+    const h = harness(guarded); await h.status();
+    assert.equal(h.createCount, 0); assert.equal((await h.status()).state.session.paused, true);
+  }
+  const approval = saved('paused', 'write_file'); Object.assign(approval.session, { paused: true, pausedPhase: 'waiting_approval', error: 'Session operation limit reached; resume to continue.', pendingCall: { name: 'write_file', arguments: { path: 'safe.txt' }, turn: 'turn-1' } });
+  const h = harness(approval, {}, { bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: ['write_file'], autoApprove: false } }); await h.status();
+  assert.equal(h.createCount, 0);assert.equal((await h.message({ type: 'bridge.resume' })).ok, true);
+  assert.equal(h.createCount, 0); assert.equal((await h.status()).state.session.phase, 'waiting_approval');
+});
+
+test('resuming a paused write requires current consent and auto-approval', async () => {
+  const make = () => { const s = saved('paused', 'write_file'); Object.assign(s.session, { paused: true, pausedPhase: 'ready', error: 'Session operation limit reached; resume to continue.', autoApprove: true, pendingCall: { name: 'write_file', arguments: { path: 'safe.txt' }, turn: 'turn-1' } }); return s; };
+  const autoOff = harness(make(), {}, { bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: ['write_file'], autoApprove: true } }); await autoOff.status();
+  await autoOff.message({ type: 'bridge.preferences', agentId: 'agent-1', toolNames: ['write_file'], consent: true, autoApprove: false });
+  assert.equal((await autoOff.message({ type: 'bridge.resume' })).ok, true);
+  assert.equal((await autoOff.status()).state.session.phase, 'waiting_approval'); assert.equal(autoOff.createCount, 0);
+
+  const noConsent = harness(make(), {}, { bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: ['write_file'], autoApprove: true } }); await noConsent.status();
+  await noConsent.message({ type: 'bridge.preferences', agentId: 'agent-1', toolNames: ['write_file'], consent: false, autoApprove: true });
+  assert.equal((await noConsent.message({ type: 'bridge.resume' })).ok, false); assert.equal(noConsent.createCount, 0);
+});
+
 test('restored token stays private; tab is bound and one operation delivers advertised next turn', async () => {
   const initial = saved(); initial.session.automatic = true;
   const h = harness(initial);

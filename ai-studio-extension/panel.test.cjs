@@ -44,6 +44,15 @@ test('service JSON preference reflects state and sends both checkbox values', as
   assert.deepEqual(p.messages.filter(x => x.type === 'bridge.cleanupPreference').map(x => x.enabled), [false, true]);
 });
 
+test('resuming clears a resolved session error from the panel', async () => {
+  const p = createPanel();
+  await p.update({connected:true,session:{phase:'paused',paused:true,error:'Session operation limit reached; resume to continue.'}});
+  assert.equal(p.get('error').hidden,false);
+  await p.update({connected:true,session:{phase:'waiting_model',paused:false,error:''}});
+  assert.equal(p.get('error').hidden,true);
+  assert.equal(p.get('error').textContent,'');
+});
+
 test('idle connection can arm after consent; safe tools initialize once and empty selection stays empty', async () => {
   const p = createPanel();
   await p.update({ connected: false, session: { phase: 'idle' }, tools: [], agents: [] });
