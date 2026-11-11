@@ -26,7 +26,7 @@ node --test ai-studio-extension/*.test.cjs
 
 ### Необязательная проверка собранных Gate и агента на Windows
 
-Готовые `webcodex-gate.exe` версии `1.5.0-ai-studio-alpha.2` и
+Готовые `webcodex-gate.exe` версии `1.5.0-ai-studio-alpha.3` и
 `webcodex-agent.exe` версии `1.5.0-ai-studio-alpha.1` находятся в
 `bin/ai-studio-bridge` этой рабочей копии. Gate пересобран для исправления входа,
 агент не меняется. В Git готовых EXE нет: если вы скачали
@@ -55,7 +55,7 @@ Remove-Item Env:WEBCODEX_BRIDGE_REAL_TEST
 
 ```powershell
 New-Item -ItemType Directory -Path bin/ai-studio-bridge -Force
-go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.2' -o bin/ai-studio-bridge/webcodex-gate.exe ./cmd/gate
+go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.3' -o bin/ai-studio-bridge/webcodex-gate.exe ./cmd/gate
 go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.1' -o bin/ai-studio-bridge/webcodex-agent.exe ./cmd/agent
 ```
 
@@ -64,7 +64,7 @@ go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.
 уже существующую папку. `go build` компилирует программу. `-ldflags` передаёт
 заключённую в кавычки строку линковщику; `-X` устанавливает строковую переменную
 `webcodex/internal/buildinfo.Version` в указанную версию: Gate —
-`1.5.0-ai-studio-alpha.2`, агент — `1.5.0-ai-studio-alpha.1`.
+`1.5.0-ai-studio-alpha.3`, агент — `1.5.0-ai-studio-alpha.1`.
 `-o` задаёт путь готового EXE: первая команда создаёт Gate, вторая — агент.
 `./cmd/gate` и `./cmd/agent` выбирают соответствующий пакет исходников.
 Команды рассчитаны на Go для Windows x64 без переопределённых GOOS/GOARCH.
@@ -82,7 +82,7 @@ go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.
 $env:GOOS = 'linux'
 $env:GOARCH = 'amd64'
 $env:CGO_ENABLED = '0'
-go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.2' -o bin/ai-studio-bridge/webcodex-gate-linux-amd64 ./cmd/gate
+go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.3' -o bin/ai-studio-bridge/webcodex-gate-linux-amd64 ./cmd/gate
 ```
 
 Префикс `$env:` задаёт переменную окружения для этого окна и запускаемых им

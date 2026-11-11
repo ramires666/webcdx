@@ -29,7 +29,7 @@ func TestBridgeBrowserAuthLogin(t *testing.T) {
 	if !csrf.HttpOnly || !csrf.Secure || csrf.SameSite != http.SameSiteLaxMode || csrf.Path != bridgeLoginPath {
 		t.Fatalf("csrf cookie flags: %+v", csrf)
 	}
-	for name, want := range map[string]string{"Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"} {
+	for name, want := range map[string]string{"Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"} {
 		if got := get.Header().Get(name); got != want {
 			t.Errorf("%s=%q, want %q", name, got, want)
 		}
@@ -39,6 +39,7 @@ func TestBridgeBrowserAuthLogin(t *testing.T) {
 		{"missing csrf", srv.publicURL, "", ""},
 		{"wrong csrf", srv.publicURL, csrf.Value, "wrong"},
 		{"cross origin", "https://attacker.example", csrf.Value, csrf.Value},
+		{"opaque origin", "null", csrf.Value, csrf.Value},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			form := url.Values{"username": {srv.adminUser}, "password": {srv.adminPassword}, "login_csrf": {tc.token}}

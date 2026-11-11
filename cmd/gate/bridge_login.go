@@ -16,6 +16,8 @@ const bridgeLoginPath = "/bridge/v1/authorize"
 func (s *server) bridgeBrowserAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		bridgeNoStore(w)
+		// HTML form POSTs need their real Origin for the login CSRF check.
+		w.Header().Set("Referrer-Policy", "same-origin")
 		user, pass, basic := r.BasicAuth()
 		if basic && user == s.adminUser && secureCompare(pass, s.adminPassword) {
 			next(w, r)
