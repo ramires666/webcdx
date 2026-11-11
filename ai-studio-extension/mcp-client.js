@@ -5,6 +5,15 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const VERSION = '2025-06-18', LIMIT = 2 * 1024 * 1024;
+  function requestSignal(signal) {
+    const deadline = AbortSignal.timeout(15000);
+    return signal ? AbortSignal.any([signal, deadline]) : deadline;
+  }
+  function httpError(service, status) {
+    const error = new Error(service + ' HTTP error ' + status);
+    error.status = status;
+    return error;
+  }
   function createClient({ baseUrl, token, fetchImpl = fetch }) {
     let url;
     try { url = new URL(baseUrl); } catch (_) { throw new Error('Invalid MCP base URL'); }
@@ -73,22 +82,16 @@
     }
     async function request(method, params, signal) {
       const id = ++nextId;
-      const deadline = AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined;
-      let requestSignal = signal || deadline;
-      if (signal && deadline) {
-        if (AbortSignal.any) requestSignal = AbortSignal.any([signal, deadline]);
-        else { const controller = new AbortController(); for (const source of [signal, deadline]) { if (source.aborted) controller.abort(source.reason); else source.addEventListener('abort', () => controller.abort(source.reason), { once: true }); } requestSignal = controller.signal; }
-      }
-      const response = await fetchImpl(origin + '/mcp/v5', { method: 'POST', signal: requestSignal, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': VERSION }, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
-      if (!response.ok) throw new Error('MCP HTTP error ' + response.status);
+      const response = await fetchImpl(origin + '/mcp/v5', { method: 'POST', signal: requestSignal(signal), headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': VERSION }, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
+      if (!response.ok) throw httpError('MCP', response.status);
       if (response.status === 202 && !response.body) return undefined;
       return readRpc(response, id);
     }
     async function rpc(method, params = {}, signal) { return request(method, params, signal); }
     async function initialize(signal) {
-      const result = await request('initialize', { protocolVersion: VERSION, capabilities: {}, clientInfo: { name: 'WebCodex', version: '1.0' } }, signal);
-      const response = await fetchImpl(origin + '/mcp/v5', { method: 'POST', signal, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': VERSION }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }) });
-      if (!response.ok || response.status !== 202) throw new Error('MCP initialized notification HTTP error ' + response.status);
+      const result = await request('initialize', { protocolVersion: VERSION, capabilities: {}, clientInfo: { name: 'WebCodex AI Studio Bridge', version: '0.1.1' } }, signal);
+      const response = await fetchImpl(origin + '/mcp/v5', { method: 'POST', signal: requestSignal(signal), headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': VERSION }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }) });
+      if (!response.ok || response.status !== 202) throw httpError('MCP initialized notification', response.status);
       return result;
     }
     async function listTools(signal) {
@@ -116,8 +119,8 @@
     }
     async function getOperation(id, signal) { return bridge('/bridge/v1/operations/' + encodeURIComponent(id), 'GET', undefined, signal); }
     async function bridge(path, method, body, signal) {
-      const response = await fetchImpl(origin + path, { method, signal, headers: { Authorization: 'Bearer ' + token, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
-      if (!response.ok) throw new Error('Bridge HTTP error ' + response.status);
+      const response = await fetchImpl(origin + path, { method, signal: requestSignal(signal), headers: { Authorization: 'Bearer ' + token, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+      if (!response.ok) throw httpError('Bridge', response.status);
       const text = await readBounded(response); try { return JSON.parse(text); } catch (_) { throw new Error('Invalid bridge JSON response'); }
     }
     return { rpc, initialize, listTools, listAgents, createOperation, getOperation };

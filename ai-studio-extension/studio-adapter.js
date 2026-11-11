@@ -10,8 +10,10 @@
   const text = (el) => String(el.innerText || el.textContent || '').trim();
   const elements = (selector, scope = document) => Array.from(scope.querySelectorAll(selector)).filter(visible);
   const roleValue = (el) => String(attr(el, 'data-turn-role') || '').toLowerCase();
-  const marked = (el, kind) => roleValue(el) === kind ||
-    elements(`.chat-turn-container.${kind}`, el).length > 0;
+  const roleMarkers = (el) => [el, ...elements('[data-turn-role], .chat-turn-container', el)]
+    .map(node => roleValue(node) || (node.matches?.('.chat-turn-container.user') ? 'user' : node.matches?.('.chat-turn-container.model') ? 'model' : ''))
+    .filter(Boolean);
+  const marked = (el, kind) => roleMarkers(el).includes(kind);
   const turns = () => elements('ms-chat-turn, model-prompt-container');
   const role = (el) => marked(el, 'model') ? 'model' : marked(el, 'user') ? 'user' : '';
   const editors = () => {
@@ -27,8 +29,7 @@
     return words.includes(normalized);
   });
   const submitButton = () => {
-    const matches = controls().filter((el) => !el.disabled && attr(el, 'aria-disabled') !== 'true' &&
-      hasLabel(el, ['run', 'send', 'запустить', 'отправить'], true));
+    const matches = controls().filter((el) => hasLabel(el, ['run', 'send', 'запустить', 'отправить'], true));
     return matches.length === 1 ? matches[0] : null;
   };
   const conversationKey = () => {
@@ -54,24 +55,26 @@
     if (content !== el && content.querySelectorAll) {
       for (const junk of content.querySelectorAll('ms-thought-accordion, ms-thought-chunk, button')) junk.remove();
     }
-    const codes = content.querySelectorAll ? [...content.querySelectorAll('ms-code-block')] : [];
+    const chunks = content.querySelectorAll ? [...content.querySelectorAll('ms-text-chunk')] : [];
+    if (chunks.length > 1) return chunks.map(cleanContentText).filter(Boolean).join('\n');
+    const scope = chunks[0] || content;
+    const codes = scope.querySelectorAll ? [...scope.querySelectorAll('ms-code-block')] : [];
     if (codes.length === 1) {
       const code = codes[0].querySelectorAll ? codes[0].querySelectorAll('pre code')[0] : null;
       if (code) {
-        const language = String(attr(code, 'class') || '').match(/(?:^|\s)language-([\w+-]+)/)?.[1] || '';
         const raw = text(code);
-        const prose = content.cloneNode ? content.cloneNode(true) : null;
+        const prose = scope.cloneNode ? scope.cloneNode(true) : null;
         if (prose) for (const block of prose.querySelectorAll('ms-code-block')) block.remove();
         let exactCall = false;
         try {
           const parsed = JSON.parse(raw);
           exactCall = !!parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).sort().join(',') === 'arguments,name,turn,v';
         } catch {}
-        if ((!prose || !text(prose).trim()) && (language === 'webcodex-call' || (language === 'json' && exactCall)))
+        if ((!prose || !text(prose).trim()) && exactCall)
           return `\`\`\`webcodex-call\n${raw}\n\`\`\``;
       }
     }
-    return cleanContentText(content);
+    return chunks.length ? cleanContentText(scope) : cleanContentText(content);
   };
   const inspect = () => {
     if (!location.hostname || location.hostname.toLowerCase() !== 'aistudio.google.com')
@@ -79,8 +82,7 @@
     const candidateEditors = editors();
     const recognized = turns();
     const roles = recognized.map(role);
-    const unsupportedRole = recognized.some((el, i) => !roles[i] &&
-      (attr(el, 'data-turn-role') || elements('.chat-turn-container', el).length > 0));
+    const unsupportedRole = recognized.some((el, i) => !roles[i] && roleMarkers(el).length > 0 || new Set(roleMarkers(el)).size > 1);
     const run = submitButton();
     const explicitStops = controls().filter((el) => hasLabel(el, ['stop', 'cancel', 'остановить', 'отмена', 'генерируется']) ||
       attr(el, 'aria-label')?.toLowerCase() === 'generating');
@@ -113,7 +115,7 @@
   const submit = (value) => {
     if (!stage(value)) return false;
     const button = submitButton();
-    if (!button) return false;
+    if (!button || button.disabled || attr(button, 'aria-disabled') === 'true') return false;
     button.click();
     return true;
   };

@@ -73,4 +73,21 @@ test('bridge operations use authenticated endpoints and preserve status objects'
   assert.deepEqual(await client.getOperation('op/1'), { status: 'pending', id: 'op/1' });
   assert.equal(calls[1].url, 'https://example.test/bridge/v1/operations/op%2F1');
   assert.equal(calls[1].init.headers.Authorization, 'Bearer secret');
+  assert.ok(calls[0].init.signal instanceof AbortSignal);
+  assert.ok(calls[1].init.signal instanceof AbortSignal);
+});
+
+test('all transport phases propagate cancellation and authentication status', async () => {
+  const controller = new AbortController();
+  const { client, calls } = clientWith((_url, init) => {
+    const rpc = init.body && JSON.parse(init.body);
+    return rpc?.method === 'initialize' ? rpcResult({}) : response('', { status: 202 });
+  });
+  await client.initialize(controller.signal);
+  assert.equal(calls.length, 2);
+  controller.abort();
+  for (const call of calls) assert.equal(call.init.signal.aborted, true);
+  const unauthorized = clientWith(() => response('{}', { status: 401 }));
+  await assert.rejects(unauthorized.client.getOperation('existing'), error => error.status === 401);
+  await assert.rejects(unauthorized.client.rpc('ping'), error => error.status === 401);
 });

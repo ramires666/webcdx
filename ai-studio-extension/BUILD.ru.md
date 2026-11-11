@@ -24,6 +24,32 @@ node --test ai-studio-extension/*.test.cjs
 `ai-studio-extension/*.test.cjs` выбирает тестовые файлы расширения. Живой тест
 в вашем аккаунте AI Studio эти проверки не заменяют.
 
+### Необязательная проверка собранных Gate и агента на Windows
+
+Готовые `webcodex-gate.exe` и `webcodex-agent.exe` версии
+`1.5.0-ai-studio-alpha.1` уже находятся в `bin/ai-studio-bridge` этой рабочей копии;
+этот патч их не пересобирает и не меняет. В Git готовых EXE нет: если вы скачали
+только исходники, сначала выполните Windows-сборку из следующего раздела.
+Следующие команды запускают локальный тест
+с временной базой Gate и без AI Studio или ключа модели. Выполните её из корня
+репозитория в PowerShell на Windows:
+
+```powershell
+$env:WEBCODEX_BRIDGE_REAL_TEST = '1'
+node --test ai-studio-extension/real-gate.test.cjs
+Remove-Item Env:WEBCODEX_BRIDGE_REAL_TEST
+```
+
+Первая строка задаёт для текущего окна переменную окружения
+`WEBCODEX_BRIDGE_REAL_TEST`; значение `1` включает этот необязательный тест.
+`node` запускает Node.js, `--test` включает тестовый режим, а
+`ai-studio-extension/real-gate.test.cjs` — путь тестового файла от корня репозитория;
+тест использует уже собранные EXE, проверяет чтение и запись временных файлов,
+перезапуск Gate и повторное подключение агента. Успех отображается как один
+пройденный тест. `Remove-Item` удаляет переменную из текущего окна PowerShell;
+аргумент `Env:WEBCODEX_BRIDGE_REAL_TEST` обозначает её в хранилище окружения.
+Тест сам удаляет свои временные данные. На других ОС он пропускается.
+
 ## Windows x64: Gate и агент
 
 ```powershell

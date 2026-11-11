@@ -25,33 +25,33 @@
       name.textContent = kind === 'agent' ? `${item.name || item.id}${item.online === false ? ' · не в сети' : ''}` : `${item.name}${item.description ? ' — ' + item.description : ''}`;
       label.append(input, name); container.append(label);
     }
-    if (kind === 'tool') { toolSignature = signature; toolsInitialized = true; } else agentSignature = signature;
+    if (kind === 'tool') { toolSignature = signature; if (items.length) toolsInitialized = true; } else agentSignature = signature;
   }
   function render(next) {
     if (!next) return;
     state = next;
     const session = next.session || {};
     const phaseNames = { idle: 'ожидает запуска', ready: 'готов', active: 'выполняется', running: 'выполняется', waiting_approval: 'ожидает подтверждения', paused: 'на паузе', stopped: 'остановлен', delivery_uncertain: 'передача результата не подтверждена', error: 'ошибка' };
-    stateEl.textContent = `${session.demo || next.demo ? 'Демо режим · ' : ''}${session.phase ? `Gate ${next.connected ? 'подключён' : 'не подключён'} · сеанс: ${phaseNames[session.phase] || session.phase}` : next.connected ? 'Gate подключён' : 'Gate не подключён'}`;
+    stateEl.textContent = `${session.demo || next.demoMode ? 'Демо режим · ' : ''}${session.phase ? `Gate ${next.connected ? 'подключён' : 'не подключён'} · сеанс: ${phaseNames[session.phase] || session.phase}` : next.connected ? 'Gate подключён' : 'Gate не подключён'}`;
     renderChoices($('agents'), next.agents || [], 'agent');
     renderChoices($('tools'), next.tools || [], 'tool');
     if (next.gateUrl && !$('gate-url').value) $('gate-url').value = next.gateUrl;
     if (next.clientId && !$('client-id').value) $('client-id').value = next.clientId;
     $('pending').textContent = session.pendingCall ? JSON.stringify(session.pendingCall, null, 2) : 'Нет ожидающего вызова';
     if (session.instructions !== undefined && document.activeElement !== $('instructions')) $('instructions').value = session.instructions;
-    showError(session.error || null);
+    if (session.error) showError(session.error);
     $('result').value = session.resultText || '';
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;
     $('connect').disabled = !!next.connected;
     $('disconnect').disabled = !next.connected;
     $('demo').disabled = !!next.connected;
-    $('arm').disabled = !next.connected || (!!session.phase && session.phase !== 'stopped') || !$('consent').checked;
+    $('arm').disabled = !next.connected || !['idle', 'stopped'].includes(session.phase) || !$('consent').checked;
     $('save-instructions').disabled = !next.connected || !session.agentId;
     $('approve').disabled = session.phase !== 'waiting_approval' || !session.pendingCall || session.paused;
-    $('deliver').disabled = !session.resultText || session.phase === 'delivery_uncertain';
-    $('pause').disabled = !session.phase || session.paused;
-    $('resume').disabled = !session.phase || !session.paused;
-    $('stop').disabled = !session.phase;
+    $('deliver').disabled = !session.resultText || session.phase !== 'result_ready' || session.paused;
+    $('pause').disabled = !session.phase || ['idle', 'stopped'].includes(session.phase) || session.paused;
+    $('resume').disabled = !session.phase || !session.paused || session.resumeBlocked;
+    $('stop').disabled = !session.phase || ['idle', 'stopped'].includes(session.phase);
   }
   async function act(type, payload = {}) {
     showError(null);

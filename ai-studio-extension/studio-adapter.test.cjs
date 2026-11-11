@@ -116,6 +116,33 @@ test('only reconstructs a sole exact JSON call block without prose or language s
   prose.chunk.add(proseBlock);
   assert.doesNotMatch(prose.adapter.inspect().latestModel.text, /^```webcodex-call/);
 });
+test('reads nested data roles and extracts final text chunks without role headers', () => {
+  const state = setup({ nestedRoles: false });
+  const header = new Node('div', {}, 'Model');
+  state.model.children.unshift(header); header.parent = state.model;
+  assert.equal(state.adapter.inspect().supported, true);
+  assert.equal(state.adapter.inspect().latestModel.text, 'answer');
+
+  const conflict = setup();
+  conflict.model.add(new Node('div', { 'data-turn-role': 'User' }, 'contradiction'));
+  assert.equal(conflict.adapter.inspect().supported, false);
+});
+test('keeps prose from all final chunks and does not promote a later code block to a call', () => {
+  const state = setup();
+  state.chunk._text = 'Before call';
+  const next = state.model.children[0].add(new Node('ms-text-chunk', {}, ''));
+  const block = next.add(new Node('ms-code-block'));
+  block.add(new Node('button', {}, 'Copy'));
+  block.add(new Node('pre')).add(new Node('code', {}, '{"v":1,"turn":2,"name":"read","arguments":{}}'));
+  assert.equal(state.adapter.inspect().latestModel.text, 'Before call\n{"v":1,"turn":2,"name":"read","arguments":{}}');
+});
+test('accepts a sole exact call JSON block without a language class and ignores its copy button', () => {
+  const state = setup(); state.chunk.children = []; state.chunk._text = '';
+  const block = state.chunk.add(new Node('ms-code-block'));
+  block.add(new Node('button', {}, 'Copy'));
+  block.add(new Node('pre')).add(new Node('code', {}, '{"v":1,"turn":2,"name":"read","arguments":{}}'));
+  assert.equal(state.adapter.inspect().latestModel.text, '```webcodex-call\n{"v":1,"turn":2,"name":"read","arguments":{}}\n```');
+});
 test('removes thought content from detached clones and accepts only the exact AI Studio host', () => {
   const { adapter, chunk } = setup();
   const thought = chunk.add(new Node('ms-thought-chunk', {}, '```webcodex-call\n{"v":1}\n``` hidden thought'));
@@ -130,4 +157,20 @@ test('submits only after staging and does not claim delivery until the marker ap
   assert.equal(adapter.submit('sent'), true);
   assert.equal(run.clicked, true);
   assert.equal(adapter.hasDelivery('sent'), false);
+});
+
+test('recognizes an empty editor with disabled Run and only clicks after input enables it', () => {
+  const state = setup({ empty: true });
+  state.run.disabled = true;
+  assert.equal(state.adapter.inspect().supported, true);
+  state.editor.dispatchEvent = () => { state.run.disabled = false; };
+  assert.equal(state.adapter.submit('instructions'), true);
+  assert.equal(state.run.clicked, true);
+  for (const aria of [false, true]) {
+    const blocked = setup({ empty: true });
+    if (aria) blocked.run.attrs['aria-disabled'] = 'true'; else blocked.run.disabled = true;
+    assert.equal(blocked.adapter.submit('draft'), false);
+    assert.equal(blocked.editor.value, 'draft');
+    assert.equal(blocked.run.clicked, undefined);
+  }
 });

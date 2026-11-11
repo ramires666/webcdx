@@ -45,6 +45,7 @@ function harness(initial = saved(), tabBehavior = {}) {
     }
     if (u.pathname === '/bridge/v1/operations' && method === 'POST') {
       createCount++; calls.push({ url: u.pathname, method, body: JSON.parse(init.body) });
+      if (tabBehavior.expireAuth) return json({}, 401);
       return json({ id: 'op-1', status: 'dispatching' }, 202);
     }
     if (u.pathname === '/bridge/v1/operations/op-1' && method === 'GET') {
@@ -87,6 +88,53 @@ test('restored token stays private; tab is bound and one operation delivers adve
 test('restoring a pending approval never dispatches it', async () => {
   const h = harness(saved('waiting_approval', 'write_file')); await h.status(); await h.alarm();
   assert.equal(h.createCount, 0, 'restored approval must wait for explicit user approval');
+});
+
+test('expired authorization pauses a pending operation without retrying or losing its key', async () => {
+  const h = harness(saved(), { expireAuth: true });
+  await h.status(); await h.call('turn-1');
+  const state = (await h.status()).state;
+  assert.equal(state.connected, false);
+  assert.equal(state.session.phase, 'paused');
+  assert.equal(state.session.resumeBlocked, true);
+  assert.equal(state.session.pendingCall.name, 'read_file');
+  assert.equal(state.session.operationKey, h.calls[0].body.key);
+  assert.equal(h.db[KEY].accessToken, '');
+  assert.equal((await h.message({ type: 'bridge.resume' })).ok, false);
+  await h.alarm(); await h.call('turn-1');
+  assert.equal(h.createCount, 1);
+});
+
+test('a call received during pending approval stays retryable and does not dispatch', async () => {
+  const h = harness(saved('waiting_approval', 'write_file')); await h.status();
+  const rejected = await h.call('turn-1');
+  assert.equal(rejected.accepted, false);
+  const state = (await h.status()).state;
+  assert.equal(state.session.phase, 'waiting_approval');
+  assert.equal(state.session.pendingCall.name, 'write_file');
+  assert.equal(h.createCount, 0);
+});
+
+test('page reload pauses the bound session and page messages expose no result state', async () => {
+  const h = harness(); await h.status();
+  const reloaded = await h.message({ type: 'studio.hello' }, h.page);
+  assert.equal(reloaded.ok, true); assert.equal(reloaded.accepted, true); assert.equal('state' in reloaded, false);
+  const state = (await h.status()).state;
+  assert.equal(state.session.paused, true);
+  assert.equal(state.session.resumeBlocked, true);
+  assert.match(state.session.error, /restarted/);
+  const rejected = await h.call('turn-1');
+  assert.equal(rejected.ok, false); assert.equal(rejected.accepted, false); assert.equal('state' in rejected, false);
+  assert.equal(h.createCount, 0);
+});
+
+test('normal model text is not exposed as a deliverable tool result', async () => {
+  const h = harness(); await h.status();
+  const response = await h.message({ type: 'studio.call', sessionId: 'session-1', conversationKey: 'chat-1', generating: false, text: 'A normal answer' }, h.page);
+  assert.equal(response.ok, true); assert.equal(response.accepted, true); assert.equal('state' in response, false);
+  const state = (await h.status()).state;
+  assert.equal(state.session.phase, 'ready');
+  assert.equal(state.session.resultText, '');
 });
 
 test('conversation change pauses and prevents result delivery', async () => {

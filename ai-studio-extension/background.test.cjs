@@ -6,7 +6,7 @@ const path=require('node:path');
 const WebCodexProtocol=require('./protocol.js');
 const WebCodexMCP=require('./mcp-client.js');
 
-function harness(stored={}) {
+function harness(stored={}, failInitialize=false) {
   const listeners={};const data={...stored};const sent=[];
   const event=()=>({addListener:fn=>{listeners[fn.name||Math.random()]=fn;}});
   const chrome={runtime:{id:'test-id',getURL:p=>'chrome-extension://test-id/'+p,onMessage:{addListener(fn){listeners.message=fn;}}},
@@ -15,7 +15,7 @@ function harness(stored={}) {
     permissions:{contains:async()=>true},tabs:{get:async()=>({url:'https://aistudio.google.com/app/prompts/abc'}),sendMessage:async()=>({supported:true,conversationKey:'c',ok:true})},
     identity:{getRedirectURL:()=> 'https://test.chromiumapp.org/webcodex',launchWebAuthFlow:async()=>''}};
   const context={chrome,crypto:require('node:crypto').webcrypto,URL,URLSearchParams,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,JSON,Promise,Set,Map,Date,Math,Error,String,Object,Number,RegExp,console,btoa:s=>Buffer.from(s,'binary').toString('base64'),fetch:async()=>{throw Error('fetch unexpected')},
-    WebCodexProtocol,WebCodexMCP,importScripts(){},setTimeout,clearTimeout};
+    WebCodexProtocol,WebCodexMCP:failInitialize?{createClient:()=>({initialize:async()=>{throw Error('expired')}})}:WebCodexMCP,importScripts(){},setTimeout,clearTimeout};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'background.js'),'utf8'),context,{filename:'background.js'});
   return {listeners,data,sent,chrome};
 }
@@ -32,4 +32,21 @@ test('session restore keeps access token private from panel state',async()=>{
   assert.equal(reply.ok,true);assert.equal(JSON.stringify(reply).includes('secret'),false);
   assert.equal(h.sent.some(x=>x[0]==='session-access'&&x[1].accessLevel==='TRUSTED_CONTEXTS'),true);
   assert.equal(h.sent.some(x=>x[0]==='local-access'&&x[1].accessLevel==='TRUSTED_CONTEXTS'),true);
+});
+test('failed Gate restore clears connected state and blocks the stale session',async()=>{
+  const stored={webcodexState:{connected:true,gateUrl:'https://gate.example',clientId:'client',accessToken:'secret',session:{phase:'recovering',agentId:'a',toolNames:['read_file'],automatic:false,paused:false,pendingCall:{name:'read_file',arguments:{path:'x'}},resultText:'',error:'',count:0,tabId:7}}};
+  const h=harness(stored,true);
+  await new Promise(r=>setTimeout(r,0));
+  const status=await message(h,{type:'bridge.status'},{url:'chrome-extension://test-id/panel.html'});
+  assert.equal(status.state.connected,false);assert.equal(status.state.session.paused,true);assert.equal(status.state.session.resumeBlocked,true);
+  assert.match(status.state.session.error,/reconnect/);assert.equal(JSON.stringify(status).includes('secret'),false);
+  const panel={url:'chrome-extension://test-id/panel.html'};
+  const connect={type:'bridge.connect',gateUrl:'https://gate.example',clientId:'client'};
+  let oauthStarted=false;
+  h.chrome.identity.launchWebAuthFlow=async()=>{oauthStarted=true;throw Error('OAuth cancelled in test');};
+  assert.match((await message(h,connect,panel)).error,/Stop the paused session/);
+  assert.equal(oauthStarted,false);
+  assert.equal((await message(h,{type:'bridge.stop'},panel)).ok,true);
+  assert.equal((await message(h,connect,panel)).error,'OAuth cancelled in test');
+  assert.equal(oauthStarted,true);
 });
