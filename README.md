@@ -10,6 +10,39 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
+## AI Studio Bridge (alpha 0.2.12)
+
+The Chrome extension connects an ordinary AI Studio chat to Gate and a selected
+local agent through Gate OAuth. It uses the open AI Studio page, so no model API
+key is needed. One chat can be active per bridge session. Starting a session
+writes tool rules to **System instructions** and leaves the composer for your
+task. A short explanation may precede one fenced call; no `Active turn` or
+`turn` field is required:
+
+~~~text
+```webcodex-call
+{"v":1,"name":"read_file","arguments":{"path":"C:\\work\\notes.txt"}}
+```
+~~~
+
+The first transition from a new chat to its first saved URL preserves the
+session when no Gate operation is pending. Moving to another saved chat is
+guarded and does not carry the session or its result across. The extension also
+removed the forced pause after 10 calls or 5 minutes and the automatic pause
+for results over 32 KiB; the existing 2 MiB transport limit remains. AI Studio
+DOM selectors are alpha and have not been verified against the live site.
+
+To update, replace the extension source folder or unzip
+[`bin/ai-studio-bridge/webcodex-ai-studio-bridge.zip`](bin/ai-studio-bridge/webcodex-ai-studio-bridge.zip)
+over its existing folder. In `chrome://extensions`, click **Reload** for AI
+Studio Bridge. Reload an already saved AI Studio tab so its system instructions
+are refreshed; save any unsaved conversation before reloading it. Gate
+`1.5.0-ai-studio-alpha.4` and agent `1.5.0-ai-studio-alpha.1` do not need replacing, updating,
+or restarting. The agent is compiled; its ready-made EXE is
+[`bin/ai-studio-bridge/webcodex-agent.exe`](bin/ai-studio-bridge/webcodex-agent.exe),
+and you do not need to build it yourself. See the
+[Russian setup and update guide](ai-studio-extension/README.ru.md) for details.
+
 Russian documentation: [README.ru.md](README.ru.md) · [User guide](USER_GUIDE.ru.md)
 
 For the default uebagent browser integration, see
