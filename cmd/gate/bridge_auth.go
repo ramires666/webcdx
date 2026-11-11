@@ -325,16 +325,11 @@ func (s *server) handleBridgeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	encoded, _ := json.Marshal(tools)
-	ttl := durationEnv("WEBCODEX_ACCESS_TOKEN_TTL", 24*time.Hour)
-	if ttl > 24*time.Hour {
-		ttl = 24 * time.Hour
-	}
-	if ttl <= 0 {
-		ttl = 24 * time.Hour
-	}
 	now := time.Now().UTC()
+	expiresAt := time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	expiresIn := int(expiresAt.Unix() - now.Unix())
 	hash := hashSecret(raw)
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO mcp_access_tokens(token_hash,client_id,expires_at,created_at) VALUES(?,?,?,?)`, hash, client.ID, now.Add(ttl).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO mcp_access_tokens(token_hash,client_id,expires_at,created_at) VALUES(?,?,?,?)`, hash, client.ID, expiresAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO bridge_token_grants(token_hash,client_id,extension_id,allowed_tools) VALUES(?,?,?,?)`, hash, client.ID, extension, string(encoded))
 	}
@@ -345,7 +340,7 @@ func (s *server) handleBridgeToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token exchange failed", 500)
 		return
 	}
-	writeJSON(w, map[string]any{"access_token": raw, "token_type": "Bearer", "expires_in": int(ttl.Seconds()), "scope": "mcp"})
+	writeJSON(w, map[string]any{"access_token": raw, "token_type": "Bearer", "expires_in": expiresIn, "scope": "mcp"})
 }
 
 func bridgeNoStore(w http.ResponseWriter) {

@@ -5,9 +5,21 @@ let token = '', client = null, serial = Promise.resolve(), demo = false, connect
 const uuid = () => crypto.randomUUID();
 const clone = x => JSON.parse(JSON.stringify(x));
 function publicState() { const s=clone(state); delete s.accessToken; s.connecting=connecting; return s; }
-function save() { return chrome.storage.session.set({[KEY]:state}); }
+async function save() { await chrome.storage.session.set({[KEY]:state});if(state.connected&&state.accessToken&&!state.demoMode)await chrome.storage.local.set({bridgeAuth:{gateUrl:state.gateUrl,clientId:state.clientId,accessToken:state.accessToken}}); }
 function enqueue(fn) { const p=serial.then(fn); serial=p.catch(()=>{}); return p; }
-async function restore() { try { const data=await chrome.storage.session.get(KEY); if(data[KEY]) state=data[KEY]; token=state.accessToken||''; demo=!!state.demoMode; if(token&&state.connected){client=WebCodexMCP.createClient({baseUrl:state.gateUrl,token});await client.initialize();} } catch(e) { state.connected=false;client=null;token='';state.accessToken='';state.session.paused=true;state.session.resumeBlocked=true;state.session.phase='paused';state.session.error='Could not restore Gate connection; reconnect to Gate';await save(); } }
+async function restore() {
+  try {
+    const data=await chrome.storage.session.get(KEY);
+    if(data[KEY])state=data[KEY];
+    let fresh=false;
+    if(!state.accessToken&&!state.demoMode){const {bridgeAuth}=await chrome.storage.local.get('bridgeAuth');if(bridgeAuth?.accessToken){Object.assign(state,bridgeAuth);state.connected=true;fresh=true;}}
+    token=state.accessToken||'';demo=!!state.demoMode;
+    if(token&&state.connected){client=WebCodexMCP.createClient({baseUrl:state.gateUrl,token});const init=await client.initialize();if(fresh){state.gateInstructions=init?.instructions||'';state.tools=(await client.listTools()).filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();}await save();}
+  } catch(e) {
+    if(e?.status===401)await chrome.storage.local.remove('bridgeAuth');
+    state.connected=false;client=null;token='';state.accessToken='';state.session.paused=true;state.session.resumeBlocked=true;state.session.phase='paused';state.session.error='Could not restore Gate connection; reconnect to Gate';await save();
+  }
+}
 chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}).catch(()=>{});
 chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}).catch(()=>{});
 const ready=restore();
@@ -26,8 +38,8 @@ async function command(m) {
   switch(m.type) {
     case 'bridge.status': return publicState();
     case 'bridge.connect': await connect(m); break;
-    case 'bridge.disconnect': await clearSession();token='';client=null;demo=false;state.accessToken='';state.demoMode=false;state.connected=false;state.gateUrl='';state.clientId='';state.agents=[];state.tools=[];break;
-    case 'bridge.demo': await clearSession();demo=true;state.demoMode=true;token='';client=null;state.accessToken='';state.connected=true;state.gateUrl='Demo mode';state.clientId='demo';state.agents=[{id:'demo',name:'Demo agent',online:true}];state.tools=[{name:'read_file',description:'Demo only: return fixed sample text.',inputSchema:{type:'object',additionalProperties:false,properties:{path:{type:'string'}},required:['path']}}];break;
+    case 'bridge.disconnect': await clearSession();await chrome.storage.local.remove('bridgeAuth');token='';client=null;demo=false;state.accessToken='';state.demoMode=false;state.connected=false;state.gateUrl='';state.clientId='';state.agents=[];state.tools=[];break;
+    case 'bridge.demo': await clearSession();await chrome.storage.local.remove('bridgeAuth');demo=true;state.demoMode=true;token='';client=null;state.accessToken='';state.connected=true;state.gateUrl='Demo mode';state.clientId='demo';state.agents=[{id:'demo',name:'Demo agent',online:true}];state.tools=[{name:'read_file',description:'Demo only: return fixed sample text.',inputSchema:{type:'object',additionalProperties:false,properties:{path:{type:'string'}},required:['path']}}];break;
     case 'bridge.arm': await arm(m);break;
     case 'bridge.instructions': if(m.submit!==false) throw Error('submit must be false');await stageInstructions();await save();break;
     case 'bridge.approve': await approve();break;
@@ -87,7 +99,7 @@ async function studioMessage(m,sender) {
   throw Error('Unknown Studio message');
 }
 async function approve(){const s=state.session;if(s.phase!=='waiting_approval'||!s.pendingCall||s.paused)throw Error('No pending approval');await dispatch();}
-async function expireAuth(e){if(e?.status!==401) return false;state.connected=false;client=null;token='';state.accessToken='';state.session.pausedPhase=state.session.phase;state.session.phase='paused';state.session.paused=true;state.session.resumeBlocked=true;state.session.error='Gate authorization expired; stop this session, reconnect, then re-arm this chat';await save();return true;}
+async function expireAuth(e){if(e?.status!==401) return false;await chrome.storage.local.remove('bridgeAuth');state.connected=false;client=null;token='';state.accessToken='';state.session.pausedPhase=state.session.phase;state.session.phase='paused';state.session.paused=true;state.session.resumeBlocked=true;state.session.error='Gate authorization expired; stop this session, reconnect, then re-arm this chat';await save();return true;}
 async function dispatch(){const s=state.session,p=s.pendingCall;if(!p)throw Error('No pending call');const tool=state.tools.find(t=>t.name===p.name);if(!tool)throw Error('Tool unavailable');
   if(s.count>=10||Date.now()-(s.budgetStart||Date.now())>=300000){s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.error='Session operation limit reached; resume to continue.';await save();return;}
   if(!s.operationKey)s.operationKey=Date.now()+'-'+uuid();const args={...p.arguments};if(tool.inputSchema.properties?.request_key)args.request_key=s.operationKey;

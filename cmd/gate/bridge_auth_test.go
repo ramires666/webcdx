@@ -42,6 +42,7 @@ func TestBridgeDefaultsAreReadOnly(t *testing.T) {
 func TestBridgeConsentAndSingleUseToken(t *testing.T) {
 	srv, cleanup := setupTestServer(t)
 	defer cleanup()
+	t.Setenv("WEBCODEX_ACCESS_TOKEN_TTL", "24h")
 	ctx := context.Background()
 	if err := srv.store.initBridgeAuth(ctx); err != nil {
 		t.Fatal(err)
@@ -124,6 +125,16 @@ func TestBridgeConsentAndSingleUseToken(t *testing.T) {
 	grant, err := srv.store.loadBridgeGrant(ctx, raw)
 	if err != nil || grant.ExtensionID != extension || len(grant.AllowedTools) != len(bridgeDefaultTools) {
 		t.Fatalf("grant=%+v err=%v", grant, err)
+	}
+	var persistedExpiry string
+	if err := srv.store.db.QueryRow(`SELECT expires_at FROM mcp_access_tokens WHERE token_hash=?`, hashSecret(raw)).Scan(&persistedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if expiry := parseDBTime(persistedExpiry); !expiry.After(time.Now().AddDate(100, 0, 0)) {
+		t.Fatalf("bridge token should outlive 100 years despite 24h MCP TTL: %s", persistedExpiry)
+	}
+	if expiresIn, ok := result["expires_in"].(float64); !ok || expiresIn < 100*365*24*60*60 {
+		t.Fatalf("bridge expires_in should reflect the distant expiry: %v", result["expires_in"])
 	}
 	if replay := exchange(); replay.Code != http.StatusBadRequest {
 		t.Fatalf("authorization code replay status=%d", replay.Code)
