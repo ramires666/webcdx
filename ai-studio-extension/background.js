@@ -1,10 +1,10 @@
 importScripts('protocol.js', 'mcp-client.js');
 const KEY = 'webcodexState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
 let state = {connected:false,gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
-let token = '', client = null, serial = Promise.resolve(), demo = false;
+let token = '', client = null, serial = Promise.resolve(), demo = false, connecting = false;
 const uuid = () => crypto.randomUUID();
 const clone = x => JSON.parse(JSON.stringify(x));
-function publicState() { const s=clone(state); delete s.accessToken; return s; }
+function publicState() { const s=clone(state); delete s.accessToken; s.connecting=connecting; return s; }
 function save() { return chrome.storage.session.set({[KEY]:state}); }
 function enqueue(fn) { const p=serial.then(fn); serial=p.catch(()=>{}); return p; }
 async function restore() { try { const data=await chrome.storage.session.get(KEY); if(data[KEY]) state=data[KEY]; token=state.accessToken||''; demo=!!state.demoMode; if(token&&state.connected){client=WebCodexMCP.createClient({baseUrl:state.gateUrl,token});await client.initialize();} } catch(e) { state.connected=false;client=null;token='';state.accessToken='';state.session.paused=true;state.session.resumeBlocked=true;state.session.phase='paused';state.session.error='Could not restore Gate connection; reconnect to Gate';await save(); } }
@@ -15,8 +15,12 @@ chrome.action.onClicked.addListener(tab=>{ if(tab?.windowId!==undefined) chrome.
 chrome.alarms.create('webcodex-recover',{periodInMinutes:0.5});
 chrome.alarms.onAlarm.addListener(a=>{if(a.name==='webcodex-recover') enqueue(async()=>{await ready;await recover();});});
 chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
+  if(connecting&&msg?.type==='bridge.status'&&sender.url===chrome.runtime.getURL('panel.html')){ready.then(()=>reply({ok:true,state:publicState()})).catch(()=>reply({ok:false,error:'Не удалось загрузить состояние'}));return true;}
   if(msg?.type?.startsWith('studio.')) { enqueue(async()=>{await ready;if(sender.frameId!==0||sender.tab?.id!==state.session.tabId||new URL(sender.url||'').origin!=='https://aistudio.google.com')throw Error('Untrusted Studio sender');return studioMessage(msg,sender);}).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)})); return true; }
-  enqueue(async()=>{await ready;if(sender.url!==chrome.runtime.getURL('panel.html'))throw Error('Panel sender required');return command(msg)}).then(s=>reply({ok:true,state:s||publicState()})).catch(e=>reply({ok:false,error:String(e.message||e)})); return true;
+  const connectRequest=msg?.type==='bridge.connect'&&sender.url===chrome.runtime.getURL('panel.html');
+  if(connectRequest&&connecting){reply({ok:false,error:'Вход в Gate уже выполняется. Завершите или закройте окно входа.'});return;}
+  if(connectRequest)connecting=true;
+  enqueue(async()=>{await ready;if(sender.url!==chrome.runtime.getURL('panel.html'))throw Error('Panel sender required');return command(msg)}).then(s=>reply({ok:true,state:s||publicState()})).catch(e=>reply({ok:false,error:String(e.message||e)})).finally(()=>{if(connectRequest)connecting=false;}); return true;
 });
 async function command(m) {
   switch(m.type) {

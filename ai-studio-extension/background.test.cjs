@@ -20,6 +20,20 @@ function harness(stored={}, failInitialize=false) {
   return {listeners,data,sent,chrome};
 }
 function message(h,msg,sender){return new Promise(resolve=>{const async=h.listeners.message(msg,sender,resolve);if(async!==true)resolve(undefined);});}
+test('one pending login remains visible and duplicate connects never queue another flow',async()=>{
+  const h=harness();const panel={url:'chrome-extension://test-id/panel.html'};
+  let cancel;let started=false;
+  h.chrome.identity.launchWebAuthFlow=()=>{started=true;return new Promise((_,reject)=>{cancel=()=>reject(Error('cancelled'));});};
+  const first=message(h,{type:'bridge.connect',gateUrl:'https://gate.example',clientId:'client'},panel);
+  while(!started)await new Promise(r=>setTimeout(r,1));
+  const status=await message(h,{type:'bridge.status'},panel);
+  assert.equal(status.state.connecting,true);
+  const second=await message(h,{type:'bridge.connect',gateUrl:'https://gate.example',clientId:'client'},panel);
+  assert.equal(second.ok,false);assert.match(second.error,/уже выполняется/);
+  cancel();assert.equal((await first).ok,false);
+  await new Promise(r=>setTimeout(r,0));
+  assert.equal((await message(h,{type:'bridge.status'},panel)).state.connecting,false);
+});
 test('rejects panel privileges from page and frame senders',async()=>{
   const h=harness();await new Promise(r=>setTimeout(r,0));
   const page=await message(h,{type:'bridge.status'},{url:'https://aistudio.google.com/'});assert.equal(page.ok,false);assert.equal(page.error,'Panel sender required');

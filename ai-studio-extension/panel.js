@@ -3,6 +3,20 @@
   const $ = id => document.getElementById(id);
   const stateEl = $('status'), errorEl = $('error');
   let state = null, toolSignature = '', agentSignature = '', toolsInitialized = false;
+  let connecting = false;
+  const edited = new Set();
+  function saveConnection() {
+    return chrome.storage.local.set({ bridgeConnection: { gateUrl: $('gate-url').value, clientId: $('client-id').value } });
+  }
+  for (const id of ['gate-url', 'client-id']) $(id).addEventListener('input', () => {
+    edited.add(id);
+    connectionLoaded.then(saveConnection).catch(showError);
+  });
+  const connectionLoaded = chrome.storage.local.get('bridgeConnection').then(({ bridgeConnection: saved }) => {
+    if (!saved) return;
+    if (!edited.has('gate-url')) $('gate-url').value = saved.gateUrl || '';
+    if (!edited.has('client-id')) $('client-id').value = saved.clientId || '';
+  }).catch(showError);
   const SAFE_DEFAULT_TOOLS = new Set(['list_allowed_roots', 'list_directory', 'read_file', 'search_files', 'find_files', 'list_agents', 'poll_command', 'list_commands']);
 
   function send(type, payload = {}) {
@@ -42,9 +56,11 @@
     if (session.error) showError(session.error);
     $('result').value = session.resultText || '';
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;
-    $('connect').disabled = !!next.connected;
-    $('disconnect').disabled = !next.connected;
-    $('demo').disabled = !!next.connected;
+    const busy = connecting || next.connecting;
+    $('connect').disabled = busy || !!next.connected;
+    $('connect').textContent = busy ? 'Ожидается вход…' : 'Подключить';
+    $('disconnect').disabled = busy || !next.connected;
+    $('demo').disabled = busy || !!next.connected;
     $('arm').disabled = !next.connected || !['idle', 'stopped'].includes(session.phase) || !$('consent').checked;
     $('save-instructions').disabled = !next.connected || !session.agentId;
     $('approve').disabled = session.phase !== 'waiting_approval' || !session.pendingCall || session.paused;
@@ -60,14 +76,19 @@
   }
   $('redirect-uri').textContent = `${chrome.identity.getRedirectURL('webcodex')}  ·  Extension ID: ${chrome.runtime.id}`;
   $('connect').addEventListener('click', async () => {
+    if (connecting || state?.connecting) return;
+    connecting = true;
+    render(state);
     showError(null);
     try {
+      await saveConnection();
       const url = new URL($('gate-url').value.trim());
       if (url.username || url.password || url.search || url.hash || url.pathname !== '/' || !(url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname)))) throw new Error('Укажите origin Gate: HTTPS или localhost по HTTP');
       const allowed = await chrome.permissions.request({ origins: [url.origin + '/*'] });
       if (!allowed) throw new Error('Доступ к адресу Gate не разрешён');
       await act('bridge.connect', { gateUrl: url.origin, clientId: $('client-id').value.trim() });
     } catch (error) { showError(error); }
+    finally { connecting = false; render(state); }
   });
   $('disconnect').addEventListener('click', () => act('bridge.disconnect'));
   $('demo').addEventListener('click', () => act('bridge.demo'));
@@ -87,5 +108,5 @@
   $('consent').addEventListener('change', () => render(state));
   $('automatic').addEventListener('change', () => { if (state) state.session.automatic = $('automatic').checked; });
   async function poll() { try { render(await send('bridge.status')); } catch (error) { showError(error); } }
-  poll(); setInterval(poll, 2000);
+  connectionLoaded.then(poll); setInterval(poll, 2000);
 })();
