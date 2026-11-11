@@ -1,5 +1,7 @@
 FROM golang:1.25-bookworm AS builder
 
+ARG VERSION=1.5.0-ai-studio-alpha.1
+
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -12,7 +14,7 @@ RUN CGO_ENABLED=0 \
     GOOS=linux \
     go build \
     -trimpath \
-    -ldflags="-s -w" \
+    -ldflags="-s -w -X webcodex/internal/buildinfo.Version=${VERSION}" \
     -o /out/webcodex-gate \
     ./cmd/gate
 
