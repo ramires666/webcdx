@@ -92,6 +92,11 @@ async function studioMessage(m,sender) {
   if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationKey!==s.conversationKey||!m.supported){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'Conversation changed';await save();return {accepted:true};}await recover();return {accepted:true};}
     if(m.type==='studio.call'){
     if(s.paused)return {accepted:false};
+    if(s.phase==='delivery_uncertain'&&m.conversationKey===s.conversationKey&&!m.generating&&s.nextTurn){
+      const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);
+      try{if(WebCodexProtocol.parseCall(m.text,s.nextTurn,tools)){completeDelivery();await save();}}catch{}
+      if(s.paused)return {accepted:false};
+    }
     if(!['waiting_model','ready'].includes(s.phase))return {accepted:false};
     if(m.conversationKey!==s.conversationKey||m.generating){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='Conversation changed or generation still active';}
     else if(s.phase==='waiting_model'||s.phase==='ready'){

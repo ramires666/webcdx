@@ -153,10 +153,20 @@
     const marker = String(operationId);
     return turns().some((el) => {
       if (role(el) !== 'user') return false;
-      const contents = [el, ...elements('.chat-turn-container.user, [data-turn-role]', el), ...elements('ms-text-chunk', el)];
-      return contents.some((node) => text(node).includes(`[WebCodex operation ${marker}]`) || (() => {
-        try { return JSON.parse(text(node)).operation_id === marker; } catch { return false; }
-      })());
+      const nested = [...new Set(elements('.turn-content, ms-prompt-chunk, ms-cmark-node, ms-text-chunk, pre code', el))];
+      const isResult = (value, header = false) => {
+        const raw = String(value).trim();
+        let parsed;
+        try { parsed = JSON.parse(raw); } catch {
+          if (!header) return false;
+          const json = raw.match(/^User\s*\n[^\n]+\n(\{[\s\S]*\})$/i)?.[1];
+          try { parsed = json && JSON.parse(json); } catch { return false; }
+        }
+        return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+          parsed.type === 'webcodex-result' && parsed.operation_id === marker;
+      };
+      if (nested.some((node) => text(node).includes(`[WebCodex operation ${marker}]`) || isResult(text(node)))) return true;
+      return text(el).includes(`[WebCodex operation ${marker}]`) || isResult(text(el), true);
     });
   };
   return { inspect, stage, submit, hasDelivery };

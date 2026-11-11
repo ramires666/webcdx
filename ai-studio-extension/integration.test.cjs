@@ -176,3 +176,33 @@ test('uncertain delivery is checked by snapshot and never submitted a second tim
   assert.equal(h.pageMessages.filter(m => m.type === 'studio.deliver').length, 1, 'delivery is never blindly retried');
   assert.equal(h.pageMessages.filter(m => m.type === 'studio.snapshot').length >= 1, true);
 });
+
+test('a valid call for the advertised next turn proves delivery without resending the previous result', async () => {
+  const initial=saved('delivery_uncertain');
+  Object.assign(initial.session,{pendingCall:{name:'read_file',arguments:{path:'old.txt'}},nextTurn:'turn-2',operationId:'old-op',operationKey:'old-key',resultText:'old result'});
+  const h=harness(initial);
+  await h.status();
+  for(const turn of ['turn-1','wrong-turn'])assert.equal((await h.call(turn)).accepted,false);
+  assert.equal((await h.status()).state.session.phase,'delivery_uncertain');
+  assert.equal(h.createCount,0);
+  const response=await h.call('turn-2');
+  assert.equal(response.accepted,true);
+  const state=(await h.status()).state.session;
+  assert.equal(state.turn,'turn-2');assert.equal(state.count,1);
+  assert.equal(state.pendingCall.arguments.path,'safe.txt');
+  assert.equal(h.createCount,1);assert.notEqual(h.calls[0].body.key,'old-key');
+  assert.equal(h.pageMessages.filter(m=>m.type==='studio.deliver').length,0);
+});
+
+test('prose, unselected tools and calls from another conversation cannot prove delivery',async()=>{
+  const initial=saved('delivery_uncertain');initial.session.nextTurn='turn-2';
+  const h=harness(initial);await h.status();
+  const base={type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false};
+  for(const text of ['A final answer','```webcodex-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'delete_path',arguments:{path:'x'}})+'\n```']){
+    assert.equal((await h.message({...base,text},h.page)).accepted,false);
+  }
+  const text='```webcodex-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'read_file',arguments:{path:'x'}})+'\n```';
+  assert.equal((await h.message({...base,text,conversationKey:'other'},h.page)).accepted,false);
+  assert.equal((await h.status()).state.session.phase,'delivery_uncertain');
+  assert.equal(h.createCount,0);
+});

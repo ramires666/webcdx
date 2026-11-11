@@ -186,6 +186,50 @@ test('submits only after staging and does not claim delivery until the marker ap
   assert.equal(adapter.hasDelivery('sent'), false);
 });
 
+test('confirms only an exact result envelope in the submitted user turn', () => {
+  const payload = '{"type":"webcodex-result","operation_id":"op-1","result":42}';
+  const turnContent = setup();
+  turnContent.user.attrs['data-turn-role'] = 'User';
+  turnContent.user.children = [];
+  turnContent.user._text = 'User\nNov 11, 2026, 10:30 AM';
+  turnContent.user.add(new Node('div', { class: 'turn-content' }, payload));
+  assert.equal(turnContent.adapter.hasDelivery('op-1'), true);
+
+  const cmark = setup();
+  cmark.user.attrs['data-turn-role'] = 'User';
+  cmark.user.children = [];
+  cmark.user._text = 'User\nNov 11, 2026, 10:30 AM';
+  cmark.user.add(new Node('ms-cmark-node', {}, payload));
+  assert.equal(cmark.adapter.hasDelivery('op-1'), true);
+
+  const header = setup();
+  header.user.attrs['data-turn-role'] = 'User';
+  header.user.children = [];
+  header.user._text = `User\nNov 11, 2026, 10:30 AM\n${payload}`;
+  assert.equal(header.adapter.hasDelivery('op-1'), true);
+  assert.equal(header.adapter.hasDelivery('other'), false);
+
+  for (const invalid of [
+    '{"type":"other","operation_id":"op-1"}',
+    'partial {"type":"webcodex-result","operation_id":"op-1"',
+    'Here is the result: {"type":"webcodex-result","operation_id":"op-1"}',
+  ]) {
+    const state = setup();
+    state.user.attrs['data-turn-role'] = 'User';
+    state.user.children = [];
+    state.user._text = invalid;
+    assert.equal(state.adapter.hasDelivery('op-1'), false);
+  }
+
+  const modelOnly = setup();
+  modelOnly.user.attrs['data-turn-role'] = 'User';
+  modelOnly.user.children = [];
+  modelOnly.user._text = 'User\nNov 11, 2026, 10:30 AM';
+  modelOnly.model.children[0].add(new Node('ms-text-chunk', {}, payload));
+  assert.equal(modelOnly.adapter.hasDelivery('op-1'), false);
+  assert.equal(setup().adapter.hasDelivery('op-1'), true, 'legacy exact marker remains supported');
+});
+
 test('recognizes an empty editor with disabled Run and only clicks after input enables it', async () => {
   const state = setup({ empty: true });
   state.run.disabled = true;
