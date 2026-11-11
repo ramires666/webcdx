@@ -70,7 +70,7 @@ function setup({ draft = '', extraEditors = 0, generating = false, spinnerClass 
   return { adapter: createAdapter(document, location), location, editor, wrapper, run, user, model, chunk, root, document };
 }
 
-test('conversation key uses only pathname and ignores query or DOM ID changes', () => {
+test('conversation key stays bound to the active tab across URL and DOM changes', () => {
   const state = setup();
   const original = state.adapter.inspect().conversationKey;
   state.location.search = '?settings=changed';
@@ -80,7 +80,10 @@ test('conversation key uses only pathname and ignores query or DOM ID changes', 
   state.document.documentElement.attrs['data-conversation-id'] = 'thread-2';
   assert.equal(state.adapter.inspect().conversationKey, original);
   state.location.pathname = '/prompts/p2';
-  assert.notEqual(state.adapter.inspect().conversationKey, original);
+  state.location.search = '?chat=another';
+  state.document.documentElement.attrs['data-conversation-id'] = 'thread-3';
+  assert.equal(original, 'active-chat');
+  assert.equal(state.adapter.inspect().conversationKey, original);
 });
 
 function systemSetup({ original = 'Keep these user instructions.', saveDelay = false, malformed = false, duplicatePanels = false, saveCloses = false } = {}) {
@@ -594,7 +597,7 @@ test('waits for delayed Run activation, retries an owned unchanged draft, and pr
   assert.equal(await retry.adapter.submit('owned'), false);
 });
 
-test('aborts if the staged draft or conversation changes while waiting', async () => {
+test('aborts if the staged draft changes or the caller disarms while waiting', async () => {
   const edited = setup({ empty: true });
   edited.run.disabled = true;
   const editedSubmit = edited.adapter.submit('draft');
@@ -602,13 +605,14 @@ test('aborts if the staged draft or conversation changes while waiting', async (
   edited.editor.value = 'user edit';
   assert.equal(await editedSubmit, false);
 
-  const moved = setup({ empty: true });
-  moved.run.disabled = true;
-  const movedSubmit = moved.adapter.submit('draft');
+  const disarmed = setup({ empty: true });
+  disarmed.run.disabled = true;
+  let armed = true;
+  const movedSubmit = disarmed.adapter.submit('draft', () => armed);
   await new Promise(resolve => setTimeout(resolve, 10));
-  moved.location.pathname = '/prompts/p2';
+  armed = false;
   assert.equal(await movedSubmit, false);
-  assert.equal(moved.run.clicked, undefined);
+  assert.equal(disarmed.run.clicked, undefined);
 });
 
 test('waits through transient Run removal and rejects competing or stale submits', async () => {

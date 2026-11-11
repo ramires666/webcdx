@@ -10,7 +10,8 @@ const tool = { name: 'read_file', description: 'test', inputSchema: { type: 'obj
 
 function harness() {
   let model = { text: 'existing answer' }, latestUser = null, modelAfterUser = true, editorEmpty = true, supported = true;
-  let refreshFails = 1, systemStageFails = 1, now = 10000, generating = false, observerCallback, conversationKey = '/prompts/new_chat', saveOnSubmit=false;
+  let refreshFails = 1, systemStageFails = 1, now = 10000, generating = false, observerCallback, currentPath = '/prompts/new_chat', saveOnSubmit=false;
+  const conversationKey = 'active-chat';
   const operations = [], messages = [], staged = [], bgListeners = [], contentListeners = [], timers = new Map(), intervals = new Map(); let timerId = 0;
   const session = { phase: 'waiting_model', agentId: 'agent-1', toolNames: ['read_file'], automatic: true, paused: false, turn: 'old-turn', instructions: '', pendingCall: null, resultText: '', error: '', count: 0, tabId: 7, sessionId: 'old-session', conversationKey, pageInstance: 'page-1' };
   const db = { [KEY]: { connected: true, gateUrl: 'https://gate.example', clientId: 'client', accessToken: TOKEN, agents: [{ id: 'agent-1', name: 'test', online: true }], tools: [tool], session }, };
@@ -25,16 +26,16 @@ function harness() {
     inspect: () => ({ supported, generating, controlsPending: false, editorEmpty, conversationKey, latestModel: model, latestUser, modelAfterUser, error: supported ? '' : 'editor unavailable' }),
     stageSystemInstructions: async text => { if (systemStageFails-- > 0) return false; staged.push({ kind: 'system', text }); return true; },
     getSystemStageError: () => 'transient system editor', stage: text => { staged.push({ kind: 'turn', text }); editorEmpty = false; return true; },
-    restoreCleanup() {}, hasDelivery: operationId => { try { return JSON.parse(latestUser?.text || '{}').operation_id === operationId; } catch { return false; } }, submit: async text => { if(saveOnSubmit){conversationKey='/prompts/saved-chat';saveOnSubmit=false;}latestUser={text};modelAfterUser=false;return true; }
+    restoreCleanup() {}, hasDelivery: operationId => { try { return JSON.parse(latestUser?.text || '{}').operation_id === operationId; } catch { return false; } }, submit: async text => { if(saveOnSubmit){currentPath='/prompts/saved-chat';saveOnSubmit=false;}latestUser={text};modelAfterUser=false;return true; }
   }) };
   class TestDate extends Date { static now() { return now; } }
-  const context = { chrome, window: null, document: { documentElement: {}, addEventListener(type, fn) { this[type] = fn; } }, location: { origin: 'https://aistudio.google.com' }, WebCodexStudio: adapters, WebCodexProtocol, URL, URLSearchParams, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, JSON, Promise, Set, Map, Date: TestDate, AbortSignal, Math, Error, String, Object, Number, RegExp, console: { error() {}, warn() {}, log() {} }, crypto: require('node:crypto').webcrypto, btoa: s => Buffer.from(s, 'binary').toString('base64'), setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id), setInterval: fn => { intervals.set(++timerId, fn); return timerId; }, clearInterval: id => intervals.delete(id), MutationObserver: class { constructor(fn) { observerCallback = fn; } observe() {} disconnect() {} }, importScripts() {}, WebCodexMCP: { createClient: () => ({ initialize: async () => ({}), listAgents: async () => [{ id: 'agent-1', name: 'test', online: true }], createOperation: async operation => { operations.push(operation); return {status:'completed',operation_id:'op-'+operations.length,result:{content:[{type:'text',text:'file contents'}]}}; }, listTools: async () => { if (refreshFails-- > 0) throw Error('temporary Gate refresh failure'); return [tool]; } }) } };
+  const context = { chrome, window: null, document: { documentElement: {}, addEventListener(type, fn) { this[type] = fn; } }, location: { origin: 'https://aistudio.google.com', get pathname() { return currentPath; } }, WebCodexStudio: adapters, WebCodexProtocol, URL, URLSearchParams, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, JSON, Promise, Set, Map, Date: TestDate, AbortSignal, Math, Error, String, Object, Number, RegExp, console: { error() {}, warn() {}, log() {} }, crypto: require('node:crypto').webcrypto, btoa: s => Buffer.from(s, 'binary').toString('base64'), setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id), setInterval: fn => { intervals.set(++timerId, fn); return timerId; }, clearInterval: id => intervals.delete(id), MutationObserver: class { constructor(fn) { observerCallback = fn; } observe() {} disconnect() {} }, importScripts() {}, WebCodexMCP: { createClient: () => ({ initialize: async () => ({}), listAgents: async () => [{ id: 'agent-1', name: 'test', online: true }], createOperation: async operation => { operations.push(operation); return {status:'completed',operation_id:'op-'+operations.length,result:{content:[{type:'text',text:'file contents'}]}}; }, listTools: async () => { if (refreshFails-- > 0) throw Error('temporary Gate refresh failure'); return [tool]; } }) } };
   context.window = { top: null, __webcodexBridgeLoaded: false }; context.window.top = context.window;
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'background.js'), 'utf8'), context, { filename: 'background.js' });
   // Content owns its listener on runtime.onMessage; separate the background listener installed first.
   context.chrome.runtime.onMessage.addListener = fn => contentListeners.push(fn);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
-  return { chrome, local, messages, staged, db, operations, saveChat: () => { conversationKey='/prompts/saved-chat'; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() { const pending = [...timers.values()]; timers.clear(); for (const fn of [...pending, ...intervals.values()]) fn(); await this.flush(); }, advance(ms) { now += ms; }, get state() { return db[KEY].session; } };
+  return { chrome, local, messages, staged, db, operations, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() { const pending = [...timers.values()]; timers.clear(); for (const fn of [...pending, ...intervals.values()]) fn(); await this.flush(); }, advance(ms) { now += ms; }, get state() { return db[KEY].session; } };
 }
 
 test('New chat retries startup after Gate refresh and system instruction staging failures', async () => {
@@ -83,9 +84,9 @@ test('saving the current chat during its first response does not pause or lose t
   h.userMessage('Read the file');h.saveChat();
   h.modelMessage('Проверю файл.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
   await h.tick();await h.tick();
-  assert.equal(h.state.sessionId,sessionId);assert.equal(h.state.conversationKey,'/prompts/saved-chat');
+  assert.equal(h.state.sessionId,sessionId);assert.equal(h.state.conversationKey,'active-chat');
   assert.equal(h.state.phase,'waiting_model');assert.equal(h.operations.length,1);
-  assert.equal(h.messages.find(msg=>msg.type==='studio.call').conversationKey,'/prompts/saved-chat');
+  assert.equal(h.messages.find(msg=>msg.type==='studio.call').conversationKey,'active-chat');
 });
 
 test('saving during result submission preserves the operation and allows the corrected follow-up', async () => {
@@ -95,11 +96,25 @@ test('saving during result submission preserves the operation and allows the cor
   h.userMessage('Read the file');h.saveDuringDelivery();
   h.modelMessage('Проверю файл.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'first.txt'}})+'\n```');
   await h.tick();await h.tick();
-  assert.equal(h.state.sessionId,sessionId);assert.equal(h.state.conversationKey,'/prompts/saved-chat');
+  assert.equal(h.state.sessionId,sessionId);assert.equal(h.state.conversationKey,'active-chat');
   assert.equal(h.state.phase,'waiting_model');assert.equal(h.operations.length,1);
   h.modelMessage('Исправлю путь.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'corrected.txt'}})+'\n```');
   await h.tick();await h.tick();
   assert.equal(h.state.phase,'waiting_model');assert.equal(h.operations.length,2);
   assert.equal(h.operations[0].arguments.path,'first.txt');assert.equal(h.operations[1].arguments.path,'corrected.txt');
   assert.notEqual(h.operations[0].key,h.operations[1].key);
+});
+
+test('the active tab keeps working across arbitrary chat URL changes', async () => {
+  const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  const sessionId=h.state.sessionId;
+  for(const path of ['/prompts/new_chat','/prompts/first-saved','/prompts/other-saved','/app/prompts/changed-again']){
+    h.navigate(path);h.userMessage('Read '+path);
+    h.modelMessage('```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
+    await h.tick();await h.tick();
+    assert.equal(h.state.sessionId,sessionId);assert.equal(h.state.phase,'waiting_model');
+  }
+  assert.equal(h.operations.length,4);
+  assert.equal(h.messages.some(msg=>msg.type==='studio.call'&&msg.conversationKey!=='active-chat'),false);
 });

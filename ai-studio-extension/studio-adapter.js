@@ -58,7 +58,7 @@
     return matches.length === 1 ? matches[0] : null;
   };
   const conversationKey = () => {
-    return location.pathname;
+    return 'active-chat';
   };
   const editorValue = (el) => el.isContentEditable || attr(el, 'contenteditable') === 'true' ? text(el) : String(el.value || '');
   let ownedDraft = null, pendingSubmit = null;
@@ -148,24 +148,23 @@
     const EventCtor = document.defaultView && document.defaultView.InputEvent;
     if (editor.dispatchEvent && EventCtor) editor.dispatchEvent(new EventCtor('input', { bubbles: true, inputType: 'insertText', data: String(value) }));
     const staged = editorValue(editor) === String(value);
-    if (staged) ownedDraft = { value: String(value), conversationKey: state.conversationKey };
+    if (staged) ownedDraft = { value: String(value) };
     return staged;
   };
   const submit = (value, isCurrent = () => true) => {
     if (pendingSubmit) return Promise.resolve(false);
-    const draft = String(value), initial = inspect();
+    const draft = String(value);
     if (!isCurrent()) return Promise.resolve(false);
     const editor = editors()[0];
-    const ownsDraft = ownedDraft?.value === draft && ownedDraft.conversationKey === initial.conversationKey && editor && editorValue(editor) === draft;
+    const ownsDraft = ownedDraft?.value === draft && editor && editorValue(editor) === draft;
     if (!ownsDraft && !stage(draft)) return Promise.resolve(false);
-    const key = initial.conversationKey;
     const promise = (async () => {
       for (let attempt = 0; attempt <= 60; attempt++) {
         const state = inspect(), currentEditors = editors();
-        if (!isCurrent() || !state.supported || (state.generating && !state.controlsPending) || state.conversationKey !== key || currentEditors.length !== 1 || editorValue(currentEditors[0]) !== draft) return false;
+        if (!isCurrent() || !state.supported || (state.generating && !state.controlsPending) || currentEditors.length !== 1 || editorValue(currentEditors[0]) !== draft) return false;
         const button = submitButton();
         if (button && !button.disabled && attr(button, 'aria-disabled') !== 'true') {
-          if (!isCurrent() || ownedDraft?.value !== draft || ownedDraft.conversationKey !== key) return false;
+          if (!isCurrent() || ownedDraft?.value !== draft) return false;
           ownedDraft = null;
           button.click();
           return true;

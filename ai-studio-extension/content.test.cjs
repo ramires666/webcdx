@@ -6,7 +6,7 @@ const path = require('node:path');
 const WebCodexProtocol = require('./protocol.js');
 
 function harness() {
-  const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'chat-1', latestModel: { text: 'old answer' }, latestUser: null };
+  const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', latestModel: { text: 'old answer' }, latestUser: null };
   let timerId = 0, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false, submitHandler;
   const adapter = {
     inspect: () => ({ ...state, latestModel: state.latestModel && { ...state.latestModel }, latestUser: state.latestUser && { ...state.latestUser } }),
@@ -66,7 +66,7 @@ test('reinjection does not reset a live session or duplicate observers', async (
 
 test('ignores history and sends one completed new reply as a call', async () => {
   const h = harness();
-  assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'chat-1', error: undefined, delivered: undefined });
+  assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, delivered: undefined });
   h.state.latestModel = { text: 'new answer' }; h.state.generating = true; h.mutate(); await h.flush();
   assert.equal(h.sent.some(m => m.type === 'studio.call'), false);
   h.state.generating = false; h.mutate(); await h.flush();
@@ -84,17 +84,17 @@ test('safe draft, submitted result, delivery confirmation and disarm', async () 
   assert.equal(delivered.ok, true); assert.equal(delivered.attempted, true); assert.equal(delivered.confirmed, true); assert.equal(h.submitted.length, 1);
   const duplicate = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true });
   assert.equal(duplicate.attempted, true); assert.equal(h.submitted.length, 1);
-  assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'chat-1', error: undefined, delivered: true });
+  assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, delivered: true });
   assert.deepEqual(await h.send({ type: 'studio.disarm', sessionId: 's1' }), { ok: true });
 });
 
-test('blocks draft when editor is not safe and snapshots a changed conversation', async () => {
+test('blocks draft when editor is not safe and reports an unsupported page', async () => {
   const h = harness(); await h.send({ type: 'studio.arm', sessionId: 's1' });
   h.state.editorEmpty = false;
   const result = await h.send({ type: 'studio.deliver', sessionId: 's1', text: '{}', submit: true });
   assert.equal(result.ok, false); assert.equal(result.attempted, false); assert.equal(h.submitted.length, 0);
-  h.state.conversationKey = 'chat-2'; h.state.latestModel = { text: 'different conversation' }; h.mutate(); await h.flush();
-  assert.equal(h.sent.some(m => m.type === 'studio.snapshot' && m.conversationKey === 'chat-2'), true);
+  h.state.supported = false; h.mutate(); await h.flush();
+  assert.equal(h.sent.some(m => m.type === 'studio.snapshot' && m.supported === false), true);
   assert.equal(h.sent.some(m => m.type === 'studio.call'), false);
 });
 
@@ -106,12 +106,11 @@ test('reobserves a completed call after background rejects it while paused', asy
   assert.equal(h.sent.filter(m => m.type === 'studio.call').length, 2);
 });
 
-test('recovery arm rejects another conversation without replacing the active session',async()=>{
-  const h=harness();await h.send({type:'studio.arm',sessionId:'s1'});h.state.conversationKey='chat-2';
-  const rejected=await h.send({type:'studio.arm',sessionId:'s2',recover:true,expectedConversationKey:'chat-1',recoverTurn:'next',toolNames:[]});
-  assert.equal(rejected.supported,false);
-  assert.equal((await h.send({type:'studio.snapshot',sessionId:'s1'})).conversationKey,'chat-2');
-  assert.equal((await h.send({type:'studio.snapshot',sessionId:'s2'})).error,'Stale session');
+test('recovery ignores legacy URL keys and binds to the active tab',async()=>{
+  const h=harness();h.state.conversationKey='active-chat';
+  const armed=await h.send({type:'studio.arm',sessionId:'s2',recover:true,expectedConversationKey:'/prompts/saved-chat',recoverTurn:'next',toolNames:[]});
+  assert.equal(armed.supported,true);
+  assert.equal((await h.send({type:'studio.snapshot',sessionId:'s2'})).conversationKey,'active-chat');
 });
 
 test('recovery observes only the advertised valid turn and retries until accepted',async()=>{
@@ -168,7 +167,7 @@ test('only a clicked, supported empty New chat produces a replacement snapshot',
   h.state.latestModel = null; h.mutate(); await h.flush();
   assert.equal(h.sent.some(m => m.conversationReplaced), false, 'virtualized model disappearance alone is ignored');
   h.click({ target: { closest: selector => selector.includes('a,') ? newChat : null } });
-  h.state.supported = false; h.state.conversationKey = 'chat-2'; h.mutate(); await h.flush();
+  h.state.supported = false; h.mutate(); await h.flush();
   assert.equal(h.sent.some(m => m.conversationReplaced), false, 'transient unsupported DOM does not rearm');
   h.tick();await h.flush();assert.equal(h.sent.some(m=>m.type==='studio.snapshot'&&!m.conversationReplaced),false,'pending transition does not pause on an unsupported intermediate snapshot');
   h.state.supported = true; h.state.latestModel = { text: 'saved conversation model' }; h.mutate(); await h.flush();
@@ -251,36 +250,15 @@ test('turnless system-only stage preserves an occupied prompt', async () => {
   assert.equal(result.ok,true);assert.deepEqual(h.staged,[]);
 });
 
-test('a saved-address acknowledgement updates the local binding without losing the active response', async () => {
-  const h=harness();h.state.conversationKey='/prompts/new_chat';
+test('active tab binding stays stable while a chat is saved and the response arrives', async () => {
+  const h=harness();h.state.conversationKey='active-chat';
   await h.send({type:'studio.arm',sessionId:'s1',turnless:true});h.run();
   h.state.generating=true;h.mutate();await h.flush();
-  h.state.conversationKey='/prompts/saved-chat';h.state.generating=false;h.state.modelAfterUser=true;
+  h.state.generating=false;h.state.modelAfterUser=true;
   h.state.latestModel={text:'```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```',element:{}};
-  h.setSendHandler(msg=>({accepted:true,conversationKey:msg.type==='studio.snapshot'?h.state.conversationKey:undefined}));
   h.mutate();await h.flush();h.mutate();await h.flush();
   const calls=h.sent.filter(msg=>msg.type==='studio.call');
-  assert.equal(calls.length,1);assert.equal(calls[0].conversationKey,'/prompts/saved-chat');
-});
-
-test('first saved route adopts locally for delivery and recovery snapshots', async () => {
-  const h=harness();h.state.conversationKey='/prompts/new_chat';await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
-  const text=JSON.stringify({type:'webcodex-result',operation_id:'first-save'});h.state.conversationKey='/prompts/saved-chat';
-  const delivery=await h.send({type:'studio.deliver',sessionId:'s1',text,submit:true});
-  assert.equal(delivery.ok,true);assert.equal(h.submitted.length,1);assert.equal(h.submitted[0],text);
-  await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'first-save'});
-  const call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
-  h.state.latestUser={text:'request'};h.state.latestModel={text:call};h.state.modelAfterUser=true;
-  await h.send({type:'studio.arm',sessionId:'s1',turnless:true,recover:true,recoverTurn:'',toolNames:[{name:'tool',inputSchema:{type:'object',properties:{},additionalProperties:false}}],expectedConversationKey:'/prompts/saved-chat'});
-  await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'first-save'});await h.flush();
-  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
-});
-
-test('first-save adoption does not adopt another already saved route', async () => {
-  const h=harness();h.state.conversationKey='/prompts/other-chat';await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
-  h.state.conversationKey='/prompts/saved-chat';
-  const result=await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'webcodex-result',operation_id:'wrong-chat'}),submit:true});
-  assert.equal(result.ok,false);assert.equal(h.submitted.length,0);
+  assert.equal(calls.length,1);assert.equal(calls[0].conversationKey,'active-chat');
 });
 
 test('turnless accepts the same call once for each user and deduplicates rerenders', async () => {

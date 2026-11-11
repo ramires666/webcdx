@@ -10,11 +10,11 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.2.13)
+## AI Studio Bridge (alpha 0.2.14)
 
 The Chrome extension connects an ordinary AI Studio chat to Gate and a selected
 local agent through Gate OAuth. It uses the open AI Studio page, so no model API
-key is needed. One chat can be active per bridge session. Starting a session
+key is needed. One AI Studio tab can be active per bridge session. Starting a session
 writes tool rules to **System instructions** and leaves the composer for your
 task. A short explanation may precede one fenced call; no `Active turn` or
 `turn` field is required:
@@ -25,10 +25,12 @@ task. A short explanation may precede one fenced call; no `Active turn` or
 ```
 ~~~
 
-The saved URL path identifies the chat; query parameters and DOM identifiers
-do not affect the binding. The first transition from a new chat to its saved
-URL preserves the session even while a Gate operation is pending. Moving to another saved chat is
-guarded and does not carry the session or its result across. The extension also
+The bridge follows the active AI Studio tab and does not bind sessions to a chat
+ID or URL. URL changes, including `/prompts/new_chat` becoming a saved prompt,
+do not stop the session or its pending result. Internal operation keys still
+prevent duplicate execution. Chats opened or selected in the same tab are not
+isolated from each other by URL; finish or stop the current command before
+starting an unrelated conversation. The extension also
 removed the forced pause after 10 calls or 5 minutes and the automatic pause
 for results over 32 KiB; the existing 2 MiB transport limit remains. AI Studio
 DOM selectors are alpha and have not been verified against the live site.
@@ -37,7 +39,8 @@ To update, replace the extension source folder or unzip
 [`bin/ai-studio-bridge/webcodex-ai-studio-bridge.zip`](bin/ai-studio-bridge/webcodex-ai-studio-bridge.zip)
 over its existing folder. In `chrome://extensions`, click **Reload** for AI
 Studio Bridge. Reload an already saved AI Studio tab so its system instructions
-are refreshed; save any unsaved conversation before reloading it. Gate
+are refreshed; save any unsaved conversation before reloading it. Reloading may
+pause the current session; check its state in the panel before continuing. Gate
 `1.5.0-ai-studio-alpha.4` and agent `1.5.0-ai-studio-alpha.1` do not need replacing, updating,
 or restarting. The agent is compiled; its ready-made EXE is
 [`bin/ai-studio-bridge/webcodex-agent.exe`](bin/ai-studio-bridge/webcodex-agent.exe),

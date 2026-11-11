@@ -13,12 +13,11 @@
     try{return await chrome.runtime.sendMessage({type,sessionId,...data});}
     catch(e){if(/Extension context invalidated/i.test(String(e.message||e))){retired=true;sessionId='';clearTimeout(observerTimer);clearInterval(tickTimer);observer.disconnect();return {accepted:false};}throw e;}
   };
-  function adoptSavedChat(s){if(turnless&&!newChatPending&&s.supported&&/^\/(?:app\/)?prompts\/new_chat$/.test(conversationKey)&&/^\/(?:app\/)?prompts\/(?!new_chat$)[^/#?]+$/.test(s.conversationKey))conversationKey=s.conversationKey;}
   if (!window.__webcodexBridgeReattach) send('studio.hello',{pageInstance}).catch(()=>{});
   delete window.__webcodexBridgeReattach;
   function snapshot(operationId,conversationReplaced=false){const s=adapter.inspect();return {supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),delivered:operationId?adapter.hasDelivery(operationId):undefined};}
   function trackGeneration(s){if(turnless&&s.generating&&!s.controlsPending){if(!awaitingResponse){awaitingResponse=true;generationCounter++;attempted.clear();lastText='';baselineText='';baselineModelText=s.latestModel?.text||'';}generationSeen=true;}}
-  async function observe(){const s=adapter.inspect(),conversationReplaced=newChatPending&&s.supported&&(!s.generating||s.controlsPending)&&s.editorEmpty&&!s.latestModel;if(conversationReplaced){if(newChatRequestInFlight)return;newChatRequestInFlight=true;try{const transition={...snapshot(undefined,true),error:'Conversation was replaced'};if(sessionId)await send('studio.snapshot',transition);else await send('studio.hello',{pageInstance,...transition});}finally{newChatRequestInFlight=false;}return;}if(!sessionId||newChatPending)return;const changed=s.conversationKey!==conversationKey||!s.supported;adoptSavedChat(s);if(changed){const response=await send('studio.snapshot',snapshot());if(response?.accepted&&response.conversationKey===s.conversationKey)conversationKey=response.conversationKey;return;}
+  async function observe(){const s=adapter.inspect(),conversationReplaced=newChatPending&&s.supported&&(!s.generating||s.controlsPending)&&s.editorEmpty&&!s.latestModel;if(conversationReplaced){if(newChatRequestInFlight)return;newChatRequestInFlight=true;try{const transition={...snapshot(undefined,true),error:'Conversation was replaced'};if(sessionId)await send('studio.snapshot',transition);else await send('studio.hello',{pageInstance,...transition});}finally{newChatRequestInFlight=false;}return;}if(!sessionId||newChatPending)return;if(!s.supported){await send('studio.snapshot',snapshot());return;}
     if(turnless){const userText=s.latestUser?.text||'';let resultId='';try{const result=JSON.parse(userText);if(result.type==='webcodex-result'&&typeof result.operation_id==='string'&&result.operation_id)resultId=result.operation_id;}catch{}if(resultId)observedResultId=resultId;observedUserText=userText;const context=JSON.stringify([observedResultId,observedUserText]);if(context!==observedContext){observedContext=context;attempted.clear();lastText='';baselineText='';}trackGeneration(s);if(s.modelAfterUser===false)return;}
     if(s.generating)return;
     if(stopping){stopping=false;lastText=s.latestModel?.text||'';if(turnless)awaitingResponse=false;return;}
@@ -35,7 +34,7 @@
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
     if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup'].includes(m.type)){reply({ok:false});return;}
     if(m.type==='studio.arm'){
-      const s=adapter.inspect();if(!s.supported||m.recover&&s.conversationKey!==m.expectedConversationKey){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
+      const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
       if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
       sessionId=m.sessionId;conversationKey=s.conversationKey;turnless=!!m.turnless;turnlessRecovery=turnless&&!!m.recover;awaitingResponse=false;generationSeen=false;generationCounter=0;baselineModelText=s.latestModel?.text||'';observedUserText=s.latestUser?.text||'';observedResultId='';observedContext=JSON.stringify([observedResultId,observedUserText]);recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;newChatRequestInFlight=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
     }
@@ -45,28 +44,28 @@
     if(m.type==='studio.stage'){
       (async()=>{
         let s=adapter.inspect();
-        if(!s.supported||s.conversationKey!==conversationKey||(m.text&&!s.editorEmpty)){const error=!s.supported?(s.error||'AI Studio editor is not supported'):s.conversationKey!==conversationKey?'AI Studio conversation changed':'AI Studio prompt field is not empty; existing text was preserved';reply({ok:false,...snapshot(),error});return;}
+        if(!s.supported||(m.text&&!s.editorEmpty)){const error=!s.supported?(s.error||'AI Studio editor is not supported'):'AI Studio prompt field is not empty; existing text was preserved';reply({ok:false,...snapshot(),error});return;}
         if(!await adapter.stageSystemInstructions(m.systemText)){reply({ok:false,...snapshot(),error:adapter.getSystemStageError?.()||'Не удалось заполнить System instructions: редактор не найден или неоднозначен'});return;}
         s=adapter.inspect();
-        if(sessionId!==m.sessionId||!s.supported||s.conversationKey!==conversationKey||(m.text&&!s.editorEmpty)){const error=sessionId!==m.sessionId?'AI Studio session changed':!s.supported?(s.error||'AI Studio editor is not supported'):s.conversationKey!==conversationKey?'AI Studio conversation changed':'AI Studio prompt field is not empty; existing text was preserved';reply({ok:false,...snapshot(),error});return;}
+        if(sessionId!==m.sessionId||!s.supported||(m.text&&!s.editorEmpty)){const error=sessionId!==m.sessionId?'AI Studio session changed':!s.supported?(s.error||'AI Studio editor is not supported'):'AI Studio prompt field is not empty; existing text was preserved';reply({ok:false,...snapshot(),error});return;}
         if(m.text===''){reply({ok:true,...snapshot()});return;}
         const ok=adapter.stage(m.text);
         reply({ok,...snapshot(),error:ok?undefined:'Could not stage session instructions in the empty prompt field'});
       })().catch(e=>reply({ok:false,...snapshot(),error:String(e.message||e)}));
       return true;
     }
-    if(m.type==='studio.snapshot'){const current=adapter.inspect();adoptSavedChat(current);const state=snapshot(m.operationId);if(state.delivered&&turnless){observedResultId=m.operationId||observedResultId;}if(state.delivered&&(recoverTurn||turnlessRecovery)){const current=adapter.inspect(),model=current.latestModel;let valid=false;try{valid=!!model&&(!turnless||current.modelAfterUser!==false)&&!!WebCodexProtocol.parseCall(model.text,turnless?null:recoverTurn,recoverTools);}catch{}if(turnless){recoverTurn='';turnlessRecovery=false;baselineText=valid?'':model?.text||'';lastText=valid?'':baselineText;if(valid){awaitingResponse=true;generationSeen=true;baselineModelText='';schedule();}}else if(valid)schedule();else{recoverTurn='';baselineText=model?.text||'';lastText=baselineText;}}reply(state);return;}
+    if(m.type==='studio.snapshot'){const state=snapshot(m.operationId);if(state.delivered&&turnless){observedResultId=m.operationId||observedResultId;}if(state.delivered&&(recoverTurn||turnlessRecovery)){const current=adapter.inspect(),model=current.latestModel;let valid=false;try{valid=!!model&&(!turnless||current.modelAfterUser!==false)&&!!WebCodexProtocol.parseCall(model.text,turnless?null:recoverTurn,recoverTools);}catch{}if(turnless){recoverTurn='';turnlessRecovery=false;baselineText=valid?'':model?.text||'';lastText=valid?'':baselineText;if(valid){awaitingResponse=true;generationSeen=true;baselineModelText='';schedule();}}else if(valid)schedule();else{recoverTurn='';baselineText=model?.text||'';lastText=baselineText;}}reply(state);return;}
     if(m.type==='studio.deliver'){
-      const s=adapter.inspect();adoptSavedChat(s);const state=snapshot();if(!s.supported||(!m.submit&&!s.editorEmpty)||s.generating||s.conversationKey!==conversationKey){reply({ok:false,attempted:false,...state});return;}
+      const s=adapter.inspect();const state=snapshot();if(!s.supported||(!m.submit&&!s.editorEmpty)||s.generating){reply({ok:false,attempted:false,...state});return;}
       if(!m.submit){const ok=adapter.stage(m.text);reply({ok,attempted:false,...state});return;}
       if(lastDelivered===m.text){reply({ok:false,attempted:true,...state});return;}
       if(deliveryPending){reply({ok:false,attempted:true,...state});return;}
       let operationId;try{const result=JSON.parse(m.text);if(result.type!=='webcodex-result')throw Error();operationId=result.operation_id;}catch{reply({ok:false,attempted:false,...state});return;}
-      const deliverySession=sessionId,deliveryConversation=conversationKey;
+      const deliverySession=sessionId;
       deliveryPending=true;
       (async()=>{
         try{
-          const ok=await adapter.submit(m.text,()=>sessionId===deliverySession&&conversationKey===deliveryConversation);
+          const ok=await adapter.submit(m.text,()=>sessionId===deliverySession);
           if(ok){lastDelivered=m.text;if(turnless&&adapter.hasDelivery(operationId))observedResultId=operationId;}
           reply({ok,attempted:ok,confirmed:ok&&adapter.hasDelivery(operationId),...snapshot()});
         }catch(e){reply({ok:false,attempted:true,...snapshot(),error:'Delivery outcome is unknown'});}

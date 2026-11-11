@@ -462,83 +462,29 @@ test('preferences persist revoked consent and an empty tool selection without re
 
 test('conversation change pauses and prevents result delivery', async () => {
   const h = harness(); await h.status();
-  await h.message({ type: 'studio.snapshot', sessionId: 'session-1', supported: true, conversationKey: 'different-chat' }, h.page);
+  await h.message({ type: 'studio.snapshot', sessionId: 'session-1', supported: false, error:'AI Studio session unavailable' }, h.page);
   await h.call('turn-1'); await h.alarm();
   assert.equal(h.createCount, 0); assert.equal(h.deliveryCount, 0);
 });
 
-test('the first saved address keeps the active temporary chat session', async () => {
-  const initial=saved();Object.assign(initial.session,{turnless:true,conversationKey:'/prompts/new_chat'});
+test('route changes do not change internal chat identity or replay pending work', async () => {
+  const initial=saved('delivery_uncertain');Object.assign(initial.session,{turnless:true,conversationKey:'active-chat',resultText:'saved result',operationId:'op-1',nextTurn:'turn-2'});
   const h=harness(initial);await h.status();
-  const key='/prompts/1N41-xJVAM4U8lJzWroKVIA098051NMUO';
-  const snapshot={type:'studio.tick',sessionId:'session-1',supported:true,conversationKey:key};
-  assert.equal((await h.message(snapshot,h.page)).conversationKey,key);
-  assert.equal((await h.message({...snapshot,type:'studio.snapshot'},h.page)).conversationKey,key,'a racing observer receives the adopted address too');
-  const session=(await h.status()).state.session;
-  assert.equal(session.phase,'waiting_model');assert.equal(session.sessionId,'session-1');
-  const text='Проверю файл.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
-  assert.equal((await h.message({type:'studio.call',sessionId:'session-1',conversationKey:key,generating:false,text,responseKey:'saved-chat-response'},h.page)).accepted,true);
-  assert.equal(h.createCount,1);
-});
-
-test('saving does not bypass a different saved chat or manual pause', async () => {
-  for(const blocked of [{conversationKey:'/prompts/other-saved-chat'}, {conversationKey:'/prompts/new_chat',paused:true,userPaused:true,phase:'paused'}]){
-    const initial=saved();Object.assign(initial.session,{turnless:true,...blocked});
-    const h=harness(initial);await h.status();
-    await h.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'/prompts/new-saved-chat'},h.page);
-    assert.equal((await h.status()).state.session.phase,'paused');
-    assert.equal((await h.status()).state.session.conversationKey,blocked.conversationKey);
-    assert.equal(h.createCount,0);
+  for(const url of ['https://aistudio.google.com/prompts/new_chat','https://aistudio.google.com/app/prompts/saved?x=1']){
+    assert.equal((await h.message({type:'studio.tick',sessionId:'session-1',supported:true,conversationKey:'active-chat'},{...h.page,url})).accepted,true);
+    assert.equal((await h.status()).state.session.conversationKey,'active-chat');
   }
+  assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
 });
 
-test('the first saved address preserves pending operations and their delivery state', async () => {
-  for(const phase of ['waiting_approval','recovering','result_ready','delivery_uncertain']){
-    const initial=saved(phase);Object.assign(initial.session,{turnless:true,conversationKey:'/prompts/new_chat',pendingCall:{name:'read_file',arguments:{path:'safe.txt'}},operationKey:'existing-key',operationId:'op-1',resultText:'existing result',nextTurn:'next-internal'});
-    const h=harness(initial);await h.status();
-    const key='/prompts/saved-chat';
-    assert.equal((await h.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:key},h.page)).conversationKey,key);
-    const session=(await h.status()).state.session;
-    assert.equal(session.phase,phase);assert.equal(session.conversationKey,key);assert.equal(session.sessionId,'session-1');
-    assert.equal(session.operationKey,'existing-key');assert.equal(session.operationId,'op-1');assert.equal(session.resultText,'existing result');
-    assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);assert.equal(h.pageMessages.some(msg=>msg.type==='studio.arm'),false);
-    assert.equal((await h.message({type:'studio.tick',sessionId:'session-1',supported:true,conversationKey:'/prompts/new_chat'},h.page)).conversationKey,key,'a delayed old-address tick does not pause the saved chat');
-    assert.equal((await h.status()).state.session.phase,phase);
-  }
-});
-
-test('delivery can acquire the saved address before the next observer tick', async () => {
-  const initial=saved('result_ready');
-  const text=JSON.stringify({type:'webcodex-result',v:1,operation_id:'op-old',name:'read_file',result:{content:[]}});
-  Object.assign(initial.session,{turnless:true,conversationKey:'/prompts/new_chat',pendingCall:{name:'read_file',arguments:{}},operationKey:'old-key',operationId:'op-old',resultText:text,nextTurn:'next-internal'});
-  const key='/prompts/saved-chat';
-  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.deliver'?{ok:true,confirmed:true,supported:true,conversationKey:key}:{ok:true}});await h.status();
-  assert.equal((await h.message({type:'bridge.deliver',submit:true})).ok,true);
-  const session=(await h.status()).state.session;
-  assert.equal(session.phase,'waiting_model');assert.equal(session.conversationKey,key);assert.equal(h.createCount,0);
-  assert.equal(h.pageMessages.filter(msg=>msg.type==='studio.deliver').length,1);
-});
-
-test('reload recovers a temporary chat paused when it first acquired a saved address', async () => {
-  const initial=saved('paused');Object.assign(initial.session,{turnless:true,paused:true,resumeBlocked:true,pausedPhase:'waiting_model',error:'Conversation changed',conversationKey:'/prompts/new_chat'});
-  const key='/prompts/saved-chat';
+test('reload resets an old paused no-pending session on the same trusted tab',async()=>{
+  const initial=saved('paused');Object.assign(initial.session,{turnless:true,paused:true,resumeBlocked:true,pausedPhase:'waiting_model',error:'Conversation changed',conversationKey:'/prompts/old'});
   const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
-  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:key}:{ok:true}},{bridgeAuto:settings});await h.status();
-  const page={...h.page,url:'https://aistudio.google.com'+key};
-  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},page)).accepted,true);
+  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:'active-chat'}:{ok:true}},{bridgeAuto:settings});await h.status();
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},{...h.page,url:'https://aistudio.google.com/a-different-route'})).accepted,true);
   const session=(await h.status()).state.session;
-  assert.equal(session.phase,'waiting_model');assert.equal(session.conversationKey,key);assert.equal(session.turnless,true);
+  assert.equal(session.phase,'waiting_model');assert.equal(session.conversationKey,'active-chat');assert.equal(session.turnless,true);
   assert.equal(h.createCount,0);assert.equal(h.pageMessages.find(msg=>msg.type==='studio.stage').text,'');
-});
-
-test('reload clears the old DOM-identity pause on the same saved URL without replaying history', async () => {
-  const key='/prompts/saved-chat';
-  const initial=saved('paused');Object.assign(initial.session,{turnless:true,paused:true,resumeBlocked:true,error:'Conversation changed',conversationKey:key+'#data-conversation-id=old-dom-marker'});
-  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
-  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:key}:{ok:true}},{bridgeAuto:settings});await h.status();
-  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},{...h.page,url:'https://aistudio.google.com'+key})).accepted,true);
-  assert.equal((await h.status()).state.session.phase,'waiting_model');assert.equal(h.createCount,0);
-  assert.equal(h.pageMessages.find(msg=>msg.type==='studio.stage').text,'');
 });
 
 test('a new chat can retry startup after a temporary Gate refresh failure', async () => {
@@ -650,7 +596,7 @@ test('a valid call for the advertised next turn proves delivery without resendin
   assert.equal(h.pageMessages.filter(m=>m.type==='studio.deliver').length,0);
 });
 
-test('prose, unselected tools and calls from another conversation cannot prove delivery',async()=>{
+test('prose and unselected tools cannot prove delivery; a valid call can across route identities',async()=>{
   const initial=saved('delivery_uncertain');initial.session.nextTurn='turn-2';
   const h=harness(initial);await h.status();
   const base={type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false};
@@ -658,9 +604,9 @@ test('prose, unselected tools and calls from another conversation cannot prove d
     assert.equal((await h.message({...base,text},h.page)).accepted,false);
   }
   const text='```webcodex-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'read_file',arguments:{path:'x'}})+'\n```';
-  assert.equal((await h.message({...base,text,conversationKey:'other'},h.page)).accepted,false);
-  assert.equal((await h.status()).state.session.phase,'delivery_uncertain');
-  assert.equal(h.createCount,0);
+  assert.equal((await h.message({...base,text,conversationKey:'unrelated-legacy-value'},h.page)).accepted,true);
+  assert.equal((await h.status()).state.session.phase,'recovering');
+  assert.equal(h.createCount,1);
 });
 
 test('lost receiver reattaches the same tab and completes only from delivery proof',async()=>{
@@ -669,7 +615,7 @@ test('lost receiver reattaches the same tab and completes only from delivery pro
   const hello=await h.message({type:'studio.hello',pageInstance:'new-page'},h.page);
   assert.equal(hello.accepted,true);assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
   assert.equal((await h.status()).state.session.phase,'waiting_model');
-  const arm=h.pageMessages.find(m=>m.type==='studio.arm');assert.equal(arm.sessionId,'session-1');assert.equal(arm.recover,true);assert.equal(arm.expectedConversationKey,'chat-1');assert.equal(arm.recoverTurn,'turn-2');
+  const arm=h.pageMessages.find(m=>m.type==='studio.arm');assert.equal(arm.sessionId,'session-1');assert.equal(arm.recover,true);assert.equal(arm.expectedConversationKey,undefined);assert.equal(arm.recoverTurn,'turn-2');
 });
 
 test('reattach with no delivery proof stays uncertain and never resends',async()=>{
@@ -680,10 +626,10 @@ test('reattach with no delivery proof stays uncertain and never resends',async()
   assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
 });
 
-test('recovery rejects another conversation and does not recover a manually paused session',async()=>{
+test('recovery requires an available receiver and does not recover a manually paused session',async()=>{
   const make=()=>{const initial=saved('delivery_uncertain');Object.assign(initial.session,{resultText:'saved',operationId:'op-1',nextTurn:'turn-2',pageInstance:'old-page'});return initial;};
   const auto={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true};
-  const other=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:'different-chat'}:{supported:true,conversationKey:'different-chat',delivered:true}}, {bridgeAuto:auto});await other.status();
+  const other=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:false}:{supported:false,delivered:true}}, {bridgeAuto:auto});await other.status();
   assert.equal((await other.message({type:'studio.hello',pageInstance:'new-page'},other.page)).accepted,false);
   assert.equal((await other.status()).state.session.phase,'delivery_uncertain');assert.equal(other.createCount,0);assert.equal(other.deliveryCount,0);
   const paused=harness(make(),{}, {bridgeAuto:auto});await paused.status();await paused.message({type:'bridge.pause'},paused.panel);
@@ -705,7 +651,7 @@ test('legacy oversized result reload is verified before one automatic delivery',
   assert.equal(state.phase,'waiting_model');assert.equal(state.turn,'turn-2');assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
   assert.equal(h.pageMessages.filter(m=>m.type==='studio.deliver').length,1);
 
-  const wrong=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:'other-chat'}:{supported:true,conversationKey:'other-chat',delivered:true}},{bridgeAuto:settings});await wrong.status();
+  const wrong=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:false}:{supported:true,delivered:true}},{bridgeAuto:settings});await wrong.status();
   assert.equal((await wrong.message({type:'studio.hello',pageInstance:'new-page'},wrong.page)).accepted,false);
   assert.equal(wrong.pageMessages.some(m=>m.type==='studio.deliver'),false);assert.equal(wrong.createCount,0);
 
@@ -714,35 +660,30 @@ test('legacy oversized result reload is verified before one automatic delivery',
   assert.equal(manual.pageMessages.some(m=>m.type==='studio.arm'&&m.recover),false);assert.equal(manual.createCount,0);assert.equal(manual.deliveryCount,0);
 });
 
-test('legacy query and DOM identity markers migrate to the saved URL path',async()=>{
+test('legacy route identities migrate to the internal active chat key',async()=>{
   const initial=saved('delivery_uncertain');
   initial.session.conversationKey='/app/prompts/test?legacy=1#data-conversation-id=chat-1';
+  initial.session.temporaryConversationKey='/app/prompts/new_chat';
   Object.assign(initial.session,{resultText:'saved',operationId:'op-1',nextTurn:'turn-2'});
-  const key='/app/prompts/test';
+  const key='active-chat';
   const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:key}:msg.type==='studio.snapshot'?{supported:true,conversationKey:key,delivered:true}:{ok:true}}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true}});
   await h.status();
   assert.equal((await h.status()).state.session.conversationKey,key);
   assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,true);
   assert.equal((await h.status()).state.session.phase,'waiting_model');
+  assert.equal((await h.status()).state.session.temporaryConversationKey,undefined);
   const arm=h.pageMessages.find(m=>m.type==='studio.arm');
-  assert.equal(arm.expectedConversationKey,key);
+  assert.equal(arm.expectedConversationKey,undefined);
   assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
 });
 
-test('paused conversation change recovers only on the same saved path',async()=>{
-  const key='/app/prompts/test';
+test('paused conversation change recovers on the same internal key regardless of route',async()=>{
+  const key='active-chat';
   const make=()=>{const initial=saved('paused');Object.assign(initial.session,{paused:true,resumeBlocked:true,conversationKey:key,resultText:'saved',operationId:'op-1',nextTurn:'turn-2',pageInstance:'old-page',error:'Conversation changed'});return initial;};
   const auto={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true};
-  for(const mismatch of ['/app/prompts/other','/app/prompts/another']){
-    const h=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:mismatch}:{supported:true,conversationKey:mismatch,delivered:true}}, {bridgeAuto:auto});
-    await h.status();
-    assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,false);
-    assert.equal((await h.status()).state.session.phase,'paused');
-    assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
-  }
   const h=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:key}:msg.type==='studio.snapshot'?{supported:true,conversationKey:key,delivered:true}:{ok:true}}, {bridgeAuto:auto});
   await h.status();
-  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,true);
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},{...h.page,url:'https://aistudio.google.com/any/route?x=1'})).accepted,true);
   const state=(await h.status()).state.session;
   assert.equal(state.phase,'waiting_model');assert.equal(state.turn,'turn-2');
   assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);

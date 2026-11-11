@@ -11,7 +11,8 @@ async function restore() {
   try {
     const data=await chrome.storage.session.get(KEY);
     if(data[KEY])state=data[KEY];
-    if(state.session.conversationKey)state.session.conversationKey=state.session.conversationKey.split(/[?#]/)[0];
+    if(state.session.conversationKey?.startsWith('/'))state.session.conversationKey='active-chat';
+    delete state.session.temporaryConversationKey;
     const {bridgeAuto}=await chrome.storage.local.get('bridgeAuto');state.autoSettings=bridgeAuto?{...bridgeAuto,autoApprove:!!bridgeAuto.autoApprove}:{enabled:false,autoApprove:false};
     state.session.autoApprove=Object.hasOwn(state.session,'autoApprove')?!!state.session.autoApprove:state.autoSettings.autoApprove;
     state.hideServiceMessages=!!(await chrome.storage.local.get('hideServiceMessages')).hideServiceMessages;
@@ -177,27 +178,26 @@ async function autoStart(sender,m){
     const existing=await chrome.tabs.get(s.tabId).catch(()=>null);
     if(existing)return {accepted:false};
   }
-  const pagePath=new URL(sender.url).pathname;
-  const promoted=s.turnless&&s.error==='Conversation changed'&&(savedChatPromotion(s.conversationKey,pagePath)||s.conversationKey===pagePath);
-  if((s.paused&&s.phase!=='stopped'&&!promoted&&!(m.conversationReplaced&&!s.userPaused&&['Conversation changed','Conversation was replaced'].includes(s.error)))||s.userPaused)return {accepted:false};
+  const changedWithoutPending=s.tabId===sender.tab.id&&s.error==='Conversation changed'&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId;
+  if((s.paused&&s.phase!=='stopped'&&!changedWithoutPending&&!(m.conversationReplaced&&!s.userPaused&&['Conversation changed','Conversation was replaced'].includes(s.error)))||s.userPaused)return {accepted:false};
   await clearSession();
   try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
   catch(e){return {accepted:false};}
 }
 function recoverableDelivery(s){
   const recoverablePause=s.phase==='paused'&&!s.userPaused&&(s.error==='Conversation changed'||s.pausedPhase!=='delivery_uncertain'&&s.error==='AI Studio session is unavailable; stop and re-arm this chat'||!s.resumeBlocked&&s.error==='Result exceeds 32 KiB; reduce the tool output before delivery.');
-  return !!(s.resultText&&s.nextTurn&&s.operationId&&s.conversationKey&&(s.phase==='delivery_uncertain'||recoverablePause));
+  return !!(s.resultText&&s.nextTurn&&s.operationId&&(s.phase==='delivery_uncertain'||recoverablePause));
 }
 async function reattachDelivery(sender,m){
   const s=state.session;
   const unsentSizeResult=s.phase==='paused'&&!s.userPaused&&!s.resumeBlocked&&s.error==='Result exceeds 32 KiB; reduce the tool output before delivery.';
   const retainUnsent=()=>{s.phase='paused';s.paused=true;s.resumeBlocked=false;s.error='Result exceeds 32 KiB; reduce the tool output before delivery.';};
   try{
-    const armed=await armPage(sender.tab.id,{type:'studio.arm',sessionId:s.sessionId,turnless:!!s.turnless,recover:true,recoverTurn:s.nextTurn,toolNames:s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean),expectedConversationKey:s.conversationKey});
-    if(!armed?.supported||armed.conversationKey!==s.conversationKey){s.error='AI Studio conversation does not match the saved session; delivery remains uncertain';if(unsentSizeResult)retainUnsent();await save();return {accepted:false};}
+    const armed=await armPage(sender.tab.id,{type:'studio.arm',sessionId:s.sessionId,turnless:!!s.turnless,recover:true,recoverTurn:s.nextTurn,toolNames:s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean)});
+    if(!armed?.supported){s.error='AI Studio page is not ready; delivery remains uncertain';if(unsentSizeResult)retainUnsent();await save();return {accepted:false};}
     s.pageInstance=m.pageInstance;s.paused=false;s.userPaused=false;s.resumeBlocked=false;s.phase='delivery_uncertain';s.pausedPhase='';s.error='Checking whether the saved result reached this chat';await save();
     const chk=await chrome.tabs.sendMessage(sender.tab.id,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId});
-    if(chk?.conversationKey!==s.conversationKey||!chk?.supported){s.error='AI Studio conversation changed; delivery remains uncertain';if(unsentSizeResult)retainUnsent();await save();return {accepted:!unsentSizeResult};}
+    if(!chk?.supported){s.error='AI Studio page is not ready; delivery remains uncertain';if(unsentSizeResult)retainUnsent();await save();return {accepted:!unsentSizeResult};}
     if(chk.delivered){completeDelivery();await save();}else if(unsentSizeResult){s.phase='result_ready';s.paused=false;s.error='';await save();if(s.automatic)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}else{s.error='Result is not visible yet; waiting for delivery proof. It will not be sent again.';await save();}
     return {accepted:true};
   }catch(e){s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.error='Could not check delivery in AI Studio; the saved result will not be sent again';if(unsentSizeResult)retainUnsent();await save();return {accepted:false};}
@@ -228,38 +228,26 @@ async function arm(m) {
 }
 async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});state.session={phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null};await save();}
 async function stageInstructions(){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
-function savedChatPromotion(from,to){
-  return /^\/(?:app\/)?prompts\/new_chat$/.test(String(from).split('#')[0])&&/^\/(?:app\/)?prompts\/(?!new_chat$)[^/#?]+$/.test(String(to).split('#')[0]);
-}
-function adoptSavedChat(s,key){if(s.turnless&&!s.userPaused&&savedChatPromotion(s.conversationKey,key)){s.temporaryConversationKey=s.conversationKey;s.conversationKey=key;return true;}return false;}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
-  if(!m.conversationReplaced&&s.temporaryConversationKey&&m.conversationKey===s.temporaryConversationKey&&s.conversationKey!==m.conversationKey)return {accepted:m.type!=='studio.call',conversationKey:s.conversationKey};
-  if(['studio.snapshot','studio.tick'].includes(m.type)&&s.turnless&&!m.conversationReplaced&&m.supported&&!s.userPaused&&!['idle','stopped','arming'].includes(s.phase)&&(!s.paused||s.error==='Conversation changed')&&savedChatPromotion(s.conversationKey,m.conversationKey)){
-    adoptSavedChat(s,m.conversationKey);
-    if(s.paused){s.paused=false;s.resumeBlocked=false;s.phase=s.pausedPhase||'waiting_model';s.pausedPhase='';s.error='';}
-    await save();
-    if(s.phase==='result_ready'&&s.automatic)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}
-    return {accepted:true,conversationKey:s.conversationKey};
-  }
-  if(!m.conversationReplaced&&m.conversationKey===s.conversationKey&&s.phase==='paused'&&s.error==='Conversation changed'&&recoverableDelivery(s)&&(m.type==='studio.call'||m.supported)){
+  if(!m.conversationReplaced&&s.phase==='paused'&&s.error==='Conversation changed'&&recoverableDelivery(s)&&(m.type==='studio.call'||m.supported)){
     s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.pausedPhase='';s.error='Checking whether the saved result reached this chat';
   }
-  if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationReplaced||m.conversationKey!==s.conversationKey||!m.supported){if(m.conversationReplaced&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&s.phase!=='delivery_uncertain'){const restarted=await autoStart(sender,{pageInstance:s.pageInstance,conversationReplaced:true});if(restarted.accepted)return restarted;}if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'Conversation changed';await save();return {accepted:true};}await recover();return {accepted:true,conversationKey:s.conversationKey};}
+  if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationReplaced||!m.supported){if(m.conversationReplaced&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&s.phase!=='delivery_uncertain'){const restarted=await autoStart(sender,{pageInstance:s.pageInstance,conversationReplaced:true});if(restarted.accepted)return restarted;}if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'AI Studio session is unavailable';await save();return {accepted:true};}await recover();return {accepted:true,conversationKey:s.conversationKey};}
     if(m.type==='studio.call'){
     if(s.paused)return {accepted:false};
     if(s.turnless){
       if(typeof m.responseKey!=='string'||!m.responseKey)throw Error('Missing response context');
-      if(m.responseKey===s.lastResponseKey&&m.conversationKey===s.conversationKey&&!m.generating)return {accepted:true};
+      if(m.responseKey===s.lastResponseKey&&!m.generating)return {accepted:true};
     }
-    if(s.phase==='delivery_uncertain'&&m.conversationKey===s.conversationKey&&!m.generating&&s.nextTurn){
+    if(s.phase==='delivery_uncertain'&&!m.generating&&s.nextTurn){
       const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);
       const delivered=s.turnless&&typeof m.precedingResultId==='string'&&!!m.precedingResultId&&m.precedingResultId===(s.operationId||s.operationKey);
       try{if((!s.turnless||delivered)&&WebCodexProtocol.parseCall(m.text,s.turnless?null:s.nextTurn,tools)){completeDelivery();await save();}}catch{}
       if(s.paused)return {accepted:false};
     }
     if(!['waiting_model','ready'].includes(s.phase))return {accepted:false};
-    if(m.conversationKey!==s.conversationKey||m.generating){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='Conversation changed or generation still active';}
+    if(m.generating){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='Generation still active';}
     else if(s.phase==='waiting_model'||s.phase==='ready'){
       try {const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const call=WebCodexProtocol.parseCall(m.text,s.turnless?null:s.turn,tools);
         if(s.turnless)s.lastResponseKey=m.responseKey;
@@ -282,7 +270,7 @@ async function dispatch(){const s=state.session,p=s.pendingCall;if(!p)throw Erro
     await finishResult(result);
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);s.phase='recovering';await save();}
 }
-async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey});if(chk?.supported&&adoptSavedChat(s,chk.conversationKey))await save();if(chk?.conversationKey!==s.conversationKey||!chk?.supported){s.error='Conversation changed; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
+async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey});if(!chk?.supported){s.error='AI Studio session is unavailable; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
   if(s.phase!=='recovering'||!s.pendingCall)return;
   try{let result;if(demo)result={content:[{type:'text',text:'DEMO MODE: sample content'}],isError:false};else if(s.operationId)result=await client.getOperation(s.operationId);else result=await client.createOperation({key:s.operationKey,name:s.pendingCall.name,arguments:s.dispatchArgs,agentId:s.agentId});
     if(['accepted','dispatching','starting','running'].includes(result?.status)){s.operationId=result.operation_id||result.id||s.operationId;await save();return;}
@@ -290,7 +278,7 @@ async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);await save();}
 }
 async function finishResult(result){const s=state.session;s.operationId=result?.operation_id||result?.id||s.operationId;if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:toolResult,error:transportError});s.phase='result_ready';await save();if(s.automatic&&!s.paused)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}
-async function deliver(submit){const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a webcodex-result can be delivered');}if(envelope.type!=='webcodex-result')throw Error('Only a webcodex-result can be delivered');if(s.phase==='delivery_uncertain')throw Error('Delivery status is unknown; check AI Studio before taking action');if(submit){s.phase='delivery_uncertain';await save();}let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit});}catch(e){throw Error('Delivery status is unknown; do not send again');}if(r?.supported&&adoptSavedChat(s,r.conversationKey))await save();if(r?.conversationKey!==s.conversationKey||!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('Conversation changed; delivery is blocked');}if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered');}if(!submit){s.phase='result_ready';await save();return;}if(r.confirmed){completeDelivery();await save();}}
+async function deliver(submit){const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a webcodex-result can be delivered');}if(envelope.type!=='webcodex-result')throw Error('Only a webcodex-result can be delivered');if(s.phase==='delivery_uncertain')throw Error('Delivery status is unknown; check AI Studio before taking action');if(submit){s.phase='delivery_uncertain';await save();}let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit});}catch(e){throw Error('Delivery status is unknown; do not send again');}if(!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('AI Studio session is unavailable; delivery is blocked');}if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered');}if(!submit){s.phase='result_ready';await save();return;}if(r.confirmed){completeDelivery();await save();}}
 function completeDelivery(){const s=state.session;if(s.operationId||s.operationKey)(s.completedOperationIds||=[]).push(s.operationId||s.operationKey);s.error='';s.phase='waiting_model';s.turn=s.nextTurn;s.pendingCall=null;s.resultText='';s.operationKey='';s.operationId='';s.dispatchArgs=null;s.count++;}
 async function stop(){
   const s=state.session;
