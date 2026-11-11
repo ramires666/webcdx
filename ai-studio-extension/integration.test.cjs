@@ -126,6 +126,18 @@ test('a turnless follow-up proves delivery only with an observed matching result
   assert.notEqual(h.calls.find(item=>item.method==='POST').body.key,'old-key');
 });
 
+test('the visible result envelope confirms delivery without resending or rerunning the tool', async () => {
+  const initial=saved('delivery_uncertain');
+  Object.assign(initial.session,{turnless:true,nextTurn:'internal-next',operationId:'old-op',operationKey:'old-key',resultText:'saved result',pendingCall:{name:'read_file',arguments:{path:'old'}}});
+  const h=harness(initial,{snapshotDelivered:false});await h.status();
+  const snapshot={type:'studio.tick',sessionId:'session-1',supported:true,deliveredOperationId:'wrong-op'};
+  await h.message(snapshot,h.page);assert.equal((await h.status()).state.session.phase,'delivery_uncertain');
+  await h.message({...snapshot,deliveredOperationId:'old-op'},h.page);
+  const session=(await h.status()).state.session;
+  assert.equal(session.phase,'waiting_model');assert.equal(session.resultText,'');assert.equal(session.pendingCall,null);
+  assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+});
+
 test('legacy limit pauses wait for explicit resume and preserve approval and uncertainty guards', async () => {
   const legacy = saved('paused'); Object.assign(legacy.session, { paused: true, pausedPhase: 'ready', error: 'Session operation limit reached; resume to continue.', pendingCall: { name: 'read_file', arguments: { path: 'safe.txt' }, turn: 'turn-1' } });
   const consent = { bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: ['read_file'], autoApprove: false } };

@@ -519,6 +519,37 @@ test('confirms only an exact result envelope in the submitted user turn', () => 
   assert.equal(setup().adapter.hasDelivery('op-1'), true, 'legacy exact marker remains supported');
 });
 
+test('exposes the latest user result operation id from wrapped text and nested result nodes only', () => {
+  const payload = '{"type":"webcodex-result","operation_id":"op-latest"}';
+  const header = setup();
+  header.user.attrs['data-turn-role'] = 'User';
+  header.user.children = [];
+  header.user.textContent = `User\nNov 11, 2026, 10:30 AM\n${payload}`;
+  assert.equal(header.adapter.inspect().latestUser.operationId, 'op-latest');
+  assert.equal(header.adapter.hasDelivery(header.adapter.inspect().latestUser.operationId), true);
+
+  const nested = setup();
+  nested.user.children = [];
+  const nestedRole = nested.user.add(new Node('div', { class: 'chat-turn-container user' }));
+  const content = nestedRole.add(new Node('div', { class: 'turn-content' }));
+  content.add(new Node('ms-cmark-node', {}, payload));
+  assert.equal(nested.adapter.inspect().latestUser.operationId, 'op-latest');
+  assert.equal(nested.adapter.hasDelivery(nested.adapter.inspect().latestUser.operationId), true);
+
+  for (const invalid of [
+    '{"type":"other","operation_id":"op-latest"}',
+    '{"type":"webcodex-result"}',
+    '[{"type":"webcodex-result","operation_id":"op-latest"}]',
+  ]) {
+    const state = setup();
+    state.user.attrs['data-turn-role'] = 'User';
+    state.user.children = [];
+    state.user.textContent = invalid;
+    assert.equal(state.adapter.inspect().latestUser.operationId, '');
+    assert.equal(state.adapter.hasDelivery('op-latest'), false);
+  }
+});
+
 test('cleanup hides only requested current turns and exact delivery turns, then restores them', () => {
   const state = setup();
   state.model.style.setProperty('display', 'flex', 'important');

@@ -106,6 +106,21 @@
     }
     return chunks.length ? chunks.map(cleanContentText).filter(Boolean).join('\n') : cleanContentText(content);
   };
+  const parseResultOperationId = (raw, header = false) => {
+    const parse = (value) => {
+      try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+          parsed.type === 'webcodex-result' && typeof parsed.operation_id === 'string' && parsed.operation_id
+          ? parsed.operation_id : '';
+      } catch { return ''; }
+    };
+    const value = String(raw).trim();
+    const direct = parse(value);
+    if (direct || !header) return direct;
+    const json = value.match(/^User\s*\n[^\n]+\n(\{[\s\S]*\})$/i)?.[1];
+    return json ? parse(json) : '';
+  };
   const inspect = () => {
     if (!location.hostname || location.hostname.toLowerCase() !== 'aistudio.google.com')
       return { conversationKey: '', generating: false, editorEmpty: false, supported: false, error: 'unsupported site', latestModel: null, latestUser: null };
@@ -128,11 +143,15 @@
     const user = recognized.filter((el) => role(el) === 'user').pop() || null;
     const userContent = user && [...new Set(allElements('[data-turn-role], .chat-turn-container', user))]
       .find(el => roleValue(el) === 'user' || el.matches?.('.chat-turn-container.user'));
+    const latestUserText = user ? finalText(userContent || user) : '';
+    const latestUserOperationId = user && (parseResultOperationId(latestUserText, true) ||
+      [...new Set(allElements('.turn-content, ms-prompt-chunk, ms-cmark-node, ms-text-chunk, pre code', user))]
+        .map(node => parseResultOperationId(text(node))).find(Boolean)) || '';
     return {
       conversationKey: conversationKey(), generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
       supported: !error, error, latestModel: model ? { element: model, text: finalText(model) } : null,
-      latestUser: user ? { element: user, text: finalText(userContent || user) } : null,
+      latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,
       modelAfterUser: !user || recognized.indexOf(model) > recognized.indexOf(user),
     };
   };
@@ -324,19 +343,8 @@
     return turns().filter((el) => {
       if (role(el) !== 'user') return false;
       const nested = [...new Set(allElements('.turn-content, ms-prompt-chunk, ms-cmark-node, ms-text-chunk, pre code', el))];
-      const isResult = (value, header = false) => {
-        const raw = String(value).trim();
-        let parsed;
-        try { parsed = JSON.parse(raw); } catch {
-          if (!header) return false;
-          const json = raw.match(/^User\s*\n[^\n]+\n(\{[\s\S]*\})$/i)?.[1];
-          try { parsed = json && JSON.parse(json); } catch { return false; }
-        }
-        return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
-          parsed.type === 'webcodex-result' && parsed.operation_id === marker;
-      };
-      if (nested.some((node) => text(node).includes(`[WebCodex operation ${marker}]`) || isResult(text(node)))) return true;
-      return text(el).includes(`[WebCodex operation ${marker}]`) || isResult(text(el), true);
+      if (nested.some((node) => text(node).includes(`[WebCodex operation ${marker}]`) || parseResultOperationId(text(node)) === marker)) return true;
+      return text(el).includes(`[WebCodex operation ${marker}]`) || parseResultOperationId(text(el), true) === marker;
     });
   };
   const hasDelivery = (operationId) => deliveryTurns(operationId).length > 0;
