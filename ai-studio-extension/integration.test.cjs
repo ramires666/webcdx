@@ -361,6 +361,40 @@ test('conversation change pauses and prevents result delivery', async () => {
   assert.equal(h.createCount, 0); assert.equal(h.deliveryCount, 0);
 });
 
+test('a new chat can retry startup after a temporary Gate refresh failure', async () => {
+  let offline = true;
+  const settings = {enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
+  const h = harness(saved(), {listAgents: () => {
+    if (offline) throw Error('Gate temporarily unavailable');
+    return [{id:'agent-1',name:'test agent',online:true}];
+  }}, {bridgeAuto:settings});
+  await h.status();
+  const transition = {type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'chat-1',conversationReplaced:true,error:'Conversation was replaced'};
+  await h.message(transition,h.page);
+  assert.equal(h.pageMessages.some(m => m.type === 'studio.stage'),false);
+  offline = false; h.advanceTime(6000);
+  await h.message(transition,h.page);
+  const session = (await h.status()).state.session;
+  assert.notEqual(session.turn,'turn-1');
+  assert.equal(session.phase,'waiting_model');
+  assert.equal(h.pageMessages.filter(m => m.type === 'studio.stage').length,1);
+  assert.ok(h.pageMessages.find(m => m.type === 'studio.stage').text.includes(session.turn));
+  assert.equal(h.createCount,0);
+});
+
+test('an explicit New chat can rearm after reload of an automatically paused replacement', async () => {
+  const initial=saved('paused');
+  Object.assign(initial.session,{paused:true,resumeBlocked:true,error:'Conversation was replaced'});
+  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
+  const h=harness(initial,{}, {bridgeAuto:settings});await h.status();
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,false);
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page',conversationReplaced:true},h.page)).accepted,true);
+  const session=(await h.status()).state.session;
+  assert.equal(session.phase,'waiting_model');assert.notEqual(session.turn,'turn-1');
+  assert.ok(h.pageMessages.find(m=>m.type==='studio.stage').text.includes(session.turn));
+  assert.equal(h.createCount,0);
+});
+
 test('a cleared chat automatically gets a fresh turn once, while unsafe states stay untouched', async () => {
   const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true};
   const fresh=()=>{const initial=saved('waiting_model');initial.session.nextTurn='stale-next-turn';const h=harness(initial,{}, {bridgeAuto:settings});return h;};

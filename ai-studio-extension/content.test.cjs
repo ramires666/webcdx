@@ -162,12 +162,12 @@ test('a user click on the active stop spinner suppresses its partial reply', asy
   assert.equal(h.sent.some(m => m.type === 'studio.call' && m.text === 'partial answer'), false);
 });
 
-test('only a clicked, supported empty New chat produces one conversation replacement snapshot', async () => {
+test('only a clicked, supported empty New chat produces a replacement snapshot', async () => {
   const h = harness(); await h.send({ type: 'studio.arm', sessionId: 's1' });
   const newChat = { getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: 'add', querySelector: () => null };
   h.state.latestModel = null; h.mutate(); await h.flush();
   assert.equal(h.sent.some(m => m.conversationReplaced), false, 'virtualized model disappearance alone is ignored');
-  h.click({ target: { closest: () => newChat } });
+  h.click({ target: { closest: selector => selector.includes('a,') ? newChat : null } });
   h.state.supported = false; h.state.conversationKey = 'chat-2'; h.mutate(); await h.flush();
   assert.equal(h.sent.some(m => m.conversationReplaced), false, 'transient unsupported DOM does not rearm');
   h.tick();await h.flush();assert.equal(h.sent.some(m=>m.type==='studio.snapshot'&&!m.conversationReplaced),false,'pending transition does not pause on an unsupported intermediate snapshot');
@@ -176,8 +176,58 @@ test('only a clicked, supported empty New chat produces one conversation replace
   h.state.latestModel = null; h.state.editorEmpty = true; h.mutate(); await h.flush();
   const replacements = h.sent.filter(m => m.conversationReplaced);
   assert.equal(replacements.length, 1); assert.equal(replacements[0].supported, true);
+  await h.send({ type: 'studio.arm', sessionId: 's2' });
   h.mutate(); await h.flush();
-  assert.equal(h.sent.filter(m => m.conversationReplaced).length, 1, 'same URL blank New chat is reported once');
+  assert.equal(h.sent.filter(m => m.conversationReplaced).length, 1, 'the arm handshake clears the pending transition');
+});
+
+test('retries a failed replacement request until arm and prevents concurrent requests', async () => {
+  const h = harness(); await h.send({ type: 'studio.arm', sessionId: 's1' });
+  const newChat = { getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '', textContent: '', querySelector: () => null };
+  h.click({ target: { closest: () => newChat } });
+  h.state.latestModel = null;
+  let finish;
+  h.setSendHandler(message => message.conversationReplaced ? new Promise(resolve => { finish = resolve; }) : { ok: true, accepted: true });
+  h.mutate(); await h.flush();
+  h.mutate(); await h.flush();
+  assert.equal(h.sent.filter(m => m.conversationReplaced).length, 1, 'only one transition request may be active');
+  finish({ ok: true, accepted: false }); await new Promise(resolve => setImmediate(resolve));
+  h.setSendHandler(message => ({ ok: true, accepted: true }));
+  h.tick(); await h.flush();
+  assert.equal(h.sent.filter(m => m.conversationReplaced).length, 2, 'a rejected request is retried');
+  await h.send({ type: 'studio.arm', sessionId: 's2' });
+  h.tick(); await h.flush();
+  assert.equal(h.sent.filter(m => m.conversationReplaced).length, 2, 'arm ends retries');
+});
+
+test('allows blank clicked New chat while controls are pending but not while generation is active', async () => {
+  const h = harness(); await h.send({ type: 'studio.arm', sessionId: 's1' });
+  const newChat = { getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '', textContent: '' };
+  h.click({ target: { closest: () => newChat } });
+  h.state.latestModel = null; h.state.generating = true; h.state.controlsPending = true;
+  h.mutate(); await h.flush();
+  assert.equal(h.sent.filter(m => m.conversationReplaced).length, 1);
+
+  const active = harness(); await active.send({ type: 'studio.arm', sessionId: 's1' });
+  active.click({ target: { closest: () => newChat } });
+  active.state.latestModel = null; active.state.generating = true; active.state.controlsPending = false;
+  active.mutate(); await active.flush();
+  assert.equal(active.sent.some(m => m.conversationReplaced), false);
+});
+
+test('reports a clicked blank New chat through hello when the prior session is unarmed', async () => {
+  const h = harness(); h.setSendHandler(() => ({ ok: false, accepted: false }));
+  h.tick(); await h.flush();
+  h.setSendHandler(message => ({ ok: true, accepted: true }));
+  const newChat = { getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '', textContent: '' };
+  h.click({ target: { closest: () => newChat } });
+  h.state.latestModel = null; h.mutate(); await h.flush();
+  const transition = h.sent.find(message => message.type === 'studio.hello' && message.conversationReplaced);
+  assert.ok(transition, 'unarmed content sends the replacement through studio.hello');
+  assert.equal(transition.supported, true);
+  await h.send({ type: 'studio.arm', sessionId: 's2' });
+  h.state.latestModel = { text: 'new chat reply' }; h.mutate(); await h.flush();
+  assert.equal(h.sent.some(message => message.type === 'studio.call' && message.text === 'new chat reply'), true);
 });
 
 test('cleanup annotates final answers, hides accepted service turns, and leaves context visible when hiding is off', async () => {

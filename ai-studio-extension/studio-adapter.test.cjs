@@ -307,6 +307,25 @@ test('preserves an existing user draft and rejects ambiguous editors or active g
   assert.equal(active.adapter.inspect().generating, true);
   assert.equal(active.adapter.stage('later'), false);
 });
+test('stages the initial blank-chat draft while Run is unavailable without submitting it', () => {
+  const blank = setup({ empty: true, withoutRun: true });
+  blank.location.pathname = '/prompts/new_chat';
+  const state = blank.adapter.inspect();
+  assert.equal(state.generating, true);
+  assert.equal(state.controlsPending, true);
+  assert.equal(state.latestModel, null);
+  assert.equal(blank.adapter.stage('initial turn'), true);
+  assert.equal(blank.editor.value, 'initial turn');
+  assert.equal(blank.editor.events[0].type, 'input');
+  assert.equal(blank.run.clicked, undefined, 'staging never clicks Run');
+});
+test('does not stage when Run is unavailable during active generation or an existing model chat', () => {
+  const active = setup({ empty: true, withoutRun: true, generating: true, spinnerClass: true });
+  assert.equal(active.adapter.stage('blocked during generation'), false);
+  const existing = setup({ withoutRun: true });
+  assert.ok(existing.adapter.inspect().latestModel);
+  assert.equal(existing.adapter.stage('blocked in existing chat'), false);
+});
 test('rejects unsupported roles and accepts Russian submit label', () => {
   assert.equal(setup({ extraRole: 'Thoughts' }).adapter.inspect().supported, false);
   assert.equal(setup({ empty: true, russian: true }).adapter.inspect().supported, true);

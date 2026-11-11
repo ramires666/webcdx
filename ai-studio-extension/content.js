@@ -5,7 +5,7 @@
   window.__webcodexBridgeLoaded = true;
   const adapter=WebCodexStudio.createAdapter(document,location);
   const pageInstance=Date.now()+'-'+Math.random();
-  let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, newChatPending=false, attempted=new Set(), recoverTurn='', recoverTools=[];
+  let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, newChatPending=false, newChatRequestInFlight=false, attempted=new Set(), recoverTurn='', recoverTools=[];
   let deliveryPending = false, retired = false;
   const serviceNodes=new Set();
   const send=async(type,data={})=>{
@@ -15,7 +15,7 @@
   if (!window.__webcodexBridgeReattach) send('studio.hello',{pageInstance}).catch(()=>{});
   delete window.__webcodexBridgeReattach;
   function snapshot(operationId,conversationReplaced=false){const s=adapter.inspect();return {supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),delivered:operationId?adapter.hasDelivery(operationId):undefined};}
-  async function observe(){if(!sessionId)return;const s=adapter.inspect(),conversationReplaced=newChatPending&&s.supported&&!s.generating&&s.editorEmpty&&!s.latestModel;if(conversationReplaced){newChatPending=false;await send('studio.snapshot',{...snapshot(undefined,true),error:'Conversation was replaced'});return;}if(newChatPending)return;if(s.conversationKey!==conversationKey||!s.supported){await send('studio.snapshot',snapshot());return;}
+  async function observe(){const s=adapter.inspect(),conversationReplaced=newChatPending&&s.supported&&(!s.generating||s.controlsPending)&&s.editorEmpty&&!s.latestModel;if(conversationReplaced){if(newChatRequestInFlight)return;newChatRequestInFlight=true;try{const transition={...snapshot(undefined,true),error:'Conversation was replaced'};if(sessionId)await send('studio.snapshot',transition);else await send('studio.hello',{pageInstance,...transition});}finally{newChatRequestInFlight=false;}return;}if(!sessionId||newChatPending)return;if(s.conversationKey!==conversationKey||!s.supported){await send('studio.snapshot',snapshot());return;}
     if(s.generating)return;
     if(stopping){stopping=false;lastText=s.latestModel?.text||'';return;}
     const model=s.latestModel;if(!model||model.text===baselineText||!model.text||model.text===lastText)return;
@@ -23,16 +23,16 @@
     const marker=sessionId+'\0'+model.text;if(attempted.has(model.text)||inFlight===marker)return;const callSession=sessionId;inFlight=marker;try{const response=await send('studio.call',{text:model.text,conversationKey,generating:s.generating});if(sessionId===callSession&&response?.accepted){lastText=model.text;if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```webcodex-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
   }
   const schedule=()=>{clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(()=>{}),250);};
-  document.addEventListener('click',event=>{const button=event.target?.closest?.('button');const labels=[button?.getAttribute('aria-label'),button?.getAttribute('title'),button?.innerText].map(value=>String(value||'').trim().toLowerCase());const label=labels.join(' ');if(labels.some(value=>/^(new chat|новый чат)$/.test(value)))newChatPending=true;if(adapter.inspect().generating&&(/\b(stop|cancel)\b|остановить|отмена/.test(label)||button?.querySelector?.('.stoppable-spinner, ms-stoppable-spinner')))stopping=true;},true);
+  document.addEventListener('click',event=>{const button=event.target?.closest?.('button,a,[role="button"],[role="link"]');const labels=[button?.getAttribute('aria-label'),button?.getAttribute('title'),button?.innerText,button?.textContent].map(value=>String(value||'').trim().toLowerCase());const label=labels.join(' ');if(labels.some(value=>/^(new chat|новый чат)$/.test(value)))newChatPending=true;if(adapter.inspect().generating&&(/\b(stop|cancel)\b|остановить|отмена/.test(label)||button?.querySelector?.('.stoppable-spinner, ms-stoppable-spinner')))stopping=true;},true);
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&adapter.inspect().generating)stopping=true;},true);
   const observer=new MutationObserver(schedule);observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true});
-  const tickTimer=setInterval(()=>{if(retired)return;if(sessionId){if(newChatPending)observe().catch(()=>{});else{send('studio.tick',snapshot()).catch(()=>{});observe().catch(()=>{});}}else{send('studio.hello',{pageInstance}).catch(()=>{});}},2000);
+  const tickTimer=setInterval(()=>{if(retired)return;if(newChatPending)observe().catch(()=>{});else if(sessionId){send('studio.tick',snapshot()).catch(()=>{});observe().catch(()=>{});}else{send('studio.hello',{pageInstance}).catch(()=>{});}},2000);
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
     if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup'].includes(m.type)){reply({ok:false});return;}
     if(m.type==='studio.arm'){
       const s=adapter.inspect();if(!s.supported||m.recover&&s.conversationKey!==m.expectedConversationKey){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
       if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
-      sessionId=m.sessionId;conversationKey=s.conversationKey;recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
+      sessionId=m.sessionId;conversationKey=s.conversationKey;recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;newChatRequestInFlight=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
     }
     if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
     if(m.type==='studio.cleanup'){if(m.final)adapter.annotateContext();if(!m.enabled)adapter.restoreCleanup();else if(m.final)adapter.cleanup({turns:[...serviceNodes],operationIds:m.operationIds||[]});reply({ok:true});return;}

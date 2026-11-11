@@ -132,7 +132,7 @@
   const stage = (value) => {
     const state = inspect();
     const candidateEditors = editors();
-    if (!state.supported || state.generating || candidateEditors.length !== 1 || !state.editorEmpty) return false;
+    if (!state.supported || (state.generating && !(state.controlsPending && !state.latestModel)) || candidateEditors.length !== 1 || !state.editorEmpty) return false;
     const editor = candidateEditors[0];
     if ('value' in editor) {
       const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), 'value')?.set;
