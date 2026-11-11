@@ -16,11 +16,12 @@ function saved(phase = 'waiting_model', name = 'read_file') {
       resultText: '', error: '', count: 0, tabId: 7, sessionId: 'session-1', conversationKey: 'chat-1' } };
 }
 function harness(initial = saved(), tabBehavior = {}) {
+  const localData = {};
   const listeners = {}, calls = [], pageMessages = [], db = { [KEY]: structuredClone(initial) };
   let createCount = 0, deliveryCount = 0;
   const chrome = {
     runtime: { id: 'test-id', getURL: p => 'chrome-extension://test-id/' + p, onMessage: { addListener: fn => { listeners.message = fn; } } },
-    storage: { session: { setAccessLevel: async () => {}, get: async k => ({ [k]: db[k] && structuredClone(db[k]) }), set: async x => { for (const [k,v] of Object.entries(x)) db[k] = structuredClone(v); } }, local: { get: async () => ({}), set: async () => {}, remove: async () => {}, setAccessLevel: async () => {} } },
+    storage: { session: { setAccessLevel: async () => {}, get: async k => ({ [k]: db[k] && structuredClone(db[k]) }), set: async x => { for (const [k,v] of Object.entries(x)) db[k] = structuredClone(v); } }, local: { get: async k => ({[k]:localData[k]}), set: async x => Object.assign(localData,x), remove: async k => {delete localData[k];}, setAccessLevel: async () => {} } },
     action: { onClicked: { addListener: () => {} } }, sidePanel: { open: async () => {} }, alarms: { create: () => {}, onAlarm: { addListener: fn => { listeners.alarm = fn; } } },
     permissions: { contains: async () => true },
     tabs: { get: async id => ({ id, url: 'https://aistudio.google.com/app/prompts/test' }), sendMessage: async (id, msg) => {
@@ -62,7 +63,7 @@ function harness(initial = saved(), tabBehavior = {}) {
   const status = () => message({ type: 'bridge.status' });
   const alarm = async () => { listeners.alarm({ name: 'webcodex-recover' }); await status(); };
   const call = async (turn, sender = page) => message({ type: 'studio.call', sessionId: 'session-1', conversationKey: 'chat-1', generating: false, text: '```webcodex-call\n' + JSON.stringify({ v: 1, turn, name: 'read_file', arguments: { path: 'safe.txt' } }) + '\n```' }, sender);
-  return { chrome, message, status, call, alarm, listeners, panel, page, calls, pageMessages, db, token: TOKEN, get createCount() { return createCount; }, get deliveryCount() { return deliveryCount; } };
+  return { localData, chrome, message, status, call, alarm, listeners, panel, page, calls, pageMessages, db, token: TOKEN, get createCount() { return createCount; }, get deliveryCount() { return deliveryCount; } };
 }
 function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
 
@@ -132,14 +133,14 @@ test('a call received during pending approval stays retryable and does not dispa
   assert.equal(h.createCount, 0);
 });
 
-test('page reload pauses the bound session and page messages expose no result state', async () => {
+test('page reload restores the configured session without exposing state or executing history', async () => {
   const h = harness(); await h.status();
   const reloaded = await h.message({ type: 'studio.hello' }, h.page);
   assert.equal(reloaded.ok, true); assert.equal(reloaded.accepted, true); assert.equal('state' in reloaded, false);
   const state = (await h.status()).state;
-  assert.equal(state.session.paused, true);
-  assert.equal(state.session.resumeBlocked, true);
-  assert.match(state.session.error, /restarted/);
+  assert.equal(state.session.paused, false);
+  assert.equal(state.session.phase, 'waiting_model');
+  assert.equal(h.localData.bridgeAuto.enabled, true);
   const rejected = await h.call('turn-1');
   assert.equal(rejected.ok, false); assert.equal(rejected.accepted, false); assert.equal('state' in rejected, false);
   assert.equal(h.createCount, 0);
@@ -152,6 +153,34 @@ test('normal model text is not exposed as a deliverable tool result', async () =
   const state = (await h.status()).state;
   assert.equal(state.session.phase, 'ready');
   assert.equal(state.session.resultText, '');
+});
+
+test('automatic start respects drafts, pending operations, another bound tab and explicit stop',async()=>{
+  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
+  let empty=false;
+  const h=harness(saved('idle'),{sendMessage:async(_id,msg)=>({ok:msg.type!=='studio.stage'||empty,supported:true,conversationKey:'chat-1'})});
+  h.localData.bridgeAuto=settings;
+  await h.status();
+  assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,false);
+  assert.equal(h.pageMessages.filter(m=>m.type==='studio.deliver').length,0);
+  empty=true;
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'same-page'},h.page)).accepted,true);
+  const armCount=h.pageMessages.filter(m=>m.type==='studio.arm').length;
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'same-page'},h.page)).accepted,true);
+  assert.equal(h.pageMessages.filter(m=>m.type==='studio.arm').length,armCount);
+  const other={...h.page,tab:{id:99}};
+  assert.equal((await h.message({type:'studio.hello'},other)).accepted,false);
+  assert.equal((await h.status()).state.session.tabId,7);
+  await h.message({type:'bridge.stop'});
+  assert.equal(h.localData.bridgeAuto.enabled,false);
+  assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,false);
+
+  const initial=saved('recovering');Object.assign(initial.session,{pendingCall:{name:'read_file',arguments:{path:'x'}},operationKey:'do-not-retry'});
+  const pending=harness(initial);pending.localData.bridgeAuto=settings;await pending.status();
+  assert.equal((await pending.message({type:'studio.hello'},pending.page)).accepted,false);
+  const state=(await pending.status()).state.session;
+  assert.equal(state.phase,'paused');assert.equal(state.operationKey,'do-not-retry');
+  assert.equal(pending.createCount,0);
 });
 
 test('conversation change pauses and prevents result delivery', async () => {

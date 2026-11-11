@@ -28,7 +28,7 @@ chrome.alarms.create('webcodex-recover',{periodInMinutes:0.5});
 chrome.alarms.onAlarm.addListener(a=>{if(a.name==='webcodex-recover') enqueue(async()=>{await ready;await recover();});});
 chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
   if(connecting&&msg?.type==='bridge.status'&&sender.url===chrome.runtime.getURL('panel.html')){ready.then(()=>reply({ok:true,state:publicState()})).catch(()=>reply({ok:false,error:'Не удалось загрузить состояние'}));return true;}
-  if(msg?.type?.startsWith('studio.')) { enqueue(async()=>{await ready;if(sender.frameId!==0||sender.tab?.id!==state.session.tabId||new URL(sender.url||'').origin!=='https://aistudio.google.com')throw Error('Untrusted Studio sender');return studioMessage(msg,sender);}).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)})); return true; }
+  if(msg?.type?.startsWith('studio.')) { enqueue(async()=>{await ready;if(sender.frameId!==0||!Number.isInteger(sender.tab?.id)||new URL(sender.url||'').origin!=='https://aistudio.google.com')throw Error('Untrusted Studio sender');if(msg.type==='studio.hello')return autoStart(sender,msg);if(sender.tab.id!==state.session.tabId)throw Error('Untrusted Studio sender');return studioMessage(msg,sender);}).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)})); return true; }
   const connectRequest=msg?.type==='bridge.connect'&&sender.url===chrome.runtime.getURL('panel.html');
   if(connectRequest&&connecting){reply({ok:false,error:'Вход в Gate уже выполняется. Завершите или закройте окно входа.'});return;}
   if(connectRequest)connecting=true;
@@ -38,15 +38,15 @@ async function command(m) {
   switch(m.type) {
     case 'bridge.status': return publicState();
     case 'bridge.connect': await connect(m); break;
-    case 'bridge.disconnect': await clearSession();await chrome.storage.local.remove('bridgeAuth');token='';client=null;demo=false;state.accessToken='';state.demoMode=false;state.connected=false;state.gateUrl='';state.clientId='';state.agents=[];state.tools=[];break;
-    case 'bridge.demo': await clearSession();await chrome.storage.local.remove('bridgeAuth');demo=true;state.demoMode=true;token='';client=null;state.accessToken='';state.connected=true;state.gateUrl='Demo mode';state.clientId='demo';state.agents=[{id:'demo',name:'Demo agent',online:true}];state.tools=[{name:'read_file',description:'Demo only: return fixed sample text.',inputSchema:{type:'object',additionalProperties:false,properties:{path:{type:'string'}},required:['path']}}];break;
-    case 'bridge.arm': await arm(m);break;
+    case 'bridge.disconnect': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');token='';client=null;demo=false;state.accessToken='';state.demoMode=false;state.connected=false;state.gateUrl='';state.clientId='';state.agents=[];state.tools=[];break;
+    case 'bridge.demo': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');demo=true;state.demoMode=true;token='';client=null;state.accessToken='';state.connected=true;state.gateUrl='Demo mode';state.clientId='demo';state.agents=[{id:'demo',name:'Demo agent',online:true}];state.tools=[{name:'read_file',description:'Demo only: return fixed sample text.',inputSchema:{type:'object',additionalProperties:false,properties:{path:{type:'string'}},required:['path']}}];break;
+    case 'bridge.arm': await arm(m);await rememberAuto(m);break;
     case 'bridge.instructions': if(m.submit!==false) throw Error('submit must be false');await stageInstructions();await save();break;
     case 'bridge.approve': await approve();break;
     case 'bridge.deliver': if(m.submit!==true) throw Error('submit must be true');await deliver(true);break;
-    case 'bridge.pause': if(state.session.phase!=='paused')state.session.pausedPhase=state.session.phase;if(state.session.phase==='delivery_uncertain'||state.session.resumeBlocked)state.session.resumeBlocked=true;state.session.paused=true;state.session.phase='paused';break;
+    case 'bridge.pause': await disableAuto();if(state.session.phase!=='paused')state.session.pausedPhase=state.session.phase;if(state.session.phase==='delivery_uncertain'||state.session.resumeBlocked)state.session.resumeBlocked=true;state.session.paused=true;state.session.phase='paused';break;
     case 'bridge.resume': if(state.session.phase==='stopped'||state.session.resumeBlocked||state.session.phase==='delivery_uncertain'||state.session.pausedPhase==='delivery_uncertain'||state.session.error?.includes('outcome is unknown'))throw Error('Resolve the uncertain operation or re-arm this chat before resuming');state.session.paused=false;state.session.count=0;state.session.budgetStart=Date.now();state.session.phase=state.session.pausedPhase|| (state.session.pendingCall?(state.session.operationKey?'recovering':'waiting_approval'):(state.session.resultText?'result_ready':'waiting_model'));state.session.pausedPhase='';break;
-    case 'bridge.stop': await stop();break;
+    case 'bridge.stop': await disableAuto();await stop();break;
     default: throw Error('Unknown bridge command');
   }
   await save();return publicState();
@@ -65,6 +65,33 @@ async function connect({gateUrl,clientId}) {
   token=data.access_token;state.accessToken=token;state.demoMode=false;client=WebCodexMCP.createClient({baseUrl:url.origin,token});const init=await client.initialize();state.gateInstructions=typeof init?.instructions==='string'?init.instructions:'';const all=await client.listTools();state.tools=all.filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();state.connected=true;state.gateUrl=url.origin;state.clientId=clientId;state.session.phase='idle';demo=false;
 }
 function base64url(bytes){return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+async function rememberAuto(m){if(!demo)await chrome.storage.local.set({bridgeAuto:{enabled:true,agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,consent:true}});}
+async function disableAuto(){await chrome.storage.local.set({bridgeAuto:{enabled:false}});}
+async function autoStart(sender,m){
+  let {bridgeAuto:settings}=await chrome.storage.local.get('bridgeAuto');
+  if(settings?.enabled&&!state.connected&&!demo){
+    await restore();
+    if(state.connected&&!state.session.pendingCall&&state.session.error?.startsWith('Could not restore Gate connection'))await clearSession();
+  }
+  const s=state.session;
+  if(!settings&&state.connected&&!demo&&s.agentId&&s.toolNames?.length&&!s.paused&&!['idle','stopped'].includes(s.phase)){
+    await rememberAuto(s);settings=(await chrome.storage.local.get('bridgeAuto')).bridgeAuto;
+  }
+  if(!settings?.enabled||!settings.consent||!state.connected||demo)return {accepted:false};
+  if(m.pageInstance&&s.pageInstance===m.pageInstance&&s.tabId===sender.tab.id)return {accepted:true};
+  if(s.pendingCall||s.operationKey||s.phase==='delivery_uncertain'){
+    if(s.tabId===sender.tab.id){s.paused=true;s.resumeBlocked=true;s.phase='paused';s.error='Page restarted with an unfinished operation; inspect its outcome before starting a new session';await save();}
+    return {accepted:false};
+  }
+  if(s.tabId!==null&&s.tabId!==sender.tab.id&&!['idle','stopped'].includes(s.phase)){
+    const existing=await chrome.tabs.get(s.tabId).catch(()=>null);
+    if(existing)return {accepted:false};
+  }
+  if(s.paused&&s.phase!=='stopped')return {accepted:false};
+  await clearSession();
+  try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
+  catch(e){return {accepted:false};}
+}
 async function readLimited(response,limit){if(!response.body?.getReader){const text=await response.text();if(new TextEncoder().encode(text).length>limit)throw Error('OAuth response exceeds 64 KiB');return text;}const reader=response.body.getReader(),chunks=[];let size=0;try{while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>limit){await reader.cancel();throw Error('OAuth response exceeds 64 KiB');}chunks.push(part.value);}}finally{reader.releaseLock?.();}const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return new TextDecoder().decode(bytes);}
 async function arm(m) {
   if(!['idle','stopped'].includes(state.session.phase))throw Error('Stop the active session before arming another one');
@@ -83,12 +110,12 @@ async function arm(m) {
     }
     if(!snap?.supported)throw Error(snap?.error||'Unsupported chat');
     state.session.conversationKey=snap.conversationKey;state.session.phase='waiting_model';await stageInstructions();await save();
-  } catch(e){state.session.phase='stopped';state.session.error=String(e.message||e);await save();throw e;}
+  } catch(e){await chrome.tabs.sendMessage(m.tabId,{type:'studio.disarm',sessionId:state.session.sessionId}).catch(()=>{});state.session.phase='stopped';state.session.error=String(e.message||e);await save();throw e;}
 }
 async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});state.session={phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null};await save();}
 async function stageInstructions(){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);s.instructions=WebCodexProtocol.buildInstructions({turn:s.turn,agentId:s.agentId,tools:selected,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,text:s.instructions});if(!r?.ok)throw Error('Could not stage instructions without changing existing text');}
 async function studioMessage(m,sender) {
-  const s=state.session;if(m.type==='studio.hello'){if(s.phase!=='idle'&&s.phase!=='stopped'){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='AI Studio content session restarted; stop and re-arm this chat';await save();}return {accepted:true};}if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
+  const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
   if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationKey!==s.conversationKey||!m.supported){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'Conversation changed';await save();return {accepted:true};}await recover();return {accepted:true};}
     if(m.type==='studio.call'){
     if(s.paused)return {accepted:false};

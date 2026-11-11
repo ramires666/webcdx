@@ -89,7 +89,7 @@
     }
     async function rpc(method, params = {}, signal) { return request(method, params, signal); }
     async function initialize(signal) {
-      const result = await request('initialize', { protocolVersion: VERSION, capabilities: {}, clientInfo: { name: 'WebCodex AI Studio Bridge', version: '0.1.8' } }, signal);
+      const result = await request('initialize', { protocolVersion: VERSION, capabilities: {}, clientInfo: { name: 'WebCodex AI Studio Bridge', version: '0.1.9' } }, signal);
       const response = await fetchImpl(origin + '/mcp/v5', { method: 'POST', signal: requestSignal(signal), headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': VERSION }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }) });
       if (!response.ok || response.status !== 202) throw httpError('MCP initialized notification', response.status);
       return result;
