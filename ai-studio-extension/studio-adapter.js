@@ -23,13 +23,19 @@
   };
   const controls = () => elements('button');
   const hasSpinner = (scope = document) => elements('.stoppable-spinner, ms-stoppable-spinner', scope).length > 0;
-  const labels = (el) => [attr(el, 'aria-label'), attr(el, 'title'), text(el)].filter(Boolean).map(value => value.trim().toLowerCase());
+  const buttonText = (el) => {
+    const copy = el.cloneNode(true);
+    for (const icon of copy.querySelectorAll('[aria-hidden="true"], .material-symbols-outlined, .material-icons, mat-icon, svg')) icon.remove();
+    return text(copy);
+  };
+  const labels = (el) => [attr(el, 'aria-label'), attr(el, 'title'), buttonText(el)].filter(Boolean).map(value => value.trim().toLowerCase());
   const hasLabel = (el, words, keyboardSuffix = false) => labels(el).some(value => {
     const normalized = keyboardSuffix ? value.replace(/\s*keyboard_return\s*$/i, '').replace(/\s*\(?\s*(?:ctrl|control)\s*\+\s*enter\s*\)?$/i, '').trim() : value;
     return words.includes(normalized);
   });
+  const submitButtons = () => controls().filter((el) => hasLabel(el, ['run', 'send', 'запустить', 'отправить'], true));
   const submitButton = () => {
-    const matches = controls().filter((el) => hasLabel(el, ['run', 'send', 'запустить', 'отправить'], true));
+    const matches = submitButtons();
     return matches.length === 1 ? matches[0] : null;
   };
   const conversationKey = () => {
@@ -83,15 +89,16 @@
     const recognized = turns();
     const roles = recognized.map(role);
     const unsupportedRole = recognized.some((el, i) => !roles[i] && roleMarkers(el).length > 0 || new Set(roleMarkers(el)).size > 1);
-    const run = submitButton();
+    const runs = submitButtons(), run = runs.length === 1 ? runs[0] : null;
     const explicitStops = controls().filter((el) => hasLabel(el, ['stop', 'cancel', 'остановить', 'отмена', 'генерируется']) ||
       attr(el, 'aria-label')?.toLowerCase() === 'generating');
-    const generating = explicitStops.length > 0 || hasSpinner();
+    // AI Studio briefly removes Run while switching generation controls.
+    const generating = explicitStops.length > 0 || hasSpinner() || runs.length === 0;
     let error = '';
     if (candidateEditors.length !== 1) error = 'ambiguous or missing editor';
     else if (unsupportedRole) error = 'unsupported turn role';
     else if (recognized.length && !roles.some(Boolean)) error = 'unrecognized conversation roles';
-    else if (explicitStops.length > 1 || (!run && !generating)) error = 'ambiguous generation controls';
+    else if (runs.length > 1 || explicitStops.length > 1) error = `ambiguous generation controls: Run=${runs.length}, Stop=${explicitStops.length}`;
     const model = recognized.filter((el) => role(el) === 'model').pop() || null;
     return {
       conversationKey: conversationKey(), generating,

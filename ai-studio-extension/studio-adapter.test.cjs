@@ -108,6 +108,21 @@ test('recognizes the observed Run icon text without aria and ignores rerun contr
   duplicate.root.add(new Node('button', {}, 'Run\nkeyboard_return'));
   assert.equal(duplicate.adapter.inspect().supported, false);
 });
+
+test('ignores decorative Run icons and waits through missing generation controls', () => {
+  const state = setup({ runText: 'Run' });
+  delete state.run.attrs['aria-label'];
+  state.run.add(new Node('span', { 'aria-hidden': 'true', class: 'material-symbols-outlined' }, 'keyboard_return'));
+  assert.equal(state.adapter.inspect().supported, true);
+  assert.equal(state.adapter.inspect().generating, false);
+  state.run.hidden = true;
+  assert.equal(state.adapter.inspect().supported, true);
+  assert.equal(state.adapter.inspect().generating, true);
+  assert.equal(state.adapter.submit('must not send during transition'), false);
+  state.run.hidden = false;
+  assert.equal(state.adapter.inspect().generating, false);
+  assert.equal(state.adapter.submit('ready'), true);
+});
 test('CSS stoppable spinner and Stop-only generation remain observable but cannot stage', () => {
   const active = setup({ generating: true, spinnerClass: true, withoutRun: true });
   assert.equal(active.adapter.inspect().supported, true);
