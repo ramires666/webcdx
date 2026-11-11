@@ -206,8 +206,8 @@ func (s *server) routes() http.Handler {
 	// OAuth authorization & token exchange
 	mux.HandleFunc("GET /oauth/authorize", s.handleAuthorize)
 	mux.HandleFunc("POST /oauth/token", s.handleToken)
-	mux.HandleFunc("GET /bridge/v1/authorize", s.adminAuth(s.handleBridgeAuthorize))
-	mux.HandleFunc("POST /bridge/v1/authorize", s.adminAuth(s.handleBridgeAuthorize))
+	mux.HandleFunc("GET /bridge/v1/authorize", s.bridgeBrowserAuth(s.handleBridgeAuthorize))
+	mux.HandleFunc("POST /bridge/v1/authorize", s.bridgeBrowserAuth(s.handleBridgeAuthorize))
 	mux.HandleFunc("POST /bridge/v1/token", s.handleBridgeToken)
 	mux.HandleFunc("GET /admin/mcp-clients/{id}/bridge", s.adminAuth(s.handleAdminBridgeConfig))
 	mux.HandleFunc("POST /admin/mcp-clients/{id}/bridge", s.adminAuth(s.handleAdminBridgeConfig))

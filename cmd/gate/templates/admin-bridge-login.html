@@ -1,0 +1,13 @@
+{{define "admin-bridge-login.html"}}
+<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход в WebCodex Gate</title>
+<h1>Вход в WebCodex Gate</h1>
+<p>Введите логин и пароль администратора Gate. Они отправляются только этому серверу; расширение их не получает.</p>
+{{if .Error}}<p role="alert">{{.Error}}</p>{{end}}
+<form method="post" action="{{.Action}}">
+<input type="hidden" name="login_csrf" value="{{.CSRF}}">
+<p><label>Логин <input name="username" autocomplete="username" required></label></p>
+<p><label>Пароль <input name="password" type="password" autocomplete="current-password" required></label></p>
+<button type="submit">Войти</button>
+</form></html>
+{{end}}

@@ -66,6 +66,9 @@ func TestBridgeConsentAndSingleUseToken(t *testing.T) {
 	if page.Code != http.StatusOK || page.Header().Get("Cache-Control") != "no-store" || !strings.Contains(page.Body.String(), "opaque-state") {
 		t.Fatalf("consent page: status=%d headers=%v body=%s", page.Code, page.Header(), page.Body.String())
 	}
+	if got := page.Header().Get("Content-Security-Policy"); !strings.Contains(got, "form-action 'self' "+redirect+";") || strings.Contains(got, "*") {
+		t.Fatalf("consent must permit only its registered callback: %s", got)
+	}
 	wrongCallback := cloneValues(query)
 	wrongCallback.Set("redirect_uri", "https://attacker.example/callback")
 	badCallback := httptest.NewRequest(http.MethodGet, "/bridge/authorize?"+wrongCallback.Encode(), nil)
@@ -73,6 +76,9 @@ func TestBridgeConsentAndSingleUseToken(t *testing.T) {
 	srv.handleBridgeAuthorize(badCallbackRec, badCallback)
 	if badCallbackRec.Code != http.StatusBadRequest {
 		t.Fatalf("wrong callback status=%d", badCallbackRec.Code)
+	}
+	if strings.Contains(badCallbackRec.Header().Get("Content-Security-Policy"), "attacker.example") {
+		t.Fatal("unregistered callback leaked into CSP")
 	}
 	form := url.Values{"csrf": {srv.adminCSRF}, "client_id": {"oauth-bridge"}, "redirect_uri": {redirect}, "response_type": {"code"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"}, "state": {"opaque-state"}, "decision": {"allow"}, "config_hash": {bridgeConfigHash(extension, string(tools))}}
 	post := httptest.NewRequest(http.MethodPost, "/bridge/authorize", strings.NewReader(form.Encode()))

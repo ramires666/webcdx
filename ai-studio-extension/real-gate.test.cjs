@@ -89,6 +89,8 @@ test('compiled Gate and agent complete real bridge file operations and reconnect
     assert.match(agent.output, /connected to Gate; agent version=\S+ gate version=\S+/);
     assert.match(gate.output, /webcodex-gate version=\S+/);
     assert.match(gate.output, /agent stream connected .*agent_version=\S+ gate_version=\S+/);
+    assert.match(agent.output, /agent version=1\.5\.0-ai-studio-alpha\.1 gate version=1\.5\.0-ai-studio-alpha\.2/);
+    assert.match(gate.output, /agent_version=1\.5\.0-ai-studio-alpha\.1 gate_version=1\.5\.0-ai-studio-alpha\.2/);
 
     phase = 'authorize extension bridge';
     const accessToken = await authorizeBridge(oauthClientId, extensionId);
@@ -153,11 +155,28 @@ test('compiled Gate and agent complete real bridge file operations and reconnect
     const state = crypto.randomBytes(16).toString('hex');
     const redirect = `https://${extension}.chromiumapp.org/webcodex`;
     const query = new URLSearchParams({ client_id: clientId, redirect_uri: redirect, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', state });
-    const consentResponse = await request('/bridge/v1/authorize?' + query, { headers: { Authorization: auth } });
+    const authorizePath = '/bridge/v1/authorize?' + query;
+    const loginResponse = await request(authorizePath);
+    assert.equal(loginResponse.status, 200);
+    assert.equal(loginResponse.headers.get('www-authenticate'), null);
+    const loginPage = await loginResponse.text();
+    const csrfCookie = loginResponse.headers.get('set-cookie').split(';')[0];
+    const loggedIn = await request(authorizePath, {
+      method: 'POST', redirect: 'manual',
+      headers: { Cookie: csrfCookie, Origin: baseUrl, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form({ login_csrf: hidden(loginPage, 'login_csrf'), username: 'admin', password }),
+    });
+    assert.equal(loggedIn.status, 303);
+    const afterLogin = new URL(loggedIn.headers.get('location'), baseUrl);
+    assert.equal(afterLogin.origin, baseUrl);
+    assert.equal(afterLogin.pathname, '/bridge/v1/authorize');
+    for (const [name, value] of query) assert.equal(afterLogin.searchParams.get(name), value);
+    const sessionCookie = loggedIn.headers.get('set-cookie').split(';')[0];
+    const consentResponse = await request(authorizePath, { headers: { Cookie: sessionCookie } });
     const consent = await consentResponse.text();
     assert.equal(consentResponse.status, 200);
     const formFields = Object.fromEntries(['csrf', 'config_hash'].map(name => [name, hidden(consent, name)]));
-    const allowed = await request('/bridge/v1/authorize', { method: 'POST', redirect: 'manual', headers: { Authorization: auth, 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ ...queryEntries(query), ...formFields, decision: 'allow' }) });
+    const allowed = await request('/bridge/v1/authorize', { method: 'POST', redirect: 'manual', headers: { Cookie: sessionCookie, Origin: baseUrl, 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ ...queryEntries(query), ...formFields, decision: 'allow' }) });
     assert.equal(allowed.status, 302);
     const callback = new URL(allowed.headers.get('location'));
     assert.equal(callback.searchParams.get('state'), state);

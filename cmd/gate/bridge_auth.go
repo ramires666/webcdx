@@ -201,6 +201,8 @@ func (s *server) handleBridgeAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "PKCE S256 and state are required", 400)
 		return
 	}
+	// Chrome checks the consent form's redirect against form-action too.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self' "+redirect+"; base-uri 'none'; frame-ancestors 'none'")
 	if r.Method == http.MethodGet {
 		var tools []string
 		_ = json.Unmarshal([]byte(toolsJSON), &tools)
