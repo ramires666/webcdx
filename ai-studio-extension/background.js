@@ -11,6 +11,7 @@ async function restore() {
   try {
     const data=await chrome.storage.session.get(KEY);
     if(data[KEY])state=data[KEY];
+    if(state.session.conversationKey)state.session.conversationKey=state.session.conversationKey.replace(/^([^?#]*)\?[^#]*(#.*)?$/, '$1$2');
     const {bridgeAuto}=await chrome.storage.local.get('bridgeAuto');state.autoSettings=bridgeAuto?{...bridgeAuto,autoApprove:!!bridgeAuto.autoApprove}:{enabled:false,autoApprove:false};
     state.session.autoApprove=Object.hasOwn(state.session,'autoApprove')?!!state.session.autoApprove:state.autoSettings.autoApprove;
     state.hideServiceMessages=!!(await chrome.storage.local.get('hideServiceMessages')).hideServiceMessages;
@@ -163,7 +164,10 @@ async function autoStart(sender,m){
   try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
   catch(e){return {accepted:false};}
 }
-function recoverableDelivery(s){return !!(s.resultText&&s.nextTurn&&s.operationId&&s.conversationKey&&(s.phase==='delivery_uncertain'||(s.phase==='paused'&&!s.userPaused&&s.pausedPhase!=='delivery_uncertain'&&s.error==='AI Studio session is unavailable; stop and re-arm this chat')));}
+function recoverableDelivery(s){
+  const recoverablePause=s.phase==='paused'&&!s.userPaused&&(s.error==='Conversation changed'||s.pausedPhase!=='delivery_uncertain'&&s.error==='AI Studio session is unavailable; stop and re-arm this chat');
+  return !!(s.resultText&&s.nextTurn&&s.operationId&&s.conversationKey&&(s.phase==='delivery_uncertain'||recoverablePause));
+}
 async function reattachDelivery(sender,m){
   const s=state.session;
   try{
@@ -200,6 +204,9 @@ async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)awa
 async function stageInstructions(){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].join('\n\n');if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
+  if(!m.conversationReplaced&&m.conversationKey===s.conversationKey&&s.phase==='paused'&&s.error==='Conversation changed'&&recoverableDelivery(s)&&(m.type==='studio.call'||m.supported)){
+    s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.pausedPhase='';s.error='Checking whether the saved result reached this chat';
+  }
   if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationReplaced||m.conversationKey!==s.conversationKey||!m.supported){if(m.conversationReplaced&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&s.phase!=='delivery_uncertain'){const restarted=await autoStart(sender,{pageInstance:s.pageInstance,conversationReplaced:true});if(restarted.accepted)return restarted;}if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'Conversation changed';await save();return {accepted:true};}await recover();return {accepted:true};}
     if(m.type==='studio.call'){
     if(s.paused)return {accepted:false};

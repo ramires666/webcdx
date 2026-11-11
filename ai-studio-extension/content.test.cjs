@@ -123,6 +123,22 @@ test('recovery observes only the advertised valid turn and retries until accepte
   h.setAccepted(true);h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,2);
 });
 
+test('delivered recovery snapshot keeps an already rendered next turn observable',async()=>{
+  const h=harness(),tools=[{name:'read_file',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}];
+  const old='```webcodex-call\n'+JSON.stringify({v:1,turn:'old-turn',name:'read_file',arguments:{path:'old'}})+'\n```';
+  const next='```webcodex-call\n'+JSON.stringify({v:1,turn:'next-turn',name:'read_file',arguments:{path:'new'}})+'\n```';
+  h.state.latestModel={text:old};
+  await h.send({type:'studio.arm',sessionId:'s1',recover:true,recoverTurn:'next-turn',toolNames:tools,expectedConversationKey:'chat-1'});
+  await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'webcodex-result',operation_id:'op-recover'}),submit:true});
+  h.state.latestModel={text:next};
+  assert.equal((await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-recover'})).delivered,true);
+  await h.flush();
+  const calls=h.sent.filter(m=>m.type==='studio.call');
+  assert.equal(calls.length,1);assert.equal(calls[0].text,next);assert.equal(calls.some(m=>m.text===old),false);
+  h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+});
+
 test('does not suppress normal streaming spinner or duplicate in-flight observations', async () => {
   const h = harness(); await h.send({ type: 'studio.arm', sessionId: 's1' });
   h.state.latestModel = { text: 'streamed answer' }; h.state.generating = true; h.mutate(); await h.flush();

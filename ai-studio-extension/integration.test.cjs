@@ -432,3 +432,76 @@ test('recovery rejects another conversation and does not recover a manually paus
   assert.equal((await restored.message({type:'studio.hello',pageInstance:'new-page'},restored.page)).accepted,true);
   assert.equal((await restored.status()).state.session.phase,'waiting_model');assert.equal(restored.createCount,0);assert.equal(restored.deliveryCount,0);
 });
+
+test('legacy query migration preserves the prompt path and conversation id',async()=>{
+  const initial=saved('delivery_uncertain');
+  initial.session.conversationKey='/app/prompts/test?legacy=1#data-conversation-id=chat-1';
+  Object.assign(initial.session,{resultText:'saved',operationId:'op-1',nextTurn:'turn-2'});
+  const key='/app/prompts/test#data-conversation-id=chat-1';
+  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:key}:msg.type==='studio.snapshot'?{supported:true,conversationKey:key,delivered:true}:{ok:true}}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true}});
+  await h.status();
+  assert.equal((await h.status()).state.session.conversationKey,key);
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,true);
+  assert.equal((await h.status()).state.session.phase,'waiting_model');
+  const arm=h.pageMessages.find(m=>m.type==='studio.arm');
+  assert.equal(arm.expectedConversationKey,key);
+  assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+});
+
+test('paused conversation change recovers only on the same path and conversation id',async()=>{
+  const key='/app/prompts/test#data-conversation-id=chat-1';
+  const make=()=>{const initial=saved('paused');Object.assign(initial.session,{paused:true,resumeBlocked:true,conversationKey:key,resultText:'saved',operationId:'op-1',nextTurn:'turn-2',pageInstance:'old-page',error:'Conversation changed'});return initial;};
+  const auto={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true};
+  for(const mismatch of ['/app/prompts/other#data-conversation-id=chat-1','/app/prompts/test#data-conversation-id=other']){
+    const h=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:mismatch}:{supported:true,conversationKey:mismatch,delivered:true}}, {bridgeAuto:auto});
+    await h.status();
+    assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,false);
+    assert.equal((await h.status()).state.session.phase,'paused');
+    assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+  }
+  const h=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:key}:msg.type==='studio.snapshot'?{supported:true,conversationKey:key,delivered:true}:{ok:true}}, {bridgeAuto:auto});
+  await h.status();
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,true);
+  const state=(await h.status()).state.session;
+  assert.equal(state.phase,'waiting_model');assert.equal(state.turn,'turn-2');
+  assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+});
+
+test('paused conversation change accepts same-key tick proof and exact next turn without resending old result',async()=>{
+  const initial=saved('paused');Object.assign(initial.session,{paused:true,resumeBlocked:true,resultText:'saved result',operationId:'old-op',nextTurn:'turn-2',error:'Conversation changed'});
+  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.snapshot'?{supported:true,conversationKey:'chat-1',delivered:true}:{ok:true}});
+  await h.status();
+  await h.message({type:'studio.tick',sessionId:'session-1',supported:true,conversationKey:'chat-1'},h.page);
+  let state=(await h.status()).state.session;
+  assert.equal(state.phase,'waiting_model');assert.equal(state.turn,'turn-2');assert.equal(state.operationId,'');
+  assert.equal(h.deliveryCount,0);assert.equal(h.createCount,0);
+
+  const next=await h.call('turn-2');
+  assert.equal(next.accepted,true);
+  state=(await h.status()).state.session;
+  assert.equal(state.phase,'recovering');assert.equal(state.pendingCall.turn,'turn-2');
+  assert.notEqual(h.calls.find(x=>x.method==='POST').body.key,'old-op');
+  assert.equal(h.deliveryCount,0);assert.equal(h.createCount,1);
+});
+
+test('manual pause still blocks recovery after a conversation change',async()=>{
+  const initial=saved('paused');Object.assign(initial.session,{paused:true,resumeBlocked:true,resultText:'saved',operationId:'op-1',nextTurn:'turn-2',error:'Conversation changed'});
+  const h=harness(initial);await h.status();
+  await h.message({type:'bridge.pause'});
+  assert.equal((await h.message({type:'studio.tick',sessionId:'session-1',supported:true,conversationKey:'chat-1'},h.page)).accepted,true);
+  assert.equal((await h.status()).state.session.phase,'paused');
+  assert.equal(h.pageMessages.some(m=>m.type==='studio.snapshot'),false);
+  assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+});
+
+test('exact next turn proves delivery directly from a paused conversation change',async()=>{
+  const initial=saved('paused');Object.assign(initial.session,{paused:true,resumeBlocked:true,resultText:'saved result',operationId:'old-op',nextTurn:'turn-2',error:'Conversation changed'});
+  const h=harness(initial);
+  await h.status();
+  assert.equal((await h.call('wrong-turn')).accepted,false);
+  assert.equal(h.createCount,0);
+  assert.equal((await h.call('turn-2')).accepted,true);
+  assert.equal(h.createCount,1);
+  assert.equal(h.calls.filter(x=>x.method==='POST')[0].body.arguments.path,'safe.txt');
+  assert.equal(h.deliveryCount,0);
+});

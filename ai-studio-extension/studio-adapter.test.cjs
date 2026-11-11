@@ -66,8 +66,24 @@ function setup({ draft = '', extraEditors = 0, generating = false, spinnerClass 
   const stop = new Node('button', { 'aria-label': russian ? 'Отмена' : 'Stop' });
   const root = new Node('document'); root.children = [wrapper, ...moreEditors, ...turns, ...(withoutRun ? [] : [run]), ...(generating ? [stop] : [])];
   const document = { documentElement: new Node('html'), body: new Node('body'), createElement(tag) { return new Node(tag); }, defaultView: { InputEvent: class { constructor(type, init) { this.type = type; Object.assign(this, init); } } }, querySelectorAll(selector) { return root.querySelectorAll(selector); } };
-  return { adapter: createAdapter(document, { hostname, pathname: '/prompts/p1', search: '?x=2' }), editor, wrapper, run, user, model, chunk, root, document };
+  const location = { hostname, pathname: '/prompts/p1', search: '?x=2' };
+  return { adapter: createAdapter(document, location), location, editor, wrapper, run, user, model, chunk, root, document };
 }
+
+test('conversation key ignores query-only changes but tracks pathname and explicit IDs', () => {
+  const state = setup();
+  const original = state.adapter.inspect().conversationKey;
+  state.location.search = '?settings=changed';
+  assert.equal(state.adapter.inspect().conversationKey, original);
+  state.location.pathname = '/prompts/p2';
+  assert.notEqual(state.adapter.inspect().conversationKey, original);
+
+  const identified = setup();
+  identified.document.documentElement.attrs['data-conversation-id'] = 'thread-1';
+  const withId = identified.adapter.inspect().conversationKey;
+  identified.document.documentElement.attrs['data-conversation-id'] = 'thread-2';
+  assert.notEqual(identified.adapter.inspect().conversationKey, withId);
+});
 
 function systemSetup({ original = 'Keep these user instructions.', saveDelay = false, malformed = false, duplicatePanels = false, saveCloses = false } = {}) {
   const state = setup({ draft: 'chat draft' });
