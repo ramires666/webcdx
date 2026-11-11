@@ -11,7 +11,7 @@
   <main>
     <header>
       <h1>WebCodex Bridge</h1>
-      <p>AI Studio · alpha 0.2.3</p>
+      <p>AI Studio · alpha 0.2.4</p>
     </header>
     <p id="status" role="status" aria-live="polite">Загрузка состояния…</p>
     <p id="error" class="error" role="alert" aria-live="assertive" hidden></p>
@@ -37,8 +37,11 @@
       <div id="agents" class="choices" aria-label="Выбор агента"></div>
       <p>Разрешённые инструменты</p>
       <div id="tools" class="choices" aria-label="Разрешённые инструменты"></div>
+      <p id="tools-next-session" class="hint" hidden>Выбор инструментов применяется к следующему сеансу.</p>
       <label class="check"><input id="consent" type="checkbox"> Разрешаю передавать выбранные результаты в Google AI Studio</label>
       <label class="check"><input id="automatic" type="checkbox"> Автоматически передавать результаты инструментов</label>
+      <label class="check"><input id="auto-approve" type="checkbox"> Выполнять выбранные команды без подтверждения</label>
+      <p class="hint">Изменение файлов, выполнение команд и запуск выбранных инструментов выполняются без подтверждения для каждого вызова.</p>
       <label class="check"><input id="hide-service" type="checkbox"> Скрывать служебные JSON после ответа</label>
       <p class="hint">Скрытие можно отменить; история сообщений сохраняется.</p>
       <label for="instructions">System instructions AI Studio</label>

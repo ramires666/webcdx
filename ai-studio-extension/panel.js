@@ -54,14 +54,12 @@
     const availableTools = next.tools || [];
     renderChoices($('tools'), [...availableTools, ...(saved.toolNames || []).filter(name => !availableTools.some(tool => tool.name === name)).map(name => ({ name, description: 'недоступен, ожидаю агента' }))], 'tool');
     if (!editedPreferences.has('consent') && typeof saved.consent === 'boolean') $('consent').checked = saved.consent;
-    if (!session.phase || ['idle', 'stopped'].includes(session.phase)) {
-      if (!editedPreferences.has('agentId') && saved.agentId) choose($('agents'), [String(saved.agentId)]);
-      if (!editedPreferences.has('toolNames') && Array.isArray(saved.toolNames)) choose($('tools'), saved.toolNames);
-      if (!editedPreferences.has('automatic') && typeof saved.automatic === 'boolean') $('automatic').checked = saved.automatic;
-    }
+    if (!editedPreferences.has('agentId') && saved.agentId && (!session.phase || ['idle', 'stopped'].includes(session.phase))) choose($('agents'), [String(saved.agentId)]);
+    if (!editedPreferences.has('toolNames') && Array.isArray(saved.toolNames)) choose($('tools'), saved.toolNames);
+    if (!editedPreferences.has('automatic') && typeof saved.automatic === 'boolean') $('automatic').checked = saved.automatic;
+    if (!editedPreferences.has('autoApprove') && typeof saved.autoApprove === 'boolean') $('auto-approve').checked = saved.autoApprove;
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) {
-      if (session.agentId) choose($('agents'), [String(session.agentId)]);
-      if (Array.isArray(session.toolNames)) choose($('tools'), session.toolNames);
+      if (!editedPreferences.has('agentId') && session.agentId) choose($('agents'), [String(session.agentId)]);
     }
     if (next.gateUrl && !$('gate-url').value) $('gate-url').value = next.gateUrl;
     if (next.clientId && !$('client-id').value) $('client-id').value = next.clientId;
@@ -78,6 +76,7 @@
     $('disconnect').disabled = busy || !next.connected;
     $('demo').disabled = busy || !!next.connected;
     $('arm').disabled = !next.connected || !['idle', 'stopped'].includes(session.phase) || !$('consent').checked;
+    $('tools-next-session').hidden = !session.phase || ['idle', 'stopped'].includes(session.phase);
     $('save-instructions').disabled = !next.connected || !session.agentId;
     $('approve').disabled = session.phase !== 'waiting_approval' || !session.pendingCall || session.paused;
     $('deliver').disabled = !session.resultText || session.phase !== 'result_ready' || session.paused;
@@ -112,7 +111,7 @@
     if (!$('consent').checked) return showError('Подтвердите передачу выбранных результатов.');
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      await act('bridge.arm', { tabId: tab?.id, agentId: selected($('agents'))[0], toolNames: selected($('tools')), automatic: $('automatic').checked, consent: true });
+      await act('bridge.arm', { tabId: tab?.id, agentId: selected($('agents'))[0], toolNames: selected($('tools')), automatic: $('automatic').checked, autoApprove: $('auto-approve').checked, consent: true });
     } catch (error) { showError(error); }
   });
   $('save-instructions').addEventListener('click', () => act('bridge.instructions', { submit: false }));
@@ -124,9 +123,9 @@
   function savePreferences(field) {
     editedPreferences.add(field);
     const savedTools = state?.autoSettings?.toolNames || [];
-    const visibleTools = new Set($('tools').querySelectorAll('input').map(input => input.value));
+    const visibleTools = new Set([...$('tools').querySelectorAll('input')].map(input => input.value));
     const toolNames = [...new Set([...savedTools.filter(name => !visibleTools.has(name)), ...selected($('tools'))])];
-    const preferences = { agentId: selected($('agents'))[0] || state?.autoSettings?.agentId || '', toolNames, consent: $('consent').checked, automatic: $('automatic').checked };
+    const preferences = { agentId: selected($('agents'))[0] || state?.autoSettings?.agentId || '', toolNames, consent: $('consent').checked, automatic: $('automatic').checked, autoApprove: $('auto-approve').checked };
     if (state) state.autoSettings = preferences;
     send('bridge.preferences', preferences).catch(showError);
   }
@@ -134,6 +133,7 @@
   $('tools').addEventListener('change', () => savePreferences('toolNames'));
   $('consent').addEventListener('change', () => { savePreferences('consent'); render(state); });
   $('automatic').addEventListener('change', () => { if (state?.session) state.session.automatic = $('automatic').checked; savePreferences('automatic'); });
+  $('auto-approve').addEventListener('change', () => savePreferences('autoApprove'));
   $('hide-service').addEventListener('change', () => act('bridge.cleanupPreference', { enabled: $('hide-service').checked }));
   async function poll() { try { render(await send('bridge.status')); } catch (error) { showError(error); } }
   connectionLoaded.then(poll); setInterval(poll, 2000);

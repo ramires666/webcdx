@@ -150,6 +150,45 @@ test('active consent and automatic changes persist through bridge preferences', 
   assert.equal(updates[0].automatic, false); assert.equal(updates[1].consent, false);
 });
 
+test('active polls keep saved tool choices and auto-approval preferences', async () => {
+  const saved = { agentId: 'agent-1', toolNames: ['read_file'], consent: true, automatic: false, autoApprove: false };
+  const active = { connected: true, session: { phase: 'waiting_model', agentId: 'agent-1', toolNames: [], automatic: false }, tools: [{ name: 'read_file' }, { name: 'search_files' }], agents: [{ id: 'agent-1', name: 'A' }], autoSettings: saved };
+  const p = createPanel({ autoSettings: saved });
+  await p.update(active);
+  assert.deepEqual(p.get('tools').querySelectorAll('input:checked').map(x => x.value), ['read_file']);
+  assert.equal(p.get('auto-approve').checked, false);
+  assert.equal(p.get('tools-next-session').hidden, false);
+  await p.select('tools', 'search_files');
+  await p.change('auto-approve', true);
+  await p.update(active);
+  assert.deepEqual(p.get('tools').querySelectorAll('input:checked').map(x => x.value), ['search_files']);
+  assert.equal(p.get('auto-approve').checked, true);
+  const updates = p.messages.filter(x => x.type === 'bridge.preferences');
+  assert.equal(updates[0].toolNames.join(','), 'search_files');
+  assert.equal(updates[1].autoApprove, true);
+  assert.equal(updates[1].toolNames.join(','), 'search_files');
+  assert.equal(p.messages.filter(x => x.type === 'bridge.preferences').at(-1).autoApprove, true);
+});
+
+test('active polls keep a newly selected agent and persist it as the next preference', async () => {
+  const active = { connected: true, session: { phase: 'waiting_model', agentId: 'agent-1', toolNames: [], automatic: false }, tools: [], agents: [{ id: 'agent-1', name: 'A' }, { id: 'agent-2', name: 'B' }], autoSettings: { agentId: 'agent-1', toolNames: [], consent: true, automatic: false } };
+  const p = createPanel();
+  await p.update(active);
+  await p.select('agents', 'agent-2');
+  await p.update(active);
+  assert.equal(p.get('agents').querySelectorAll('input:checked')[0].value, 'agent-2');
+  assert.equal(p.messages.find(x => x.type === 'bridge.preferences').agentId, 'agent-2');
+});
+
+test('arm sends auto-approval preference', async () => {
+  const p = createPanel();
+  await p.update({ connected: true, session: { phase: 'idle' }, tools: [{ name: 'read_file' }], agents: [] });
+  p.get('consent').checked = true;
+  await p.change('auto-approve', true);
+  await p.click('arm');
+  assert.equal(p.messages.find(x => x.type === 'bridge.arm').autoApprove, true);
+});
+
 test('late saved consent hydrates during an active session without replacing active choices', async () => {
   const p = createPanel();
   await p.update({ connected: true, session: { phase: 'idle' }, tools: [], agents: [], autoSettings: {} });

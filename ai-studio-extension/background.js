@@ -11,7 +11,8 @@ async function restore() {
   try {
     const data=await chrome.storage.session.get(KEY);
     if(data[KEY])state=data[KEY];
-    const {bridgeAuto}=await chrome.storage.local.get('bridgeAuto');state.autoSettings=bridgeAuto||{enabled:false};
+    const {bridgeAuto}=await chrome.storage.local.get('bridgeAuto');state.autoSettings=bridgeAuto?{...bridgeAuto,autoApprove:!!bridgeAuto.autoApprove}:{enabled:false,autoApprove:false};
+    state.session.autoApprove=Object.hasOwn(state.session,'autoApprove')?!!state.session.autoApprove:state.autoSettings.autoApprove;
     state.hideServiceMessages=!!(await chrome.storage.local.get('hideServiceMessages')).hideServiceMessages;
     let fresh=false;
     if(!state.accessToken&&!state.demoMode){const {bridgeAuth}=await chrome.storage.local.get('bridgeAuth');if(bridgeAuth?.accessToken){Object.assign(state,bridgeAuth);state.connected=true;fresh=true;}}
@@ -51,9 +52,12 @@ async function command(m) {
     case 'bridge.preferences':
       {const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
       const agentId=m.agentId??previous.agentId??'',toolNames=Array.isArray(m.toolNames)?m.toolNames:previous.toolNames||[],consent=m.consent===true;
-      const settings={enabled:consent&&!!agentId&&toolNames.length>0,agentId,toolNames,automatic:m.automatic??previous.automatic??false,consent};
+      const autoApprove=!!(m.autoApprove??previous.autoApprove??false),wasAutoApproving=!!state.session.autoApprove;
+      const settings={enabled:consent&&!!agentId&&toolNames.length>0,agentId,toolNames,automatic:m.automatic??previous.automatic??false,autoApprove,consent};
       await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;
       if(m.automatic!==undefined)state.session.automatic=!!m.automatic;
+      state.session.autoApprove=autoApprove;
+      if(!wasAutoApproving&&m.autoApprove===true&&autoApprove&&consent&&settings.enabled&&settings.agentId===state.session.agentId&&state.session.toolNames?.includes(state.session.pendingCall?.name)&&state.session.phase==='waiting_approval'&&state.session.pendingCall&&!state.session.paused)await dispatch();
       if(!m.consent&&!['idle','stopped','paused'].includes(state.session.phase)){state.session.pausedPhase=state.session.phase;state.session.paused=true;state.session.phase='paused';}
       }
       updateAutoStatus();
@@ -82,7 +86,7 @@ async function connect({gateUrl,clientId}) {
   token=data.access_token;state.accessToken=token;state.demoMode=false;client=WebCodexMCP.createClient({baseUrl:url.origin,token});const init=await client.initialize();state.gateInstructions=typeof init?.instructions==='string'?init.instructions:'';const all=await client.listTools();state.tools=all.filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();state.connected=true;state.gateUrl=url.origin;state.clientId=clientId;state.session.phase='idle';demo=false;
 }
 function base64url(bytes){return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
-async function rememberAuto(m){if(!demo){const settings={enabled:true,agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,consent:true};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus(settings);}}
+async function rememberAuto(m){if(!demo){const settings={enabled:true,agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,consent:true};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus(settings);}}
 async function disableAuto(){const {bridgeAuto={}}=await chrome.storage.local.get('bridgeAuto');const settings={...bridgeAuto,enabled:false};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus();}
 async function migrateAutoSetup(){
   const {bridgeAutoSetupV1}=await chrome.storage.local.get('bridgeAutoSetupV1');
@@ -95,7 +99,7 @@ async function migrateAutoSetup(){
   const tools=(previous.toolNames||[]).filter(n=>safe.includes(n));
   const selected=tools.length?tools:safe;
   if(!agent||agent.online===false||!selected.length)return;
-  const settings={enabled:true,agentId:String(agent.id??agent.name),toolNames:selected,automatic:true,consent:true};
+  const settings={enabled:true,agentId:String(agent.id??agent.name),toolNames:selected,automatic:true,autoApprove:!!previous.autoApprove,consent:true};
   await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;
 }
 function updateAutoStatus(settings=state.autoSettings||{enabled:false}) {
@@ -138,10 +142,10 @@ async function autoStart(sender,m){
   if(!settings&&state.connected&&!demo&&s.agentId&&s.toolNames?.length&&!s.paused&&!['idle','stopped'].includes(s.phase)){
     await rememberAuto(s);settings=(await chrome.storage.local.get('bridgeAuto')).bridgeAuto;
   }
-  state.autoSettings=settings||{enabled:false};
+  state.autoSettings=settings||{enabled:false,autoApprove:false};
   if(settings?.enabled&&!state.connected&&!demo) {updateAutoStatus(settings);return {accepted:false};}
   const refreshed=await refreshForAutoStart(settings);
-  await migrateAutoSetup();settings=(await chrome.storage.local.get('bridgeAuto')).bridgeAuto||settings;state.autoSettings=settings;
+  await migrateAutoSetup();settings=(await chrome.storage.local.get('bridgeAuto')).bridgeAuto||settings;state.autoSettings=settings;if(settings)settings.autoApprove=!!settings.autoApprove;
   const status=updateAutoStatus(settings);
   if(!settings?.enabled||!settings.consent||!state.connected||demo||!refreshed||status!=='Готово')return {accepted:false};
   if(m.pageInstance&&s.pageInstance===m.pageInstance&&s.tabId===sender.tab.id)return {accepted:true};
@@ -166,7 +170,7 @@ async function arm(m) {
   const selected=m.toolNames.map(name=>state.tools.find(t=>t.name===name));if(selected.some(x=>!x))throw Error('Unknown selected tool');
   const tab=await chrome.tabs.get(m.tabId);if(!tab.url?.startsWith('https://aistudio.google.com/'))throw Error('Active tab must be AI Studio');
   if(!demo&&!state.connected)throw Error('Connect to Gate first');
-  state.session={phase:'arming',agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,paused:false,turn:uuid(),instructions:'',customInstructions:'',pendingCall:null,resultText:'',error:'',count:0,budgetStart:Date.now(),tabId:m.tabId,sessionId:uuid(),conversationKey:''};await save();
+  state.session={phase:'arming',agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,paused:false,turn:uuid(),instructions:'',customInstructions:'',pendingCall:null,resultText:'',error:'',count:0,budgetStart:Date.now(),tabId:m.tabId,sessionId:uuid(),conversationKey:''};await save();
   try {let snap;const message={type:'studio.arm',sessionId:state.session.sessionId,hideServiceMessages:!!state.hideServiceMessages};
     try{snap=await chrome.tabs.sendMessage(m.tabId,message);}catch(e){
       if(!/Receiving end does not exist|Could not establish connection/i.test(String(e.message||e)))throw e;
@@ -195,7 +199,7 @@ async function studioMessage(m,sender) {
     else if(s.phase==='waiting_model'||s.phase==='ready'){
       try {const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const call=WebCodexProtocol.parseCall(m.text,s.turn,tools);
         if(!call){s.resultText='';s.finalText=m.text;s.phase='ready';await chrome.tabs.sendMessage(s.tabId,{type:'studio.cleanup',sessionId:s.sessionId,enabled:!!state.hideServiceMessages,final:true,operationIds:s.completedOperationIds||[]}).catch(()=>{});}
-        else {s.pendingCall={...call,turn:s.turn};s.phase=SAFE.has(call.name)?'ready':'waiting_approval';s.error='';if(s.phase==='ready'){await save();await dispatch();}}
+        else {s.pendingCall={...call,turn:s.turn};s.phase=SAFE.has(call.name)?'ready':s.autoApprove?'ready':'waiting_approval';s.error='';if(s.phase==='ready'){await save();await dispatch();}}
       } catch(e){s.paused=true;s.phase='paused';s.error=String(e.message||e);}
     }
     await save();return {accepted:!s.paused};

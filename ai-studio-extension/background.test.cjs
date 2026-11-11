@@ -22,7 +22,7 @@ function harness(stored={}, failInitialize=false, localStore={}, clientOverride=
 }
 function message(h,msg,sender){return new Promise(resolve=>{const async=h.listeners.message(msg,sender,resolve);if(async!==true)resolve(undefined);});}
 test('browser restart restores only credentials, refreshes tools and never starts a chat',async()=>{
-  const auto={enabled:true,agentId:'a',toolNames:['read_file'],automatic:true,consent:true};
+  const auto={enabled:true,agentId:'a',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true};
   const localStore={bridgeAuth:{gateUrl:'https://gate.example',clientId:'client',accessToken:'saved-secret'},bridgeAuto:auto};
   const mcp={createClient:()=>({initialize:async()=>({}),listTools:async()=>[{name:'read_file'}],listAgents:async()=>[{id:'a',online:true}]})};
   const h=harness({},false,localStore,mcp),panel={url:'chrome-extension://test-id/panel.html'};

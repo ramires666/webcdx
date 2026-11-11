@@ -64,7 +64,7 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
   const message = (msg, sender = panel) => new Promise(resolve => { const async = listeners.message(msg, sender, resolve); if (async !== true) resolve(undefined); });
   const status = () => message({ type: 'bridge.status' });
   const alarm = async () => { listeners.alarm({ name: 'webcodex-recover' }); await status(); };
-  const call = async (turn, sender = page) => message({ type: 'studio.call', sessionId: 'session-1', conversationKey: 'chat-1', generating: false, text: '```webcodex-call\n' + JSON.stringify({ v: 1, turn, name: 'read_file', arguments: { path: 'safe.txt' } }) + '\n```' }, sender);
+  const call = async (turn, sender = page, name = 'read_file') => message({ type: 'studio.call', sessionId: 'session-1', conversationKey: 'chat-1', generating: false, text: '```webcodex-call\n' + JSON.stringify({ v: 1, turn, name, arguments: { path: 'safe.txt' } }) + '\n```' }, sender);
   return { localData, chrome, message, status, call, alarm, listeners, panel, page, calls, pageMessages, db, token: TOKEN, advanceTime(ms){clock+=ms;}, get createCount() { return createCount; }, get deliveryCount() { return deliveryCount; } };
 }
 function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -91,6 +91,36 @@ test('restored token stays private; tab is bound and one operation delivers adve
 test('restoring a pending approval never dispatches it', async () => {
   const h = harness(saved('waiting_approval', 'write_file')); await h.status(); await h.alarm();
   assert.equal(h.createCount, 0, 'restored approval must wait for explicit user approval');
+});
+
+test('auto approval is opt-in, applies live, and never replays a restored approval', async () => {
+  const h=harness(saved('waiting_model','write_file'));await h.status();
+  assert.equal((await h.call('turn-1',h.page,'write_file')).ok,true);
+  assert.equal((await h.status()).state.session.phase,'waiting_approval');assert.equal(h.createCount,0);
+  await h.message({type:'bridge.preferences',agentId:'agent-1',toolNames:['write_file'],automatic:false,consent:true,autoApprove:true});
+  assert.equal(h.createCount,1);
+  await h.message({type:'bridge.preferences',agentId:'agent-1',toolNames:['write_file'],automatic:false,consent:true,autoApprove:true});
+  assert.equal(h.createCount,1,'repeated preference messages cannot dispatch twice');
+  const fresh=harness(saved('waiting_model','write_file'));await fresh.status();
+  await fresh.message({type:'bridge.preferences',agentId:'agent-1',toolNames:['write_file'],consent:true,autoApprove:true});
+  await fresh.call('turn-1',fresh.page,'write_file');assert.equal(fresh.createCount,1);
+
+  const off=harness(saved('waiting_model','write_file'));await off.status();
+  await off.message({type:'bridge.preferences',agentId:'agent-1',toolNames:['write_file'],consent:true,autoApprove:true});
+  await off.message({type:'bridge.preferences',agentId:'agent-1',toolNames:['write_file'],consent:true,autoApprove:false});
+  await off.call('turn-1',off.page,'write_file');
+  assert.equal((await off.status()).state.session.phase,'waiting_approval');assert.equal(off.createCount,0);
+
+  const noConsent=harness(saved('waiting_model','write_file'));await noConsent.status();
+  await noConsent.call('turn-1',noConsent.page,'write_file');
+  await noConsent.message({type:'bridge.preferences',agentId:'agent-1',toolNames:['write_file'],consent:false,autoApprove:true});
+  assert.equal(noConsent.createCount,0);
+
+  const restored=harness(saved('waiting_approval','write_file'),{}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['write_file'],automatic:false,autoApprove:true,consent:true}});
+  await restored.status();await restored.alarm();
+  assert.equal(restored.createCount,0);
+  await restored.message({type:'bridge.preferences',agentId:'agent-1',toolNames:['write_file'],consent:true,autoApprove:true});
+  assert.equal(restored.createCount,0,'re-sending an already enabled preference is not a new opt-in');
 });
 
 test('arming injects a missing content receiver only into a verified AI Studio tab', async () => {
@@ -177,7 +207,7 @@ test('cleanup preference survives worker restart and final prose includes comple
 });
 
 test('automatic start respects drafts, pending operations, another bound tab and explicit stop',async()=>{
-  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
+  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true};
   let empty=false;
   const h=harness(saved('idle'),{sendMessage:async(_id,msg)=>({ok:msg.type!=='studio.stage'||empty,supported:true,conversationKey:'chat-1'})});
   h.localData.bridgeAuto=settings;
@@ -206,7 +236,7 @@ test('automatic start respects drafts, pending operations, another bound tab and
 
 test('saved preferences survive restart and offline discovery; hello retries after agent returns without OAuth',async()=>{
   let online=false, toolLookups=0, oauth=0;
-  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
+  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true};
   const initial=saved('idle');initial.agents=[];initial.tools=[];
   const h=harness(initial,{listAgents:()=>[{id:'agent-1',online}],listTools:()=>{toolLookups++;return online?[tool()]:[{name:'list_agents'}];}}, {bridgeAuto:settings});
   h.chrome.identity.launchWebAuthFlow=async()=>{oauth++;throw Error('should not request OAuth');};
@@ -239,10 +269,10 @@ test('one-time migration selects a sole online agent and safe tools without a cl
     const h=harness(initial,{listAgents:()=>[{id:'agent-1',online}],listTools:()=>[tool(),tool('write_file')]},{bridgeAutoSetupV1:false});
     let oauth=0;h.chrome.identity.launchWebAuthFlow=async()=>{oauth++;throw Error('unexpected OAuth');};
     const status=await h.status();
-    if(startOnline){assert.deepEqual(status.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true});assert.equal(h.localData.bridgeAutoSetupV1,true);}
+    if(startOnline){assert.deepEqual(status.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true});assert.equal(h.localData.bridgeAutoSetupV1,true);}
     else {assert.equal(h.localData.bridgeAutoSetupV1,false);assert.equal(h.localData.bridgeAuto,undefined);}
     assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,startOnline);
-    if(!startOnline){online=true;h.advanceTime(5001);const returned=await h.status();assert.deepEqual(returned.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true});assert.equal(h.localData.bridgeAutoSetupV1,true);assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,true);}
+    if(!startOnline){online=true;h.advanceTime(5001);const returned=await h.status();assert.deepEqual(returned.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true});assert.equal(h.localData.bridgeAutoSetupV1,true);assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,true);}
     assert.equal(oauth,0);
   }
 });
@@ -267,7 +297,7 @@ test('migration waits on ambiguous agents and manual stop prevents future migrat
 });
 
 test('preferences persist revoked consent and an empty tool selection without restoring old values',async()=>{
-  const h=harness(saved('idle'),{}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true}});
+  const h=harness(saved('idle'),{}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true}});
   await h.status();
   await h.message({type:'bridge.preferences',agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:false});
   assert.equal(h.localData.bridgeAuto.enabled,false);assert.equal(h.localData.bridgeAuto.consent,false);
