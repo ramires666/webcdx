@@ -70,19 +70,17 @@ function setup({ draft = '', extraEditors = 0, generating = false, spinnerClass 
   return { adapter: createAdapter(document, location), location, editor, wrapper, run, user, model, chunk, root, document };
 }
 
-test('conversation key ignores query-only changes but tracks pathname and explicit IDs', () => {
+test('conversation key uses only pathname and ignores query or DOM ID changes', () => {
   const state = setup();
   const original = state.adapter.inspect().conversationKey;
   state.location.search = '?settings=changed';
   assert.equal(state.adapter.inspect().conversationKey, original);
+  state.document.documentElement.attrs['data-conversation-id'] = 'thread-1';
+  assert.equal(state.adapter.inspect().conversationKey, original);
+  state.document.documentElement.attrs['data-conversation-id'] = 'thread-2';
+  assert.equal(state.adapter.inspect().conversationKey, original);
   state.location.pathname = '/prompts/p2';
   assert.notEqual(state.adapter.inspect().conversationKey, original);
-
-  const identified = setup();
-  identified.document.documentElement.attrs['data-conversation-id'] = 'thread-1';
-  const withId = identified.adapter.inspect().conversationKey;
-  identified.document.documentElement.attrs['data-conversation-id'] = 'thread-2';
-  assert.notEqual(identified.adapter.inspect().conversationKey, withId);
 });
 
 function systemSetup({ original = 'Keep these user instructions.', saveDelay = false, malformed = false, duplicatePanels = false, saveCloses = false } = {}) {
@@ -608,7 +606,7 @@ test('aborts if the staged draft or conversation changes while waiting', async (
   moved.run.disabled = true;
   const movedSubmit = moved.adapter.submit('draft');
   await new Promise(resolve => setTimeout(resolve, 10));
-  moved.document.documentElement.attrs['data-conversation-id'] = 'new-thread';
+  moved.location.pathname = '/prompts/p2';
   assert.equal(await movedSubmit, false);
   assert.equal(moved.run.clicked, undefined);
 });

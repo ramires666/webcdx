@@ -10,7 +10,7 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.2.12)
+## AI Studio Bridge (alpha 0.2.13)
 
 The Chrome extension connects an ordinary AI Studio chat to Gate and a selected
 local agent through Gate OAuth. It uses the open AI Studio page, so no model API
@@ -25,8 +25,9 @@ task. A short explanation may precede one fenced call; no `Active turn` or
 ```
 ~~~
 
-The first transition from a new chat to its first saved URL preserves the
-session when no Gate operation is pending. Moving to another saved chat is
+The saved URL path identifies the chat; query parameters and DOM identifiers
+do not affect the binding. The first transition from a new chat to its saved
+URL preserves the session even while a Gate operation is pending. Moving to another saved chat is
 guarded and does not carry the session or its result across. The extension also
 removed the forced pause after 10 calls or 5 minutes and the automatic pause
 for results over 32 KiB; the existing 2 MiB transport limit remains. AI Studio

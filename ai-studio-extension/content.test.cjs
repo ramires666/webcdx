@@ -263,6 +263,26 @@ test('a saved-address acknowledgement updates the local binding without losing t
   assert.equal(calls.length,1);assert.equal(calls[0].conversationKey,'/prompts/saved-chat');
 });
 
+test('first saved route adopts locally for delivery and recovery snapshots', async () => {
+  const h=harness();h.state.conversationKey='/prompts/new_chat';await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  const text=JSON.stringify({type:'webcodex-result',operation_id:'first-save'});h.state.conversationKey='/prompts/saved-chat';
+  const delivery=await h.send({type:'studio.deliver',sessionId:'s1',text,submit:true});
+  assert.equal(delivery.ok,true);assert.equal(h.submitted.length,1);assert.equal(h.submitted[0],text);
+  await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'first-save'});
+  const call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
+  h.state.latestUser={text:'request'};h.state.latestModel={text:call};h.state.modelAfterUser=true;
+  await h.send({type:'studio.arm',sessionId:'s1',turnless:true,recover:true,recoverTurn:'',toolNames:[{name:'tool',inputSchema:{type:'object',properties:{},additionalProperties:false}}],expectedConversationKey:'/prompts/saved-chat'});
+  await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'first-save'});await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+});
+
+test('first-save adoption does not adopt another already saved route', async () => {
+  const h=harness();h.state.conversationKey='/prompts/other-chat';await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.state.conversationKey='/prompts/saved-chat';
+  const result=await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'webcodex-result',operation_id:'wrong-chat'}),submit:true});
+  assert.equal(result.ok,false);assert.equal(h.submitted.length,0);
+});
+
 test('turnless accepts the same call once for each user and deduplicates rerenders', async () => {
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
   const call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';

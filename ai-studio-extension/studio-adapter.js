@@ -58,12 +58,6 @@
     return matches.length === 1 ? matches[0] : null;
   };
   const conversationKey = () => {
-    for (const node of [document.documentElement, document.body]) {
-      for (const name of ['data-conversation-id', 'data-thread-id', 'data-prompt-id']) {
-        const value = node && attr(node, name);
-        if (value) return `${location.pathname}#${name}=${value}`;
-      }
-    }
     return location.pathname;
   };
   const editorValue = (el) => el.isContentEditable || attr(el, 'contenteditable') === 'true' ? text(el) : String(el.value || '');

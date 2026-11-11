@@ -481,8 +481,8 @@ test('the first saved address keeps the active temporary chat session', async ()
   assert.equal(h.createCount,1);
 });
 
-test('saving does not bypass a pending operation or a different saved chat', async () => {
-  for(const blocked of [{conversationKey:'/prompts/other-saved-chat'}, {conversationKey:'/prompts/new_chat',operationKey:'pending-key',pendingCall:{name:'read_file',arguments:{path:'safe.txt'}}}]){
+test('saving does not bypass a different saved chat or manual pause', async () => {
+  for(const blocked of [{conversationKey:'/prompts/other-saved-chat'}, {conversationKey:'/prompts/new_chat',paused:true,userPaused:true,phase:'paused'}]){
     const initial=saved();Object.assign(initial.session,{turnless:true,...blocked});
     const h=harness(initial);await h.status();
     await h.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'/prompts/new-saved-chat'},h.page);
@@ -490,6 +490,33 @@ test('saving does not bypass a pending operation or a different saved chat', asy
     assert.equal((await h.status()).state.session.conversationKey,blocked.conversationKey);
     assert.equal(h.createCount,0);
   }
+});
+
+test('the first saved address preserves pending operations and their delivery state', async () => {
+  for(const phase of ['waiting_approval','recovering','result_ready','delivery_uncertain']){
+    const initial=saved(phase);Object.assign(initial.session,{turnless:true,conversationKey:'/prompts/new_chat',pendingCall:{name:'read_file',arguments:{path:'safe.txt'}},operationKey:'existing-key',operationId:'op-1',resultText:'existing result',nextTurn:'next-internal'});
+    const h=harness(initial);await h.status();
+    const key='/prompts/saved-chat';
+    assert.equal((await h.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:key},h.page)).conversationKey,key);
+    const session=(await h.status()).state.session;
+    assert.equal(session.phase,phase);assert.equal(session.conversationKey,key);assert.equal(session.sessionId,'session-1');
+    assert.equal(session.operationKey,'existing-key');assert.equal(session.operationId,'op-1');assert.equal(session.resultText,'existing result');
+    assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);assert.equal(h.pageMessages.some(msg=>msg.type==='studio.arm'),false);
+    assert.equal((await h.message({type:'studio.tick',sessionId:'session-1',supported:true,conversationKey:'/prompts/new_chat'},h.page)).conversationKey,key,'a delayed old-address tick does not pause the saved chat');
+    assert.equal((await h.status()).state.session.phase,phase);
+  }
+});
+
+test('delivery can acquire the saved address before the next observer tick', async () => {
+  const initial=saved('result_ready');
+  const text=JSON.stringify({type:'webcodex-result',v:1,operation_id:'op-old',name:'read_file',result:{content:[]}});
+  Object.assign(initial.session,{turnless:true,conversationKey:'/prompts/new_chat',pendingCall:{name:'read_file',arguments:{}},operationKey:'old-key',operationId:'op-old',resultText:text,nextTurn:'next-internal'});
+  const key='/prompts/saved-chat';
+  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.deliver'?{ok:true,confirmed:true,supported:true,conversationKey:key}:{ok:true}});await h.status();
+  assert.equal((await h.message({type:'bridge.deliver',submit:true})).ok,true);
+  const session=(await h.status()).state.session;
+  assert.equal(session.phase,'waiting_model');assert.equal(session.conversationKey,key);assert.equal(h.createCount,0);
+  assert.equal(h.pageMessages.filter(msg=>msg.type==='studio.deliver').length,1);
 });
 
 test('reload recovers a temporary chat paused when it first acquired a saved address', async () => {
@@ -502,6 +529,16 @@ test('reload recovers a temporary chat paused when it first acquired a saved add
   const session=(await h.status()).state.session;
   assert.equal(session.phase,'waiting_model');assert.equal(session.conversationKey,key);assert.equal(session.turnless,true);
   assert.equal(h.createCount,0);assert.equal(h.pageMessages.find(msg=>msg.type==='studio.stage').text,'');
+});
+
+test('reload clears the old DOM-identity pause on the same saved URL without replaying history', async () => {
+  const key='/prompts/saved-chat';
+  const initial=saved('paused');Object.assign(initial.session,{turnless:true,paused:true,resumeBlocked:true,error:'Conversation changed',conversationKey:key+'#data-conversation-id=old-dom-marker'});
+  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
+  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:key}:{ok:true}},{bridgeAuto:settings});await h.status();
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},{...h.page,url:'https://aistudio.google.com'+key})).accepted,true);
+  assert.equal((await h.status()).state.session.phase,'waiting_model');assert.equal(h.createCount,0);
+  assert.equal(h.pageMessages.find(msg=>msg.type==='studio.stage').text,'');
 });
 
 test('a new chat can retry startup after a temporary Gate refresh failure', async () => {
@@ -677,11 +714,11 @@ test('legacy oversized result reload is verified before one automatic delivery',
   assert.equal(manual.pageMessages.some(m=>m.type==='studio.arm'&&m.recover),false);assert.equal(manual.createCount,0);assert.equal(manual.deliveryCount,0);
 });
 
-test('legacy query migration preserves the prompt path and conversation id',async()=>{
+test('legacy query and DOM identity markers migrate to the saved URL path',async()=>{
   const initial=saved('delivery_uncertain');
   initial.session.conversationKey='/app/prompts/test?legacy=1#data-conversation-id=chat-1';
   Object.assign(initial.session,{resultText:'saved',operationId:'op-1',nextTurn:'turn-2'});
-  const key='/app/prompts/test#data-conversation-id=chat-1';
+  const key='/app/prompts/test';
   const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:key}:msg.type==='studio.snapshot'?{supported:true,conversationKey:key,delivered:true}:{ok:true}}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true}});
   await h.status();
   assert.equal((await h.status()).state.session.conversationKey,key);
@@ -692,11 +729,11 @@ test('legacy query migration preserves the prompt path and conversation id',asyn
   assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
 });
 
-test('paused conversation change recovers only on the same path and conversation id',async()=>{
-  const key='/app/prompts/test#data-conversation-id=chat-1';
+test('paused conversation change recovers only on the same saved path',async()=>{
+  const key='/app/prompts/test';
   const make=()=>{const initial=saved('paused');Object.assign(initial.session,{paused:true,resumeBlocked:true,conversationKey:key,resultText:'saved',operationId:'op-1',nextTurn:'turn-2',pageInstance:'old-page',error:'Conversation changed'});return initial;};
   const auto={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true};
-  for(const mismatch of ['/app/prompts/other#data-conversation-id=chat-1','/app/prompts/test#data-conversation-id=other']){
+  for(const mismatch of ['/app/prompts/other','/app/prompts/another']){
     const h=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:mismatch}:{supported:true,conversationKey:mismatch,delivered:true}}, {bridgeAuto:auto});
     await h.status();
     assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,false);

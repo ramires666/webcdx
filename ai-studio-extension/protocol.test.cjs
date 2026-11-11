@@ -69,3 +69,9 @@ test('turnless system instructions omit active turn requirements', () => {
   assert.doesNotMatch(system,/no prose or additional calls/);
   assert.doesNotMatch(system,/active turn|next_turn|"turn"/i);
 });
+
+test('command instructions discover the agent working directory before assuming an operating system', () => {
+  const prompt=buildSystemInstructions({agentId:'windows-agent',turnless:true,tools:[...tools,{name:'list_allowed_roots',inputSchema:{type:'object',properties:{}}}]});
+  assert.match(prompt,/Before the first command in this chat, call list_allowed_roots/);
+  assert.match(prompt,/do not assume the operating system/);
+});

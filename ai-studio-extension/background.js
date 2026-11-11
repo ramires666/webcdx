@@ -11,7 +11,7 @@ async function restore() {
   try {
     const data=await chrome.storage.session.get(KEY);
     if(data[KEY])state=data[KEY];
-    if(state.session.conversationKey)state.session.conversationKey=state.session.conversationKey.replace(/^([^?#]*)\?[^#]*(#.*)?$/, '$1$2');
+    if(state.session.conversationKey)state.session.conversationKey=state.session.conversationKey.split(/[?#]/)[0];
     const {bridgeAuto}=await chrome.storage.local.get('bridgeAuto');state.autoSettings=bridgeAuto?{...bridgeAuto,autoApprove:!!bridgeAuto.autoApprove}:{enabled:false,autoApprove:false};
     state.session.autoApprove=Object.hasOwn(state.session,'autoApprove')?!!state.session.autoApprove:state.autoSettings.autoApprove;
     state.hideServiceMessages=!!(await chrome.storage.local.get('hideServiceMessages')).hideServiceMessages;
@@ -177,7 +177,8 @@ async function autoStart(sender,m){
     const existing=await chrome.tabs.get(s.tabId).catch(()=>null);
     if(existing)return {accepted:false};
   }
-  const promoted=s.turnless&&s.error==='Conversation changed'&&savedChatPromotion(s.conversationKey,new URL(sender.url).pathname);
+  const pagePath=new URL(sender.url).pathname;
+  const promoted=s.turnless&&s.error==='Conversation changed'&&(savedChatPromotion(s.conversationKey,pagePath)||s.conversationKey===pagePath);
   if((s.paused&&s.phase!=='stopped'&&!promoted&&!(m.conversationReplaced&&!s.userPaused&&['Conversation changed','Conversation was replaced'].includes(s.error)))||s.userPaused)return {accepted:false};
   await clearSession();
   try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
@@ -230,12 +231,16 @@ async function stageInstructions(){const s=state.session;const selected=s.toolNa
 function savedChatPromotion(from,to){
   return /^\/(?:app\/)?prompts\/new_chat$/.test(String(from).split('#')[0])&&/^\/(?:app\/)?prompts\/(?!new_chat$)[^/#?]+$/.test(String(to).split('#')[0]);
 }
+function adoptSavedChat(s,key){if(s.turnless&&!s.userPaused&&savedChatPromotion(s.conversationKey,key)){s.temporaryConversationKey=s.conversationKey;s.conversationKey=key;return true;}return false;}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
-  if(['studio.snapshot','studio.tick'].includes(m.type)&&s.turnless&&!m.conversationReplaced&&m.supported&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&['waiting_model','ready','paused'].includes(s.phase)&&(!s.paused||s.error==='Conversation changed')&&savedChatPromotion(s.conversationKey,m.conversationKey)){
-    s.conversationKey=m.conversationKey;
+  if(!m.conversationReplaced&&s.temporaryConversationKey&&m.conversationKey===s.temporaryConversationKey&&s.conversationKey!==m.conversationKey)return {accepted:m.type!=='studio.call',conversationKey:s.conversationKey};
+  if(['studio.snapshot','studio.tick'].includes(m.type)&&s.turnless&&!m.conversationReplaced&&m.supported&&!s.userPaused&&!['idle','stopped','arming'].includes(s.phase)&&(!s.paused||s.error==='Conversation changed')&&savedChatPromotion(s.conversationKey,m.conversationKey)){
+    adoptSavedChat(s,m.conversationKey);
     if(s.paused){s.paused=false;s.resumeBlocked=false;s.phase=s.pausedPhase||'waiting_model';s.pausedPhase='';s.error='';}
-    await save();return {accepted:true,conversationKey:s.conversationKey};
+    await save();
+    if(s.phase==='result_ready'&&s.automatic)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}
+    return {accepted:true,conversationKey:s.conversationKey};
   }
   if(!m.conversationReplaced&&m.conversationKey===s.conversationKey&&s.phase==='paused'&&s.error==='Conversation changed'&&recoverableDelivery(s)&&(m.type==='studio.call'||m.supported)){
     s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.pausedPhase='';s.error='Checking whether the saved result reached this chat';
@@ -277,7 +282,7 @@ async function dispatch(){const s=state.session,p=s.pendingCall;if(!p)throw Erro
     await finishResult(result);
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);s.phase='recovering';await save();}
 }
-async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey});if(chk?.conversationKey!==s.conversationKey||!chk?.supported){s.error='Conversation changed; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
+async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey});if(chk?.supported&&adoptSavedChat(s,chk.conversationKey))await save();if(chk?.conversationKey!==s.conversationKey||!chk?.supported){s.error='Conversation changed; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
   if(s.phase!=='recovering'||!s.pendingCall)return;
   try{let result;if(demo)result={content:[{type:'text',text:'DEMO MODE: sample content'}],isError:false};else if(s.operationId)result=await client.getOperation(s.operationId);else result=await client.createOperation({key:s.operationKey,name:s.pendingCall.name,arguments:s.dispatchArgs,agentId:s.agentId});
     if(['accepted','dispatching','starting','running'].includes(result?.status)){s.operationId=result.operation_id||result.id||s.operationId;await save();return;}
@@ -285,7 +290,7 @@ async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);await save();}
 }
 async function finishResult(result){const s=state.session;s.operationId=result?.operation_id||result?.id||s.operationId;if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:toolResult,error:transportError});s.phase='result_ready';await save();if(s.automatic&&!s.paused)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}
-async function deliver(submit){const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a webcodex-result can be delivered');}if(envelope.type!=='webcodex-result')throw Error('Only a webcodex-result can be delivered');if(s.phase==='delivery_uncertain')throw Error('Delivery status is unknown; check AI Studio before taking action');if(submit){s.phase='delivery_uncertain';await save();}let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit});}catch(e){throw Error('Delivery status is unknown; do not send again');}if(r?.conversationKey!==s.conversationKey||!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('Conversation changed; delivery is blocked');}if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered');}if(!submit){s.phase='result_ready';await save();return;}if(r.confirmed){completeDelivery();await save();}}
+async function deliver(submit){const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a webcodex-result can be delivered');}if(envelope.type!=='webcodex-result')throw Error('Only a webcodex-result can be delivered');if(s.phase==='delivery_uncertain')throw Error('Delivery status is unknown; check AI Studio before taking action');if(submit){s.phase='delivery_uncertain';await save();}let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit});}catch(e){throw Error('Delivery status is unknown; do not send again');}if(r?.supported&&adoptSavedChat(s,r.conversationKey))await save();if(r?.conversationKey!==s.conversationKey||!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('Conversation changed; delivery is blocked');}if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered');}if(!submit){s.phase='result_ready';await save();return;}if(r.confirmed){completeDelivery();await save();}}
 function completeDelivery(){const s=state.session;if(s.operationId||s.operationKey)(s.completedOperationIds||=[]).push(s.operationId||s.operationKey);s.error='';s.phase='waiting_model';s.turn=s.nextTurn;s.pendingCall=null;s.resultText='';s.operationKey='';s.operationId='';s.dispatchArgs=null;s.count++;}
 async function stop(){
   const s=state.session;
