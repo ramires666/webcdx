@@ -17,6 +17,7 @@ function saved(phase = 'waiting_model', name = 'read_file') {
 }
 function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
   const localData = structuredClone(initialLocalData);
+  if (!Object.hasOwn(localData, 'bridgeAutoSetupV1')) localData.bridgeAutoSetupV1 = true;
   const listeners = {}, calls = [], pageMessages = [], db = { [KEY]: structuredClone(initial) };
   let createCount = 0, deliveryCount = 0, clock = Date.now();
   class TestDate extends Date { static now() { return clock; } }
@@ -229,6 +230,40 @@ test('Studio hello without saved preferences safely stays unarmed',async()=>{
   await h.status();
   const result=await h.message({type:'studio.hello'},h.page);
   assert.equal(result.accepted,false);assert.equal(result.error,undefined);
+});
+
+test('one-time migration selects a sole online agent and safe tools without a click or OAuth',async()=>{
+  for(const startOnline of [true,false]){
+    let online=startOnline;
+    const initial=saved('idle');initial.session={...initial.session,agentId:'',toolNames:[],pendingCall:null};
+    const h=harness(initial,{listAgents:()=>[{id:'agent-1',online}],listTools:()=>[tool(),tool('write_file')]},{bridgeAutoSetupV1:false});
+    let oauth=0;h.chrome.identity.launchWebAuthFlow=async()=>{oauth++;throw Error('unexpected OAuth');};
+    const status=await h.status();
+    if(startOnline){assert.deepEqual(status.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true});assert.equal(h.localData.bridgeAutoSetupV1,true);}
+    else {assert.equal(h.localData.bridgeAutoSetupV1,false);assert.equal(h.localData.bridgeAuto,undefined);}
+    assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,startOnline);
+    if(!startOnline){online=true;h.advanceTime(5001);const returned=await h.status();assert.deepEqual(returned.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true});assert.equal(h.localData.bridgeAutoSetupV1,true);assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,true);}
+    assert.equal(oauth,0);
+  }
+});
+
+test('legacy disabled settings migrate once, then stopped settings survive worker restart',async()=>{
+  const initial=saved('idle');initial.session={...initial.session,agentId:'',toolNames:[],pendingCall:null};
+  const h=harness(initial,{}, {bridgeAuto:{enabled:false},bridgeAutoSetupV1:false});
+  await h.status();assert.equal(h.localData.bridgeAuto.enabled,true);
+  await h.message({type:'bridge.stop'});
+  const restarted=harness(saved('idle'),{},h.localData);await restarted.status();
+  assert.equal(restarted.localData.bridgeAuto.enabled,false);
+  assert.equal(restarted.localData.bridgeAutoSetupV1,true);
+});
+
+test('migration waits on ambiguous agents and manual stop prevents future migration',async()=>{
+  const initial=saved('idle');initial.agents=[];initial.session={...initial.session,agentId:'',toolNames:[],pendingCall:null};
+  const h=harness(initial,{listAgents:()=>[{id:'a',online:true},{id:'b',online:true}],listTools:()=>[tool()]},{bridgeAutoSetupV1:false});
+  await h.status();assert.equal(h.localData.bridgeAuto,undefined);assert.equal(h.localData.bridgeAutoSetupV1,false);
+  await h.message({type:'bridge.stop'});
+  h.advanceTime(5001);await h.status();
+  assert.equal(h.localData.bridgeAuto.enabled,false);assert.equal(h.localData.bridgeAutoSetupV1,true);
 });
 
 test('preferences persist revoked consent and an empty tool selection without restoring old values',async()=>{

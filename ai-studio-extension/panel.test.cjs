@@ -150,6 +150,22 @@ test('active consent and automatic changes persist through bridge preferences', 
   assert.equal(updates[0].automatic, false); assert.equal(updates[1].consent, false);
 });
 
+test('late saved consent hydrates during an active session without replacing active choices', async () => {
+  const p = createPanel();
+  await p.update({ connected: true, session: { phase: 'idle' }, tools: [], agents: [], autoSettings: {} });
+  const saved = { agentId: 'agent-1', toolNames: ['read_file'], consent: true, automatic: true };
+  const active = { connected: true, session: { phase: 'waiting_model', agentId: 'agent-1', toolNames: ['read_file'], automatic: true }, tools: [{ name: 'read_file' }], agents: [{ id: 'agent-1', name: 'A' }], autoSettings: saved };
+  await p.update(active);
+  assert.equal(p.get('consent').checked, true);
+  assert.equal(p.get('automatic').checked, true);
+  assert.equal(p.get('agents').querySelectorAll('input:checked')[0].value, 'agent-1');
+  await p.change('consent', false);
+  await p.change('automatic', false);
+  await p.update(active);
+  assert.equal(p.get('consent').checked, false);
+  assert.equal(p.get('automatic').checked, false);
+});
+
 test('connect stays locked across status polls, ignores duplicate clicks, and unlocks on error', async () => {
   const permission = deferred(), connectReply = deferred(), p = createPanel({}, { permission, connectReply });
   await p.ready();

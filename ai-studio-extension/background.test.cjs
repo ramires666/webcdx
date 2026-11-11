@@ -7,6 +7,7 @@ const WebCodexProtocol=require('./protocol.js');
 const WebCodexMCP=require('./mcp-client.js');
 
 function harness(stored={}, failInitialize=false, localStore={}, clientOverride=null) {
+  if (!Object.hasOwn(localStore,'bridgeAutoSetupV1')) localStore.bridgeAutoSetupV1=true;
   const listeners={};const data={...stored};const sent=[];
   const event=()=>({addListener:fn=>{listeners[fn.name||Math.random()]=fn;}});
   const chrome={runtime:{id:'test-id',getURL:p=>'chrome-extension://test-id/'+p,onMessage:{addListener(fn){listeners.message=fn;}}},

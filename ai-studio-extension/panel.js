@@ -53,10 +53,10 @@
     renderChoices($('agents'), next.agents || [], 'agent');
     const availableTools = next.tools || [];
     renderChoices($('tools'), [...availableTools, ...(saved.toolNames || []).filter(name => !availableTools.some(tool => tool.name === name)).map(name => ({ name, description: 'недоступен, ожидаю агента' }))], 'tool');
+    if (!editedPreferences.has('consent') && typeof saved.consent === 'boolean') $('consent').checked = saved.consent;
     if (!session.phase || ['idle', 'stopped'].includes(session.phase)) {
       if (!editedPreferences.has('agentId') && saved.agentId) choose($('agents'), [String(saved.agentId)]);
       if (!editedPreferences.has('toolNames') && Array.isArray(saved.toolNames)) choose($('tools'), saved.toolNames);
-      if (!editedPreferences.has('consent') && typeof saved.consent === 'boolean') $('consent').checked = saved.consent;
       if (!editedPreferences.has('automatic') && typeof saved.automatic === 'boolean') $('automatic').checked = saved.automatic;
     }
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) {
