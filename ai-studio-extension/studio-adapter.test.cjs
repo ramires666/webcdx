@@ -63,7 +63,7 @@ function setup({ draft = '', extraEditors = 0, generating = false, spinnerClass 
   const stop = new Node('button', { 'aria-label': russian ? 'Отмена' : 'Stop' });
   const root = new Node('document'); root.children = [wrapper, ...moreEditors, ...turns, ...(withoutRun ? [] : [run]), ...(generating ? [stop] : [])];
   const document = { documentElement: new Node('html'), body: new Node('body'), defaultView: { InputEvent: class { constructor(type, init) { this.type = type; Object.assign(this, init); } } }, querySelectorAll(selector) { return root.querySelectorAll(selector); } };
-  return { adapter: createAdapter(document, { hostname, pathname: '/prompts/p1', search: '?x=2' }), editor, wrapper, run, user, model, chunk, root };
+  return { adapter: createAdapter(document, { hostname, pathname: '/prompts/p1', search: '?x=2' }), editor, wrapper, run, user, model, chunk, root, document };
 }
 
 test('uses the nested native editor, explicit turn classes, and exact delivery markers', () => {
@@ -97,19 +97,19 @@ test('recognizes duplicate Run aria and text labels with keyboard shortcut suffi
   assert.equal(setup({ runText: 'Run Ctrl+Enter' }).adapter.inspect().supported, true);
 });
 
-test('recognizes the observed Run icon text without aria and ignores rerun controls', () => {
+test('recognizes the observed Run icon text without aria and ignores rerun controls', async () => {
   const state = setup({ runText: 'Run\nkeyboard_return' });
   delete state.run.attrs['aria-label'];
   state.root.add(new Node('button', { 'aria-label': 'Rerun this turn' }, ''));
   assert.equal(state.adapter.inspect().supported, true);
-  assert.equal(state.adapter.submit('test prompt'), true);
+  assert.equal(await state.adapter.submit('test prompt'), true);
   assert.equal(state.run.clicked, true);
   const duplicate = setup({ runText: 'Run\nkeyboard_return' });
   duplicate.root.add(new Node('button', {}, 'Run\nkeyboard_return'));
   assert.equal(duplicate.adapter.inspect().supported, false);
 });
 
-test('ignores decorative Run icons and waits through missing generation controls', () => {
+test('ignores decorative Run icons and waits through missing generation controls', async () => {
   const state = setup({ runText: 'Run' });
   delete state.run.attrs['aria-label'];
   state.run.add(new Node('span', { 'aria-hidden': 'true', class: 'material-symbols-outlined' }, 'keyboard_return'));
@@ -118,10 +118,10 @@ test('ignores decorative Run icons and waits through missing generation controls
   state.run.hidden = true;
   assert.equal(state.adapter.inspect().supported, true);
   assert.equal(state.adapter.inspect().generating, true);
-  assert.equal(state.adapter.submit('must not send during transition'), false);
+  assert.equal(await state.adapter.submit('must not send during transition'), false);
   state.run.hidden = false;
   assert.equal(state.adapter.inspect().generating, false);
-  assert.equal(state.adapter.submit('ready'), true);
+  assert.equal(await state.adapter.submit('ready'), true);
 });
 test('CSS stoppable spinner and Stop-only generation remain observable but cannot stage', () => {
   const active = setup({ generating: true, spinnerClass: true, withoutRun: true });
@@ -179,25 +179,76 @@ test('removes thought content from detached clones and accepts only the exact AI
   assert.equal(setup({ hostname: 'preview.aistudio.google.com' }).adapter.inspect().supported, false);
   assert.equal(setup({ hostname: 'aistudio.google.com' }).adapter.inspect().supported, true);
 });
-test('submits only after staging and does not claim delivery until the marker appears', () => {
+test('submits only after staging and does not claim delivery until the marker appears', async () => {
   const { adapter, run } = setup();
-  assert.equal(adapter.submit('sent'), true);
+  assert.equal(await adapter.submit('sent'), true);
   assert.equal(run.clicked, true);
   assert.equal(adapter.hasDelivery('sent'), false);
 });
 
-test('recognizes an empty editor with disabled Run and only clicks after input enables it', () => {
+test('recognizes an empty editor with disabled Run and only clicks after input enables it', async () => {
   const state = setup({ empty: true });
   state.run.disabled = true;
   assert.equal(state.adapter.inspect().supported, true);
   state.editor.dispatchEvent = () => { state.run.disabled = false; };
-  assert.equal(state.adapter.submit('instructions'), true);
+  assert.equal(await state.adapter.submit('instructions'), true);
   assert.equal(state.run.clicked, true);
   for (const aria of [false, true]) {
     const blocked = setup({ empty: true });
     if (aria) blocked.run.attrs['aria-disabled'] = 'true'; else blocked.run.disabled = true;
-    assert.equal(blocked.adapter.submit('draft'), false);
+    assert.equal(await blocked.adapter.submit('draft'), false);
     assert.equal(blocked.editor.value, 'draft');
     assert.equal(blocked.run.clicked, undefined);
   }
+});
+
+test('waits for delayed Run activation, retries an owned unchanged draft, and prevents duplicate clicks', async () => {
+  const delayed = setup({ empty: true });
+  delayed.run.disabled = true;
+  const pending = delayed.adapter.submit('delayed');
+  await new Promise(resolve => setTimeout(resolve, 80));
+  delayed.run.disabled = false;
+  assert.equal(await pending, true);
+  assert.equal(delayed.run.clicked, true);
+
+  const retry = setup({ empty: true });
+  retry.run.disabled = true;
+  retry.document.defaultView.setTimeout = callback => queueMicrotask(callback);
+  assert.equal(await retry.adapter.submit('owned'), false);
+  retry.run.disabled = false;
+  assert.equal(await retry.adapter.submit('owned'), true);
+  assert.equal(retry.run.clicked, true);
+  assert.equal(await retry.adapter.submit('owned'), false);
+});
+
+test('aborts if the staged draft or conversation changes while waiting', async () => {
+  const edited = setup({ empty: true });
+  edited.run.disabled = true;
+  const editedSubmit = edited.adapter.submit('draft');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  edited.editor.value = 'user edit';
+  assert.equal(await editedSubmit, false);
+
+  const moved = setup({ empty: true });
+  moved.run.disabled = true;
+  const movedSubmit = moved.adapter.submit('draft');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  moved.document.documentElement.attrs['data-conversation-id'] = 'new-thread';
+  assert.equal(await movedSubmit, false);
+  assert.equal(moved.run.clicked, undefined);
+});
+
+test('waits through transient Run removal and rejects competing or stale submits', async () => {
+  const state = setup({ empty: true });
+  assert.equal(state.adapter.stage('one draft'), true);
+  state.run.hidden = true;
+  const pending = state.adapter.submit('one draft');
+  assert.equal(await state.adapter.submit('another draft'), false);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  state.run.hidden = false;
+  assert.equal(await pending, true);
+
+  const stale = setup({ empty: true });
+  assert.equal(await stale.adapter.submit('never stage', () => false), false);
+  assert.equal(stale.editor.value, '');
 });

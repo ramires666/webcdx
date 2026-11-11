@@ -5,6 +5,7 @@
   window.__webcodexBridgeLoaded = true;
   const adapter=WebCodexStudio.createAdapter(document,location);
   let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, sawModel=false, attempted=new Set();
+  let deliveryPending = false;
   const send=async(type,data={})=>{
     try{return await chrome.runtime.sendMessage({type,sessionId,...data});}
     catch(e){if(/Extension context invalidated/i.test(String(e.message||e))){sessionId='';clearTimeout(observerTimer);clearInterval(tickTimer);observer.disconnect();return {accepted:false};}throw e;}
@@ -36,11 +37,22 @@
     if(m.type==='studio.stage'){const s=adapter.inspect();const ok=s.supported&&s.conversationKey===conversationKey&&adapter.stage(m.text);reply({ok,...snapshot()});return;}
     if(m.type==='studio.snapshot'){reply(snapshot(m.operationId));return;}
     if(m.type==='studio.deliver'){
-      const s=adapter.inspect(),state=snapshot();if(!s.supported||!s.editorEmpty||s.generating||s.conversationKey!==conversationKey){reply({ok:false,attempted:false,...state});return;}
+      const s=adapter.inspect(),state=snapshot();if(!s.supported||(!m.submit&&!s.editorEmpty)||s.generating||s.conversationKey!==conversationKey){reply({ok:false,attempted:false,...state});return;}
       if(!m.submit){const ok=adapter.stage(m.text);reply({ok,attempted:false,...state});return;}
       if(lastDelivered===m.text){reply({ok:false,attempted:true,...state});return;}
+      if(deliveryPending){reply({ok:false,attempted:true,...state});return;}
       let operationId;try{const result=JSON.parse(m.text);if(result.type!=='webcodex-result')throw Error();operationId=result.operation_id;}catch{reply({ok:false,attempted:false,...state});return;}
-      const ok=adapter.submit(m.text);if(ok)lastDelivered=m.text;reply({ok,attempted:ok,confirmed:ok&&adapter.hasDelivery(operationId),...state});return;
+      const deliverySession=sessionId,deliveryConversation=conversationKey;
+      deliveryPending=true;
+      (async()=>{
+        try{
+          const ok=await adapter.submit(m.text,()=>sessionId===deliverySession&&conversationKey===deliveryConversation);
+          if(ok)lastDelivered=m.text;
+          reply({ok,attempted:ok,confirmed:ok&&adapter.hasDelivery(operationId),...snapshot()});
+        }catch(e){reply({ok:false,attempted:true,error:'Delivery outcome is unknown',...snapshot()});}
+        finally{deliveryPending=false;}
+      })();
+      return true;
     }
   });
 })();

@@ -6,11 +6,11 @@ const path = require('node:path');
 
 function harness() {
   const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'chat-1', latestModel: { text: 'old answer' } };
-  let timerId = 0, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false;
+  let timerId = 0, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false, submitHandler;
   const adapter = {
     inspect: () => ({ ...state, latestModel: state.latestModel && { ...state.latestModel } }),
     stage: text => { staged.push(text); return state.editorEmpty && !state.generating; },
-    submit: text => { submitted.push(text); return true; },
+    submit: async (text, isCurrent) => { if(submitHandler)return submitHandler(text,isCurrent);if(!state.editorEmpty)return false;submitted.push(text);return true; },
     hasDelivery: operationId => submitted.some(text => JSON.parse(text).operation_id === operationId)
   };
   const chrome = { runtime: { sendMessage: async message => { sent.push(structuredClone(message)); return sendHandler ? sendHandler(message) : { ok: accepted, accepted }; }, onMessage: { addListener: fn => { listeners.message = fn; } } } };
@@ -23,8 +23,22 @@ function harness() {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const send = message => new Promise(resolve => listeners.message(message, {}, response => resolve(structuredClone(response))));
   const flush = async () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn(); await new Promise(resolve => setImmediate(resolve)); };
-  return { state, sent, staged, submitted, send, flush, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
+  return { state, sent, staged, submitted, send, flush, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
 }
+
+test('delivery waits for async Run readiness and aborts after disarm', async () => {
+  const h = harness();await h.send({type:'studio.arm',sessionId:'s1'});
+  let finish;
+  h.setSubmitHandler((_text,isCurrent)=>new Promise(resolve=>{finish=()=>resolve(isCurrent());}));
+  const text=JSON.stringify({type:'webcodex-result',operation_id:'op-async'});
+  let replied=false;
+  const delivery=h.send({type:'studio.deliver',sessionId:'s1',text,submit:true}).then(reply=>{replied=true;return reply;});
+  await h.flush();assert.equal(replied,false);
+  const duplicate=await h.send({type:'studio.deliver',sessionId:'s1',text,submit:true});
+  assert.equal(duplicate.attempted,true);
+  await h.send({type:'studio.disarm',sessionId:'s1'});
+  finish();assert.equal((await delivery).attempted,false);
+});
 
 test('extension reload retires the stale content observer and timer without throwing', async () => {
   const h = harness();

@@ -48,6 +48,7 @@
     return `${location.pathname}${location.search}`;
   };
   const editorValue = (el) => el.isContentEditable || attr(el, 'contenteditable') === 'true' ? text(el) : String(el.value || '');
+  let ownedDraft = null, pendingSubmit = null;
   const cleanContentText = (el) => {
     const copy = el.cloneNode ? el.cloneNode(true) : el;
     if (copy !== el && copy.querySelectorAll) {
@@ -93,7 +94,8 @@
     const explicitStops = controls().filter((el) => hasLabel(el, ['stop', 'cancel', 'остановить', 'отмена', 'генерируется']) ||
       attr(el, 'aria-label')?.toLowerCase() === 'generating');
     // AI Studio briefly removes Run while switching generation controls.
-    const generating = explicitStops.length > 0 || hasSpinner() || runs.length === 0;
+    const controlsPending = runs.length === 0 && explicitStops.length === 0 && !hasSpinner();
+    const generating = explicitStops.length > 0 || hasSpinner() || controlsPending;
     let error = '';
     if (candidateEditors.length !== 1) error = 'ambiguous or missing editor';
     else if (unsupportedRole) error = 'unsupported turn role';
@@ -101,7 +103,7 @@
     else if (runs.length > 1 || explicitStops.length > 1) error = `ambiguous generation controls: Run=${runs.length}, Stop=${explicitStops.length}`;
     const model = recognized.filter((el) => role(el) === 'model').pop() || null;
     return {
-      conversationKey: conversationKey(), generating,
+      conversationKey: conversationKey(), generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
       supported: !error, error, latestModel: model ? { element: model, text: finalText(model) } : null,
     };
@@ -117,14 +119,35 @@
     } else editor.textContent = String(value);
     const EventCtor = document.defaultView && document.defaultView.InputEvent;
     if (editor.dispatchEvent && EventCtor) editor.dispatchEvent(new EventCtor('input', { bubbles: true, inputType: 'insertText', data: String(value) }));
-    return editorValue(editor) === String(value);
+    const staged = editorValue(editor) === String(value);
+    if (staged) ownedDraft = { value: String(value), conversationKey: state.conversationKey };
+    return staged;
   };
-  const submit = (value) => {
-    if (!stage(value)) return false;
-    const button = submitButton();
-    if (!button || button.disabled || attr(button, 'aria-disabled') === 'true') return false;
-    button.click();
-    return true;
+  const submit = (value, isCurrent = () => true) => {
+    if (pendingSubmit) return Promise.resolve(false);
+    const draft = String(value), initial = inspect();
+    if (!isCurrent()) return Promise.resolve(false);
+    const editor = editors()[0];
+    const ownsDraft = ownedDraft?.value === draft && ownedDraft.conversationKey === initial.conversationKey && editor && editorValue(editor) === draft;
+    if (!ownsDraft && !stage(draft)) return Promise.resolve(false);
+    const key = initial.conversationKey;
+    const promise = (async () => {
+      for (let attempt = 0; attempt <= 60; attempt++) {
+        const state = inspect(), currentEditors = editors();
+        if (!isCurrent() || !state.supported || (state.generating && !state.controlsPending) || state.conversationKey !== key || currentEditors.length !== 1 || editorValue(currentEditors[0]) !== draft) return false;
+        const button = submitButton();
+        if (button && !button.disabled && attr(button, 'aria-disabled') !== 'true') {
+          if (!isCurrent() || ownedDraft?.value !== draft || ownedDraft.conversationKey !== key) return false;
+          ownedDraft = null;
+          button.click();
+          return true;
+        }
+        if (attempt < 60) await new Promise(resolve => (document.defaultView?.setTimeout || setTimeout)(resolve, 50));
+      }
+      return false;
+    })().finally(() => { pendingSubmit = null; });
+    pendingSubmit = promise;
+    return promise;
   };
   const hasDelivery = (operationId) => {
     const marker = String(operationId);
