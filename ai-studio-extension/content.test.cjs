@@ -9,10 +9,12 @@ function harness() {
   let timerId = 0, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false, submitHandler;
   const adapter = {
     inspect: () => ({ ...state, latestModel: state.latestModel && { ...state.latestModel } }),
-    stage: text => { staged.push(text); return state.editorEmpty && !state.generating; },
+    stage: text => { staged.push(text); return state.editorEmpty && !state.generating; }, stageSystemInstructions: async () => true,
     submit: async (text, isCurrent) => { if(submitHandler)return submitHandler(text,isCurrent);if(!state.editorEmpty)return false;submitted.push(text);return true; },
-    hasDelivery: operationId => submitted.some(text => JSON.parse(text).operation_id === operationId)
+    hasDelivery: operationId => submitted.some(text => JSON.parse(text).operation_id === operationId),
+    cleanup: options => cleanups.push(options), restoreCleanup: () => { restores++; }, annotateContext: () => { annotations++; }
   };
+  const cleanups=[];let restores=0,annotations=0;
   const chrome = { runtime: { sendMessage: async message => { sent.push(structuredClone(message)); return sendHandler ? sendHandler(message) : { ok: accepted, accepted }; }, onMessage: { addListener: fn => { listeners.message = fn; } } } };
   const documentListeners = {};
   const document = { addEventListener(type, fn) { documentListeners[type] = fn; }, documentElement: {} };
@@ -23,7 +25,7 @@ function harness() {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const send = message => new Promise(resolve => listeners.message(message, {}, response => resolve(structuredClone(response))));
   const flush = async () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn(); await new Promise(resolve => setImmediate(resolve)); };
-  return { state, sent, staged, submitted, send, flush, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
+  return { state, sent, staged, submitted, send, flush, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
 }
 
 test('delivery waits for async Run readiness and aborts after disarm', async () => {
@@ -124,4 +126,19 @@ test('a user click on the active stop spinner suppresses its partial reply', asy
   h.click({ target: { closest: () => button } });
   h.state.generating = false; h.state.latestModel = { text: 'partial answer' }; h.mutate(); await h.flush();
   assert.equal(h.sent.some(m => m.type === 'studio.call' && m.text === 'partial answer'), false);
+});
+
+test('cleanup annotates final answers, hides accepted service turns, and leaves context visible when hiding is off', async () => {
+  const h=harness();const turn={};
+  await h.send({type:'studio.arm',sessionId:'s1',hideServiceMessages:true});
+  h.state.latestModel={text:'```webcodex-call\n{}\n```',element:turn};h.setAccepted(false);h.mutate();await h.flush();
+  await h.send({type:'studio.cleanup',sessionId:'s1',enabled:true,final:false,operationIds:[]});
+  assert.equal(h.cleanups.length,0);assert.equal(h.annotations,0);
+  await h.send({type:'studio.cleanup',sessionId:'s1',enabled:true,final:true,operationIds:['op-1']});
+  assert.equal(h.cleanups.length,1);assert.deepEqual(Array.from(h.cleanups[0].turns),[]);assert.deepEqual(h.cleanups[0].operationIds,['op-1']);assert.equal(h.annotations,1);
+  h.setAccepted(true);h.mutate();await h.flush();
+  await h.send({type:'studio.cleanup',sessionId:'s1',enabled:true,final:true,operationIds:[]});
+  assert.deepEqual(Array.from(h.cleanups[1].turns),[turn]);
+  await h.send({type:'studio.cleanup',sessionId:'s1',enabled:false,final:true,operationIds:[]});
+  assert.equal(h.restores,1);assert.equal(h.annotations,3);assert.equal(h.cleanups.length,2);
 });

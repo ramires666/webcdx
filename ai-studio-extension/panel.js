@@ -55,6 +55,7 @@
     if (session.instructions !== undefined && document.activeElement !== $('instructions')) $('instructions').value = session.instructions;
     if (session.error) showError(session.error);
     $('result').value = session.resultText || '';
+    $('hide-service').checked = !!next.hideServiceMessages;
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;
     const busy = connecting || next.connecting;
     $('connect').disabled = busy || !!next.connected;
@@ -107,6 +108,7 @@
   $('stop').addEventListener('click', () => act('bridge.stop'));
   $('consent').addEventListener('change', () => render(state));
   $('automatic').addEventListener('change', () => { if (state) state.session.automatic = $('automatic').checked; });
+  $('hide-service').addEventListener('change', () => act('bridge.cleanupPreference', { enabled: $('hide-service').checked }));
   async function poll() { try { render(await send('bridge.status')); } catch (error) { showError(error); } }
   connectionLoaded.then(poll); setInterval(poll, 2000);
 })();

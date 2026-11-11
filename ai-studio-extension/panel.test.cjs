@@ -20,7 +20,9 @@ function createPanel(store = {}, options = {}) {
   }
   const document = { activeElement: null, getElementById(id) { if (!els.has(id)) els.set(id, new Element(id)); return els.get(id); }, createElement() { return new Element(); } };
   let snapshot = { connected: false, session: { phase: 'idle', paused: false }, tools: [], agents: [] }, failAction = false, poll, connectCount = 0;
+  const messages = [];
   const chrome = { runtime: { id: 'test', lastError: null, sendMessage(msg, cb) {
+    messages.push(msg);
     if (msg.type === 'bridge.status') return cb({ ok: true, state: snapshot });
     if (msg.type === 'bridge.connect') connectCount++;
     if (msg.type === 'bridge.connect' && options.connectReply) return options.connectReply.promise.then(reply => cb(reply));
@@ -29,8 +31,17 @@ function createPanel(store = {}, options = {}) {
   } }, storage: { local: { async get() { if (options.storageRead) await options.storageRead.promise; return { bridgeConnection: store.bridgeConnection }; }, async set(values) { Object.assign(store, values); } } }, tabs: { query: async () => [{ id: 1 }] }, permissions: { request: () => options.permission?.promise || Promise.resolve(true) }, identity: { getRedirectURL: () => 'https://redirect/' } };
   const context = vm.createContext({ chrome, document, URL, setInterval(fn) { poll = fn; } });
   vm.runInContext(fs.readFileSync(require.resolve('./panel.js'), 'utf8'), context);
-  return { get: id => document.getElementById(id), async ready() { if (options.storageRead) await options.storageRead.promise; await Promise.resolve(); await poll(); }, async update(value) { snapshot = value; await poll(); }, fail() { failAction = true; }, click(id) { return document.getElementById(id).listeners.click(); }, input(id, value) { const el = document.getElementById(id); el.value = value; return el.listeners.input(); }, get connectCount() { return connectCount; } };
+  return { get: id => document.getElementById(id), messages, async ready() { if (options.storageRead) await options.storageRead.promise; await Promise.resolve(); await poll(); }, async update(value) { snapshot = value; await poll(); }, fail() { failAction = true; }, click(id) { return document.getElementById(id).listeners.click(); }, change(id, checked) { const el = document.getElementById(id); el.checked = checked; return el.listeners.change(); }, input(id, value) { const el = document.getElementById(id); el.value = value; return el.listeners.input(); }, get connectCount() { return connectCount; } };
 }
+
+test('service JSON preference reflects state and sends both checkbox values', async () => {
+  const p = createPanel();
+  await p.update({ connected: false, hideServiceMessages: true, session: { phase: 'idle' }, tools: [], agents: [] });
+  assert.equal(p.get('hide-service').checked, true);
+  await p.change('hide-service', false);
+  await p.change('hide-service', true);
+  assert.deepEqual(p.messages.filter(x => x.type === 'bridge.cleanupPreference').map(x => x.enabled), [false, true]);
+});
 
 test('idle connection can arm after consent; safe tools initialize once and empty selection stays empty', async () => {
   const p = createPanel();

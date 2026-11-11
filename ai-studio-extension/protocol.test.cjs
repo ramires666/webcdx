@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseCall, buildInstructions, buildResult } = require('./protocol.js');
+const { parseCall, buildInstructions, buildSystemInstructions, buildSessionInstructions, buildResult } = require('./protocol.js');
 const tools = [
   { name: 'write_file', inputSchema: { type:'object', additionalProperties:false, properties:{path:{type:'string'},content:{type:'string'},if_absent:{type:'boolean',const:true},expected_sha256:{type:'string',pattern:'^[0-9a-f]{64}$'}}, required:['path','content'], oneOf:[{required:['if_absent'],not:{required:['expected_sha256']}},{required:['expected_sha256'],not:{required:['if_absent']}}] } },
   { name: 'exec_command', description:'Run a command', inputSchema: { type:'object', additionalProperties:false, properties:{cwd:{type:'string'},command:{type:'string'},argv:{type:'array',minItems:1,items:{type:'string'}},request_key:{type:'string'},agent_id:{type:'string'}},required:['cwd','request_key','agent_id'],oneOf:[{required:['command'],not:{required:['argv']}},{required:['argv'],not:{required:['command']}}] } },
@@ -32,4 +32,14 @@ test('instructions and results retain protocol data', () => {
   assert.deepEqual(result.result.structuredContent,{ok:true}); assert.equal(result.type,'webcodex-result'); assert.equal(result.next_turn,2); assert.equal(result.operation_id,'o');
   const failed=JSON.parse(buildResult({turn:'t',nextTurn:'t2',operationId:'o',name:'t',error:'failed'}));
   assert.equal(failed.transport_error,'failed'); assert.equal('result' in failed,false);
+});
+test('system instructions contain stable protocol and schemas, session instructions contain only the active turn', () => {
+  const system=buildSystemInstructions({agentId:'a',tools,instructions:'do work'});
+  const session=buildSessionInstructions({turn:'nonce-2'});
+  assert.match(system,/Run a command/); assert.match(system,/exactly one tool call/); assert.match(system,/concise human-readable prose/);
+  assert.match(system,/If no tool is needed, answer in concise human-readable prose\. When a tool is needed/);
+  assert.match(system,/When making a tool call, include exactly one call per full reply with no prose/);
+  assert.doesNotMatch(system,/Return one call per full reply/);
+  assert.doesNotMatch(system,/nonce-2|active turn:.*nonce/i);
+  assert.match(session,/nonce-2/); assert.match(session,/system MCP rules/); assert.doesNotMatch(session,/inputSchema|Run a command|webcodex-call/);
 });

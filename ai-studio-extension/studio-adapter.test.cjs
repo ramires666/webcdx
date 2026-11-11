@@ -3,12 +3,14 @@ const assert = require('node:assert/strict');
 const createAdapter = require('./studio-adapter.js');
 
 class Node {
-  constructor(tag, attrs = {}, content = '') { this.tag = tag; this.attrs = attrs; this._text = content; this.children = []; this.disabled = false; this.readOnly = false; this.isConnected = true; this.hidden = false; this.events = []; }
+  constructor(tag, attrs = {}, content = '') { this.tag = tag; this.attrs = attrs; this._text = content; this.children = []; this.disabled = false; this.readOnly = false; this.isConnected = true; this.hidden = false; this.events = []; this.style = { values: {}, priorities: {}, getPropertyValue(name) { return this.values[name] || ''; }, getPropertyPriority(name) { return this.priorities[name] || ''; }, setProperty(name, value, priority = '') { this.values[name] = String(value); this.priorities[name] = priority; }, removeProperty(name) { delete this.values[name]; delete this.priorities[name]; } }; }
   get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
   set textContent(value) { this._text = String(value); this.children = []; }
   get innerText() { return this.textContent; }
   set innerText(value) { this._text = String(value); }
   getAttribute(name) { return this.attrs[name] ?? null; }
+  setAttribute(name, value) { this.attrs[name] = String(value); }
+  removeAttribute(name) { delete this.attrs[name]; }
   getBoundingClientRect() { return { width: 10 }; }
   matches(part) {
     const tag = part.match(/^[\w*-]+/)?.[0] || '';
@@ -39,6 +41,7 @@ class Node {
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(x => x !== this); this.removed = true; }
   dispatchEvent(event) { this.events.push(event); }
   click() { this.clicked = true; }
+  appendChild(child) { return this.add(child); }
   add(child) { child.parent = this; this.children.push(child); return child; }
 }
 class Textarea extends Node {
@@ -62,9 +65,56 @@ function setup({ draft = '', extraEditors = 0, generating = false, spinnerClass 
   if (generating) run.add(new Node(spinnerClass ? 'div' : 'ms-stoppable-spinner', spinnerClass ? { class: 'stoppable-spinner' } : {}));
   const stop = new Node('button', { 'aria-label': russian ? 'Отмена' : 'Stop' });
   const root = new Node('document'); root.children = [wrapper, ...moreEditors, ...turns, ...(withoutRun ? [] : [run]), ...(generating ? [stop] : [])];
-  const document = { documentElement: new Node('html'), body: new Node('body'), defaultView: { InputEvent: class { constructor(type, init) { this.type = type; Object.assign(this, init); } } }, querySelectorAll(selector) { return root.querySelectorAll(selector); } };
+  const document = { documentElement: new Node('html'), body: new Node('body'), createElement(tag) { return new Node(tag); }, defaultView: { InputEvent: class { constructor(type, init) { this.type = type; Object.assign(this, init); } } }, querySelectorAll(selector) { return root.querySelectorAll(selector); } };
   return { adapter: createAdapter(document, { hostname, pathname: '/prompts/p1', search: '?x=2' }), editor, wrapper, run, user, model, chunk, root, document };
 }
+
+function systemSetup({ original = 'Keep these user instructions.', saveDelay = false, malformed = false, duplicatePanels = false, saveCloses = false } = {}) {
+  const state = setup({ draft: 'chat draft' });
+  const opener = new Node('button', { 'aria-label': 'System instructions' });
+  state.root.add(opener);
+  const dialogs = [];
+  opener.click = () => {
+    for (let i = 0; i < (duplicatePanels ? 2 : 1); i++) {
+      const panel = new Node('section', { role: 'dialog', 'aria-label': 'System instructions' });
+      panel.add(new Node('h2', {}, 'System instructions'));
+      const editor = panel.add(new Textarea(malformed ? `${original}\n<!-- WEBCODEX MCP BEGIN --> duplicate` : original));
+      const save = panel.add(new Node('button', { 'aria-label': 'Save' }));
+      if (saveCloses) save.click = () => { save.clicked = true; state.root.children = state.root.children.filter(child => child !== panel); panel.isConnected = false; };
+      if (saveDelay) {
+        save.disabled = true;
+        state.document.defaultView.setTimeout = callback => setTimeout(() => { save.disabled = false; callback(); }, 5);
+      }
+      const close = panel.add(new Node('button', { 'aria-label': 'Close' }));
+      close.click = () => { state.root.children = state.root.children.filter(child => child !== panel); panel.isConnected = false; };
+      state.root.add(panel); dialogs.push({ panel, editor, save, close });
+    }
+  };
+  return { ...state, opener, dialogs, system: (value) => state.adapter.stageSystemInstructions(value) };
+}
+
+test('stages a bounded system instruction block and preserves surrounding user text', async () => {
+  const state = systemSetup();
+  assert.equal(await state.system('managed instructions'), true);
+  assert.equal(state.dialogs[0].editor.value, 'Keep these user instructions.\n<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->');
+  assert.equal(state.dialogs[0].save.clicked, true);
+  assert.equal(state.dialogs[0].panel.isConnected, false, 'closes only the panel it opened');
+  assert.equal(state.editor.value, 'chat draft');
+  assert.equal(state.run.clicked, undefined, 'staging never runs the prompt');
+});
+
+test('updates only its existing bounded block, waits for Save, and rejects malformed or ambiguous panels', async () => {
+  const state = systemSetup({ original: 'User text $&\n<!-- WEBCODEX MCP BEGIN -->\nold\n<!-- WEBCODEX MCP END -->', saveDelay: true });
+  assert.equal(await state.system('$&'), true);
+  assert.equal(state.dialogs[0].editor.value, 'User text $&\n<!-- WEBCODEX MCP BEGIN -->\n$&\n<!-- WEBCODEX MCP END -->');
+  assert.equal(state.dialogs[0].save.clicked, true);
+  assert.equal(await systemSetup({ malformed: true }).system('new'), false);
+  assert.equal(await systemSetup({ original: '<!-- WEBCODEX MCP END -->\n<!-- WEBCODEX MCP BEGIN -->' }).system('new'), false);
+  assert.equal(await systemSetup({ duplicatePanels: true }).system('new'), false);
+  const closesOnSave = systemSetup({ saveCloses: true });
+  assert.equal(await closesOnSave.system('saved'), true);
+  assert.equal(closesOnSave.dialogs[0].save.clicked, true);
+});
 
 test('uses the nested native editor, explicit turn classes, and exact delivery markers', () => {
   const { adapter, editor } = setup();
@@ -156,6 +206,7 @@ test('reads nested data roles and extracts final text chunks without role header
 });
 test('keeps prose from all final chunks and does not promote a later code block to a call', () => {
   const state = setup();
+  state.model.style.setProperty('display', 'flex', 'important');
   state.chunk._text = 'Before call';
   const next = state.model.children[0].add(new Node('ms-text-chunk', {}, ''));
   const block = next.add(new Node('ms-code-block'));
@@ -228,6 +279,49 @@ test('confirms only an exact result envelope in the submitted user turn', () => 
   modelOnly.model.children[0].add(new Node('ms-text-chunk', {}, payload));
   assert.equal(modelOnly.adapter.hasDelivery('op-1'), false);
   assert.equal(setup().adapter.hasDelivery('op-1'), true, 'legacy exact marker remains supported');
+});
+
+test('cleanup hides only requested current turns and exact delivery turns, then restores them', () => {
+  const state = setup();
+  state.model.style.setProperty('display', 'flex', 'important');
+  const unrelated = state.root.add(new Node('ms-chat-turn', {}, 'old unrelated history'));
+  unrelated.add(new Node('div', { class: 'chat-turn-container user' }, '[WebCodex operation old-op]'));
+  const stale = new Node('ms-chat-turn');
+  assert.deepEqual(state.adapter.deliveryTurns('op-1'), [state.user]);
+  state.adapter.cleanup({ turns: [state.model, stale], operationIds: ['op-1'] });
+  assert.equal(state.model.hidden, true);
+  assert.equal(state.model.style.getPropertyValue('display'), 'none');
+  assert.equal(state.model.style.getPropertyPriority('display'), 'important');
+  assert.equal(state.user.hidden, true);
+  assert.equal(state.model.getAttribute('data-webcodex-hidden'), 'true');
+  assert.equal(unrelated.hidden, false);
+  assert.equal(state.adapter.hasDelivery('op-1'), true);
+  assert.equal(state.adapter.inspect().latestModel.element, state.model);
+  state.adapter.restoreCleanup();
+  assert.equal(state.model.hidden, false);
+  assert.equal(state.model.style.getPropertyValue('display'), 'flex');
+  assert.equal(state.model.style.getPropertyPriority('display'), 'important');
+  assert.equal(state.user.hidden, false);
+  assert.equal(state.model.getAttribute('data-webcodex-hidden'), null);
+  assert.equal(state.adapter.hasDelivery('op-1'), true);
+
+  state.model.hidden = true;
+  state.adapter.cleanup({ turns: [state.model], operationIds: [] });
+  state.adapter.restoreCleanup();
+  assert.equal(state.model.hidden, true, 'pre-existing hidden state is preserved');
+});
+
+test('context annotation counts hidden turns and stays out of model text and repeated counts', () => {
+  const state = setup();
+  state.adapter.cleanup({ turns: [], operationIds: ['op-1'] });
+  const expected = Math.ceil((state.user.textContent.length + state.model.textContent.length) / 4);
+  assert.equal(state.adapter.annotateContext(), expected);
+  const notes = state.model.querySelectorAll('[data-webcodex-context]');
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].textContent, `Контекст загруженных сообщений: ≈ ${expected} токенов (оценка)`);
+  assert.equal(state.adapter.inspect().latestModel.text, 'answer');
+  assert.equal(state.adapter.annotateContext(), expected);
+  assert.equal(state.model.querySelectorAll('[data-webcodex-context]').length, 1);
 });
 
 test('recognizes an empty editor with disabled Run and only clicks after input enables it', async () => {

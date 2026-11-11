@@ -11,6 +11,7 @@ async function restore() {
   try {
     const data=await chrome.storage.session.get(KEY);
     if(data[KEY])state=data[KEY];
+    state.hideServiceMessages=!!(await chrome.storage.local.get('hideServiceMessages')).hideServiceMessages;
     let fresh=false;
     if(!state.accessToken&&!state.demoMode){const {bridgeAuth}=await chrome.storage.local.get('bridgeAuth');if(bridgeAuth?.accessToken){Object.assign(state,bridgeAuth);state.connected=true;fresh=true;}}
     token=state.accessToken||'';demo=!!state.demoMode;
@@ -37,6 +38,11 @@ chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
 async function command(m) {
   switch(m.type) {
     case 'bridge.status': return publicState();
+    case 'bridge.cleanupPreference':
+      state.hideServiceMessages=!!m.enabled;
+      await chrome.storage.local.set({hideServiceMessages:state.hideServiceMessages});
+      if(state.session.tabId!==null)await chrome.tabs.sendMessage(state.session.tabId,{type:'studio.cleanup',sessionId:state.session.sessionId,enabled:state.hideServiceMessages,operationIds:state.session.completedOperationIds||[],final:state.session.phase==='ready'}).catch(()=>{});
+      break;
     case 'bridge.connect': await connect(m); break;
     case 'bridge.disconnect': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');token='';client=null;demo=false;state.accessToken='';state.demoMode=false;state.connected=false;state.gateUrl='';state.clientId='';state.agents=[];state.tools=[];break;
     case 'bridge.demo': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');demo=true;state.demoMode=true;token='';client=null;state.accessToken='';state.connected=true;state.gateUrl='Demo mode';state.clientId='demo';state.agents=[{id:'demo',name:'Demo agent',online:true}];state.tools=[{name:'read_file',description:'Demo only: return fixed sample text.',inputSchema:{type:'object',additionalProperties:false,properties:{path:{type:'string'}},required:['path']}}];break;
@@ -101,7 +107,7 @@ async function arm(m) {
   const tab=await chrome.tabs.get(m.tabId);if(!tab.url?.startsWith('https://aistudio.google.com/'))throw Error('Active tab must be AI Studio');
   if(!demo&&!state.connected)throw Error('Connect to Gate first');
   state.session={phase:'arming',agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,paused:false,turn:uuid(),instructions:'',customInstructions:'',pendingCall:null,resultText:'',error:'',count:0,budgetStart:Date.now(),tabId:m.tabId,sessionId:uuid(),conversationKey:''};await save();
-  try {let snap;const message={type:'studio.arm',sessionId:state.session.sessionId};
+  try {let snap;const message={type:'studio.arm',sessionId:state.session.sessionId,hideServiceMessages:!!state.hideServiceMessages};
     try{snap=await chrome.tabs.sendMessage(m.tabId,message);}catch(e){
       if(!/Receiving end does not exist|Could not establish connection/i.test(String(e.message||e)))throw e;
       await chrome.scripting.executeScript({target:{tabId:m.tabId},func:()=>{window.__webcodexBridgeReattach=true;}});
@@ -113,7 +119,7 @@ async function arm(m) {
   } catch(e){await chrome.tabs.sendMessage(m.tabId,{type:'studio.disarm',sessionId:state.session.sessionId}).catch(()=>{});state.session.phase='stopped';state.session.error=String(e.message||e);await save();throw e;}
 }
 async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});state.session={phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null};await save();}
-async function stageInstructions(){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);s.instructions=WebCodexProtocol.buildInstructions({turn:s.turn,agentId:s.agentId,tools:selected,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,text:s.instructions});if(!r?.ok)throw Error('Could not stage instructions without changing existing text');}
+async function stageInstructions(){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].join('\n\n');if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
   if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationKey!==s.conversationKey||!m.supported){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'Conversation changed';await save();return {accepted:true};}await recover();return {accepted:true};}
@@ -128,7 +134,7 @@ async function studioMessage(m,sender) {
     if(m.conversationKey!==s.conversationKey||m.generating){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='Conversation changed or generation still active';}
     else if(s.phase==='waiting_model'||s.phase==='ready'){
       try {const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const call=WebCodexProtocol.parseCall(m.text,s.turn,tools);
-        if(!call){s.resultText='';s.finalText=m.text;s.phase='ready';}
+        if(!call){s.resultText='';s.finalText=m.text;s.phase='ready';await chrome.tabs.sendMessage(s.tabId,{type:'studio.cleanup',sessionId:s.sessionId,enabled:!!state.hideServiceMessages,final:true,operationIds:s.completedOperationIds||[]}).catch(()=>{});}
         else {s.pendingCall={...call,turn:s.turn};s.phase=SAFE.has(call.name)?'ready':'waiting_approval';s.error='';if(s.phase==='ready'){await save();await dispatch();}}
       } catch(e){s.paused=true;s.phase='paused';s.error=String(e.message||e);}
     }
@@ -157,7 +163,7 @@ async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='
 }
 async function finishResult(result){const s=state.session;s.operationId=result?.operation_id||result?.id||s.operationId;if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:uuid(),operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:toolResult,error:transportError});s.nextTurn=JSON.parse(s.resultText).next_turn;s.phase='result_ready';if(new TextEncoder().encode(s.resultText).length>32768){s.phase='paused';s.paused=true;s.error='Result exceeds 32 KiB; reduce the tool output before delivery.';}await save();if(s.automatic&&!s.paused)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}
 async function deliver(submit){const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a webcodex-result can be delivered');}if(envelope.type!=='webcodex-result')throw Error('Only a webcodex-result can be delivered');if(s.phase==='delivery_uncertain')throw Error('Delivery status is unknown; check AI Studio before taking action');if(submit){s.phase='delivery_uncertain';await save();}let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit});}catch(e){throw Error('Delivery status is unknown; do not send again');}if(r?.conversationKey!==s.conversationKey||!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('Conversation changed; delivery is blocked');}if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered');}if(!submit){s.phase='result_ready';await save();return;}if(r.confirmed){completeDelivery();await save();}}
-function completeDelivery(){const s=state.session;s.error='';s.phase='waiting_model';s.turn=s.nextTurn;s.pendingCall=null;s.resultText='';s.operationKey='';s.operationId='';s.dispatchArgs=null;s.count++;if(s.count>=10||Date.now()-(s.budgetStart||Date.now())>=300000){s.pausedPhase='waiting_model';s.phase='paused';s.paused=true;s.error='Session operation limit reached; resume to continue.';}}
+function completeDelivery(){const s=state.session;if(s.operationId||s.operationKey)(s.completedOperationIds||=[]).push(s.operationId||s.operationKey);s.error='';s.phase='waiting_model';s.turn=s.nextTurn;s.pendingCall=null;s.resultText='';s.operationKey='';s.operationId='';s.dispatchArgs=null;s.count++;if(s.count>=10||Date.now()-(s.budgetStart||Date.now())>=300000){s.pausedPhase='waiting_model';s.phase='paused';s.paused=true;s.error='Session operation limit reached; resume to continue.';}}
 async function stop(){
   const s=state.session;
   await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});

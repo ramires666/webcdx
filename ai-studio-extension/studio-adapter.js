@@ -7,18 +7,23 @@
     (!el.getAttribute || el.getAttribute('aria-hidden') !== 'true') &&
     (!el.getBoundingClientRect || el.getBoundingClientRect().width > 0);
   const attr = (el, name) => el.getAttribute ? el.getAttribute(name) : null;
+  const allElements = (selector, scope = document) => Array.from(scope.querySelectorAll(selector));
   const text = (el) => String(el.innerText || el.textContent || '').trim();
   const elements = (selector, scope = document) => Array.from(scope.querySelectorAll(selector)).filter(visible);
   const roleValue = (el) => String(attr(el, 'data-turn-role') || '').toLowerCase();
-  const roleMarkers = (el) => [el, ...elements('[data-turn-role], .chat-turn-container', el)]
+  const roleMarkers = (el) => [el, ...allElements('[data-turn-role], .chat-turn-container', el)]
     .map(node => roleValue(node) || (node.matches?.('.chat-turn-container.user') ? 'user' : node.matches?.('.chat-turn-container.model') ? 'model' : ''))
     .filter(Boolean);
   const marked = (el, kind) => roleMarkers(el).includes(kind);
-  const turns = () => elements('ms-chat-turn, model-prompt-container');
+  const turns = () => allElements('ms-chat-turn, model-prompt-container').filter(el => visible(el) || attr(el, 'data-webcodex-hidden') === 'true');
   const role = (el) => marked(el, 'model') ? 'model' : marked(el, 'user') ? 'user' : '';
+  const inSystemPanel = (el) => {
+    for (let node = el; node; node = node.parentElement || node.parent) if (node.matches?.('ms-system-instructions, [role="dialog"]')) return true;
+    return false;
+  };
   const editors = () => {
-    const scoped = elements('ms-prompt-input-wrapper textarea, ms-prompt-box textarea, ms-autosize-textarea textarea, ms-prompt-input-wrapper [contenteditable="true"], ms-prompt-box [contenteditable="true"], ms-autosize-textarea [contenteditable="true"]');
-    const candidates = scoped.length ? scoped : elements('textarea, [contenteditable="true"]');
+    const scoped = elements('ms-prompt-input-wrapper textarea, ms-prompt-box textarea, ms-autosize-textarea textarea, ms-prompt-input-wrapper [contenteditable="true"], ms-prompt-box [contenteditable="true"], ms-autosize-textarea [contenteditable="true"]').filter(el => !inSystemPanel(el));
+    const candidates = scoped.length ? scoped : elements('textarea, [contenteditable="true"]').filter(el => !inSystemPanel(el));
     return [...new Set(candidates)].filter((el) => !el.disabled && !el.readOnly && attr(el, 'aria-disabled') !== 'true');
   };
   const controls = () => elements('button');
@@ -52,6 +57,7 @@
   const cleanContentText = (el) => {
     const copy = el.cloneNode ? el.cloneNode(true) : el;
     if (copy !== el && copy.querySelectorAll) {
+      for (const note of copy.querySelectorAll('[data-webcodex-context]')) note.remove();
       for (const junk of copy.querySelectorAll('ms-thought-accordion, ms-thought-chunk, button')) junk.remove();
       return text(copy);
     }
@@ -60,6 +66,7 @@
   const finalText = (el) => {
     const content = el.cloneNode ? el.cloneNode(true) : el;
     if (content !== el && content.querySelectorAll) {
+      for (const note of content.querySelectorAll('[data-webcodex-context]')) note.remove();
       for (const junk of content.querySelectorAll('ms-thought-accordion, ms-thought-chunk, button')) junk.remove();
     }
     const chunks = content.querySelectorAll ? [...content.querySelectorAll('ms-text-chunk')] : [];
@@ -149,11 +156,75 @@
     pendingSubmit = promise;
     return promise;
   };
-  const hasDelivery = (operationId) => {
+  const stageSystemInstructions = async (value) => {
+    const exactLabel = (el, choices) => [attr(el, 'aria-label'), attr(el, 'title'), text(el)]
+      .some(label => choices.includes(String(label || '').trim().toLowerCase()));
+    const panels = () => elements('ms-system-instructions, [role="dialog"]').filter(panel =>
+      panel.matches?.('ms-system-instructions') ||
+      [attr(panel, 'aria-label'), attr(panel, 'title'), ...elements('h1, h2, h3', panel).map(text)]
+        .some(label => /system instructions/i.test(String(label || ''))));
+    const controls = (panel) => elements('button', panel);
+    const wait = () => new Promise(resolve => (document.defaultView?.setTimeout || setTimeout)(resolve, 50));
+    let panel = null, openedByUs = false;
+    const alreadyOpen = panels();
+    if (alreadyOpen.length === 1) panel = alreadyOpen[0];
+    else if (!alreadyOpen.length) {
+      const openers = elements('button').filter(el => exactLabel(el, ['system instructions']));
+      if (openers.length !== 1) return false;
+      const before = new Set(alreadyOpen);
+      openers[0].click(); openedByUs = true;
+      for (let attempt = 0; attempt <= 60; attempt++) {
+        const matches = panels(), opened = matches.filter(candidate => !before.has(candidate));
+        if (opened.length === 1) { panel = opened[0]; break; }
+        if (opened.length > 1) return false;
+        if (attempt < 60) await wait();
+      }
+    } else return false;
+    if (!panel) return false;
+    const editors = elements('textarea, [contenteditable="true"]', panel).filter(el => !el.disabled && !el.readOnly && attr(el, 'aria-disabled') !== 'true');
+    if (editors.length !== 1) return false;
+    const editor = editors[0], start = '<!-- WEBCODEX MCP BEGIN -->', end = '<!-- WEBCODEX MCP END -->';
+    const current = editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
+    const starts = current.split(start).length - 1, ends = current.split(end).length - 1;
+    if (starts !== ends || starts > 1 || (starts === 1 && current.indexOf(start) > current.indexOf(end))) return false;
+    const block = `${start}\n${String(value)}\n${end}`;
+    const next = starts ? current.replace(new RegExp(`${start}[\\s\\S]*?${end}`), () => block) : `${current}${current && !current.endsWith('\n') ? '\n' : ''}${block}`;
+    const setValue = (target, content) => {
+      if ('value' in target) {
+        const proto = Object.getPrototypeOf(target);
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(target, content); else target.value = content;
+      } else target.textContent = content;
+      const EventCtor = document.defaultView?.InputEvent || document.defaultView?.Event;
+      if (EventCtor) target.dispatchEvent(new EventCtor('input', { bubbles: true, inputType: 'insertText', data: content }));
+      if (document.defaultView?.Event) target.dispatchEvent(new document.defaultView.Event('change', { bubbles: true }));
+    };
+    setValue(editor, next);
+    const valueNow = () => editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
+    if (valueNow() !== next) { setValue(editor, current); return false; }
+    for (let attempt = 0; attempt <= 60; attempt++) {
+      const save = controls(panel).filter(el => exactLabel(el, ['save', 'done']));
+      if (!save.length) break;
+      if (save.length !== 1) { setValue(editor, current); return false; }
+      if (!save[0].disabled && attr(save[0], 'aria-disabled') !== 'true') { save[0].click(); break; }
+      if (attempt === 60) { setValue(editor, current); return false; }
+      await wait();
+    }
+    if (openedByUs && !panels().includes(panel)) return true;
+    const close = controls(panel).filter(el => exactLabel(el, ['close']));
+    if (openedByUs && close.length !== 1) return false;
+    if (openedByUs) {
+      close[0].click();
+      for (let attempt = 0; attempt <= 60 && panels().includes(panel); attempt++) if (attempt < 60) await wait();
+      if (panels().includes(panel)) return false;
+    }
+    return true;
+  };
+  const deliveryTurns = (operationId) => {
     const marker = String(operationId);
-    return turns().some((el) => {
+    return turns().filter((el) => {
       if (role(el) !== 'user') return false;
-      const nested = [...new Set(elements('.turn-content, ms-prompt-chunk, ms-cmark-node, ms-text-chunk, pre code', el))];
+      const nested = [...new Set(allElements('.turn-content, ms-prompt-chunk, ms-cmark-node, ms-text-chunk, pre code', el))];
       const isResult = (value, header = false) => {
         const raw = String(value).trim();
         let parsed;
@@ -169,5 +240,52 @@
       return text(el).includes(`[WebCodex operation ${marker}]`) || isResult(text(el), true);
     });
   };
-  return { inspect, stage, submit, hasDelivery };
+  const hasDelivery = (operationId) => deliveryTurns(operationId).length > 0;
+  const hiddenByUs = new Map();
+  const cleanup = ({ turns: requestedTurns = [], operationIds = [] } = {}) => {
+    const recognized = new Set(turns());
+    const targets = new Set([...requestedTurns.filter(el => recognized.has(el)), ...operationIds.flatMap(deliveryTurns)]);
+    for (const el of targets) {
+      if (el.hidden || attr(el, 'data-webcodex-hidden') === 'true') continue;
+      const display = el.style?.getPropertyValue('display') || '';
+      const priority = el.style?.getPropertyPriority('display') || '';
+      if (el.setAttribute) el.setAttribute('data-webcodex-hidden', 'true');
+      else if (el.attrs) el.attrs['data-webcodex-hidden'] = 'true';
+      el.hidden = true;
+      el.style?.setProperty('display', 'none', 'important');
+      hiddenByUs.set(el, { display, priority });
+    }
+  };
+  const restoreCleanup = () => {
+    for (const [el, { display, priority }] of hiddenByUs) {
+      if (el.removeAttribute) el.removeAttribute('data-webcodex-hidden');
+      else if (el.attrs) delete el.attrs['data-webcodex-hidden'];
+      el.hidden = false;
+      if (display) el.style?.setProperty('display', display, priority);
+      else el.style?.removeProperty('display');
+    }
+    hiddenByUs.clear();
+  };
+  const annotateContext = () => {
+    const recognized = turns();
+    const chars = recognized.reduce((total, turn) => {
+      const copy = turn.cloneNode ? turn.cloneNode(true) : turn;
+      if (copy !== turn && copy.querySelectorAll)
+        for (const note of copy.querySelectorAll('[data-webcodex-context]')) note.remove();
+      return total + String(copy.textContent || '').length;
+    }, 0);
+    const count = Math.ceil(chars / 4);
+    const model = recognized.filter(el => role(el) === 'model').pop();
+    if (!model) return count;
+    const label = `Контекст загруженных сообщений: ≈ ${count} токенов (оценка)`;
+    const existing = allElements('[data-webcodex-context]', model)[0];
+    if (existing && text(existing) === label) return count;
+    if (existing) existing.remove();
+    const note = document.createElement('small');
+    note.setAttribute('data-webcodex-context', 'true');
+    note.textContent = label;
+    model.appendChild(note);
+    return count;
+  };
+  return { inspect, stage, submit, stageSystemInstructions, hasDelivery, deliveryTurns, cleanup, restoreCleanup, annotateContext };
 });

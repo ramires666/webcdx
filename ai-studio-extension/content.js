@@ -7,6 +7,7 @@
   const pageInstance=Date.now()+'-'+Math.random();
   let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, sawModel=false, attempted=new Set();
   let deliveryPending = false, retired = false;
+  const serviceNodes=new Set();
   const send=async(type,data={})=>{
     try{return await chrome.runtime.sendMessage({type,sessionId,...data});}
     catch(e){if(/Extension context invalidated/i.test(String(e.message||e))){retired=true;sessionId='';clearTimeout(observerTimer);clearInterval(tickTimer);observer.disconnect();return {accepted:false};}throw e;}
@@ -20,7 +21,7 @@
     if(s.generating)return;
     if(stopping){stopping=false;lastText=s.latestModel?.text||'';return;}
     const model=s.latestModel;if(!model||model.text===baselineText||!model.text||model.text===lastText)return;
-    const marker=sessionId+'\0'+model.text;if(attempted.has(model.text)||inFlight===marker)return;const callSession=sessionId;inFlight=marker;try{const response=await send('studio.call',{text:model.text,conversationKey,generating:s.generating});if(sessionId===callSession&&response?.accepted){lastText=model.text;attempted.add(model.text);}}finally{if(inFlight===marker)inFlight='';}
+    const marker=sessionId+'\0'+model.text;if(attempted.has(model.text)||inFlight===marker)return;const callSession=sessionId;inFlight=marker;try{const response=await send('studio.call',{text:model.text,conversationKey,generating:s.generating});if(sessionId===callSession&&response?.accepted){lastText=model.text;attempted.add(model.text);if(/^```webcodex-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
   }
   const schedule=()=>{clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(()=>{}),250);};
   document.addEventListener('click',event=>{const button=event.target?.closest?.('button');const label=((button?.getAttribute('aria-label')||'')+' '+(button?.getAttribute('title')||'')+' '+(button?.innerText||'')).trim().toLowerCase();if(adapter.inspect().generating&&(/\b(stop|cancel)\b|остановить|отмена/.test(label)||button?.querySelector?.('.stoppable-spinner, ms-stoppable-spinner')))stopping=true;},true);
@@ -28,14 +29,27 @@
   const observer=new MutationObserver(schedule);observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true});
   const tickTimer=setInterval(()=>{if(retired)return;if(sessionId){send('studio.tick',snapshot()).catch(()=>{});observe().catch(()=>{});}else{send('studio.hello',{pageInstance}).catch(()=>{});}},2000);
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
-    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm'].includes(m.type)){reply({ok:false});return;}
+    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup'].includes(m.type)){reply({ok:false});return;}
     if(m.type==='studio.arm'){
       const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error});return;}
+      if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
       sessionId=m.sessionId;conversationKey=s.conversationKey;baselineText=s.latestModel?.text||'';lastText=baselineText;lastDelivered='';inFlight='';stopping=false;sawModel=!!s.latestModel;attempted.clear();reply(snapshot());return;
     }
     if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
+    if(m.type==='studio.cleanup'){if(m.final)adapter.annotateContext();if(!m.enabled)adapter.restoreCleanup();else if(m.final)adapter.cleanup({turns:[...serviceNodes],operationIds:m.operationIds||[]});reply({ok:true});return;}
     if(m.type==='studio.disarm'){sessionId='';inFlight='';reply({ok:true});return;}
-    if(m.type==='studio.stage'){const s=adapter.inspect();const ok=s.supported&&s.conversationKey===conversationKey&&adapter.stage(m.text);reply({ok,...snapshot()});return;}
+    if(m.type==='studio.stage'){
+      (async()=>{
+        let s=adapter.inspect();
+        if(!s.supported||s.conversationKey!==conversationKey||!s.editorEmpty){reply({ok:false,error:'AI Studio prompt field is not empty; existing text was preserved',...snapshot()});return;}
+        if(!await adapter.stageSystemInstructions(m.systemText)){reply({ok:false,error:'Could not set AI Studio System instructions',...snapshot()});return;}
+        s=adapter.inspect();
+        if(sessionId!==m.sessionId||!s.supported||s.conversationKey!==conversationKey||!s.editorEmpty){reply({ok:false,error:'AI Studio session or empty prompt field changed while setting System instructions',...snapshot()});return;}
+        const ok=adapter.stage(m.text);
+        reply({ok,error:ok?undefined:'Could not stage session instructions in the empty prompt field',...snapshot()});
+      })().catch(e=>reply({ok:false,error:String(e.message||e),...snapshot()}));
+      return true;
+    }
     if(m.type==='studio.snapshot'){reply(snapshot(m.operationId));return;}
     if(m.type==='studio.deliver'){
       const s=adapter.inspect(),state=snapshot();if(!s.supported||(!m.submit&&!s.editorEmpty)||s.generating||s.conversationKey!==conversationKey){reply({ok:false,attempted:false,...state});return;}

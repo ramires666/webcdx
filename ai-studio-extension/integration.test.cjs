@@ -15,8 +15,8 @@ function saved(phase = 'waiting_model', name = 'read_file') {
       pendingCall: phase === 'waiting_approval' ? { name, arguments: { path: 'safe.txt' }, turn: 'turn-1' } : null,
       resultText: '', error: '', count: 0, tabId: 7, sessionId: 'session-1', conversationKey: 'chat-1' } };
 }
-function harness(initial = saved(), tabBehavior = {}) {
-  const localData = {};
+function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
+  const localData = structuredClone(initialLocalData);
   const listeners = {}, calls = [], pageMessages = [], db = { [KEY]: structuredClone(initial) };
   let createCount = 0, deliveryCount = 0;
   const chrome = {
@@ -153,6 +153,25 @@ test('normal model text is not exposed as a deliverable tool result', async () =
   const state = (await h.status()).state;
   assert.equal(state.session.phase, 'ready');
   assert.equal(state.session.resultText, '');
+});
+
+test('cleanup preference survives worker restart and final prose includes completed operation IDs', async () => {
+  const h=harness();await h.status();
+  await h.message({type:'bridge.cleanupPreference',enabled:true});
+  assert.equal(h.localData.hideServiceMessages,true);
+  const restarted=harness(saved(),{},h.localData);await restarted.status();
+  assert.equal((await restarted.status()).state.hideServiceMessages,true);
+  await restarted.call('turn-1');await restarted.alarm();
+  await restarted.message({type:'bridge.deliver',submit:true});
+  assert.deepEqual((await restarted.status()).state.session.completedOperationIds,['op-1']);
+  await restarted.message({type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false,text:'Final answer'},restarted.page);
+  const final=restarted.pageMessages.filter(m=>m.type==='studio.cleanup').at(-1);
+  assert.deepEqual(final,{type:'studio.cleanup',sessionId:'session-1',enabled:true,final:true,operationIds:['op-1']});
+  await restarted.message({type:'bridge.cleanupPreference',enabled:false});
+  assert.equal(restarted.localData.hideServiceMessages,false);
+  await restarted.message({type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false,text:'Another final answer'},restarted.page);
+  const disabled=restarted.pageMessages.filter(m=>m.type==='studio.cleanup').at(-1);
+  assert.equal(disabled.enabled,false);assert.equal(disabled.final,true);
 });
 
 test('automatic start respects drafts, pending operations, another bound tab and explicit stop',async()=>{
