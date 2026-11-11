@@ -18,8 +18,20 @@
   const turns = () => allElements('ms-chat-turn, model-prompt-container').filter(el => visible(el) || attr(el, 'data-webcodex-hidden') === 'true');
   const role = (el) => marked(el, 'model') ? 'model' : marked(el, 'user') ? 'user' : '';
   const inSystemPanel = (el) => {
-    for (let node = el; node; node = node.parentElement || node.parent) if (node.matches?.('ms-system-instructions, [role="dialog"]')) return true;
+    for (let node = el; node; node = node.parentElement || node.parent) {
+      if (node.matches?.('ms-system-instructions, [role="dialog"]')) return true;
+      if (node === systemPanelForEditor(el)) return true;
+    }
     return false;
+  };
+  const systemPanelForEditor = (editor) => {
+    if (attr(editor, 'placeholder') !== 'Optional tone and style instructions for the model') return null;
+    const matches = elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model');
+    const headings = elements('h1, h2, h3').filter(el => text(el).toLowerCase() === 'system instructions');
+    if (matches.length !== 1 || matches[0] !== editor || headings.length !== 1) return null;
+    for (let node = editor.parentElement || editor.parent; node; node = node.parentElement || node.parent)
+      if (!['body', 'html', 'document'].includes(node.tag) && (node === headings[0] || allElements('h1, h2, h3', node).includes(headings[0]))) return node;
+    return null;
   };
   const editors = () => {
     const scoped = elements('ms-prompt-input-wrapper textarea, ms-prompt-box textarea, ms-autosize-textarea textarea, ms-prompt-input-wrapper [contenteditable="true"], ms-prompt-box [contenteditable="true"], ms-autosize-textarea [contenteditable="true"]').filter(el => !inSystemPanel(el));
@@ -159,10 +171,18 @@
   const stageSystemInstructions = async (value) => {
     const exactLabel = (el, choices) => [attr(el, 'aria-label'), attr(el, 'title'), text(el)]
       .some(label => choices.includes(String(label || '').trim().toLowerCase()));
-    const panels = () => elements('ms-system-instructions, [role="dialog"]').filter(panel =>
-      panel.matches?.('ms-system-instructions') ||
-      [attr(panel, 'aria-label'), attr(panel, 'title'), ...elements('h1, h2, h3', panel).map(text)]
-        .some(label => /system instructions/i.test(String(label || ''))));
+    const panels = () => {
+      const known = elements('ms-system-instructions, [role="dialog"]').filter(panel =>
+        panel.matches?.('ms-system-instructions') ||
+        [attr(panel, 'aria-label'), attr(panel, 'title'), ...elements('h1, h2, h3', panel).map(text)]
+          .some(label => /system instructions/i.test(String(label || ''))));
+      const editors = elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model');
+      if (editors.length === 1) {
+        const panel = systemPanelForEditor(editors[0]);
+        if (panel && !known.includes(panel)) known.push(panel);
+      }
+      return known;
+    };
     const controls = (panel) => elements('button', panel);
     const wait = () => new Promise(resolve => (document.defaultView?.setTimeout || setTimeout)(resolve, 50));
     let panel = null, openedByUs = false;
@@ -174,6 +194,7 @@
       const before = new Set(alreadyOpen);
       openers[0].click(); openedByUs = true;
       for (let attempt = 0; attempt <= 60; attempt++) {
+        if (elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model').length > 1) return false;
         const matches = panels(), opened = matches.filter(candidate => !before.has(candidate));
         if (opened.length === 1) { panel = opened[0]; break; }
         if (opened.length > 1) return false;
@@ -181,9 +202,11 @@
       }
     } else return false;
     if (!panel) return false;
-    const editors = elements('textarea, [contenteditable="true"]', panel).filter(el => !el.disabled && !el.readOnly && attr(el, 'aria-disabled') !== 'true');
-    if (editors.length !== 1) return false;
-    const editor = editors[0], start = '<!-- WEBCODEX MCP BEGIN -->', end = '<!-- WEBCODEX MCP END -->';
+    const exactEditors = elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model');
+    const editors = exactEditors.length ? exactEditors.filter(el => panel === systemPanelForEditor(el)) : elements('textarea, [contenteditable="true"]', panel);
+    const writable = editors.filter(el => !el.disabled && !el.readOnly && attr(el, 'aria-disabled') !== 'true');
+    if (writable.length !== 1) return false;
+    const editor = writable[0], start = '<!-- WEBCODEX MCP BEGIN -->', end = '<!-- WEBCODEX MCP END -->';
     const current = editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
     const starts = current.split(start).length - 1, ends = current.split(end).length - 1;
     if (starts !== ends || starts > 1 || (starts === 1 && current.indexOf(start) > current.indexOf(end))) return false;
@@ -211,9 +234,8 @@
       await wait();
     }
     if (openedByUs && !panels().includes(panel)) return true;
-    const close = controls(panel).filter(el => exactLabel(el, ['close']));
-    if (openedByUs && close.length !== 1) return false;
-    if (openedByUs) {
+    const close = controls(panel).filter(el => labels(el).some(label => /close/.test(label)));
+    if (openedByUs && close.length === 1) {
       close[0].click();
       for (let attempt = 0; attempt <= 60 && panels().includes(panel); attempt++) if (attempt < 60) await wait();
       if (panels().includes(panel)) return false;

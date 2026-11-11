@@ -1,7 +1,7 @@
 importScripts('protocol.js', 'mcp-client.js');
 const KEY = 'webcodexState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
 let state = {connected:false,gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
-let token = '', client = null, serial = Promise.resolve(), demo = false, connecting = false;
+let token = '', client = null, serial = Promise.resolve(), demo = false, connecting = false, lastAutoRefresh = 0, lastAutoRefreshOK = false, autoToolsAvailable = true;
 const uuid = () => crypto.randomUUID();
 const clone = x => JSON.parse(JSON.stringify(x));
 function publicState() { const s=clone(state); delete s.accessToken; s.connecting=connecting; return s; }
@@ -11,6 +11,7 @@ async function restore() {
   try {
     const data=await chrome.storage.session.get(KEY);
     if(data[KEY])state=data[KEY];
+    const {bridgeAuto}=await chrome.storage.local.get('bridgeAuto');state.autoSettings=bridgeAuto||{enabled:false};
     state.hideServiceMessages=!!(await chrome.storage.local.get('hideServiceMessages')).hideServiceMessages;
     let fresh=false;
     if(!state.accessToken&&!state.demoMode){const {bridgeAuth}=await chrome.storage.local.get('bridgeAuth');if(bridgeAuth?.accessToken){Object.assign(state,bridgeAuth);state.connected=true;fresh=true;}}
@@ -37,7 +38,7 @@ chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
 });
 async function command(m) {
   switch(m.type) {
-    case 'bridge.status': return publicState();
+    case 'bridge.status': await refreshForAutoStart(state.autoSettings);updateAutoStatus();return publicState();
     case 'bridge.cleanupPreference':
       state.hideServiceMessages=!!m.enabled;
       await chrome.storage.local.set({hideServiceMessages:state.hideServiceMessages});
@@ -47,6 +48,16 @@ async function command(m) {
     case 'bridge.disconnect': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');token='';client=null;demo=false;state.accessToken='';state.demoMode=false;state.connected=false;state.gateUrl='';state.clientId='';state.agents=[];state.tools=[];break;
     case 'bridge.demo': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');demo=true;state.demoMode=true;token='';client=null;state.accessToken='';state.connected=true;state.gateUrl='Demo mode';state.clientId='demo';state.agents=[{id:'demo',name:'Demo agent',online:true}];state.tools=[{name:'read_file',description:'Demo only: return fixed sample text.',inputSchema:{type:'object',additionalProperties:false,properties:{path:{type:'string'}},required:['path']}}];break;
     case 'bridge.arm': await arm(m);await rememberAuto(m);break;
+    case 'bridge.preferences':
+      {const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
+      const agentId=m.agentId??previous.agentId??'',toolNames=Array.isArray(m.toolNames)?m.toolNames:previous.toolNames||[],consent=m.consent===true;
+      const settings={enabled:consent&&!!agentId&&toolNames.length>0,agentId,toolNames,automatic:m.automatic??previous.automatic??false,consent};
+      await chrome.storage.local.set({bridgeAuto:settings});state.autoSettings=settings;
+      if(m.automatic!==undefined)state.session.automatic=!!m.automatic;
+      if(!m.consent&&!['idle','stopped','paused'].includes(state.session.phase)){state.session.pausedPhase=state.session.phase;state.session.paused=true;state.session.phase='paused';}
+      }
+      updateAutoStatus();
+      break;
     case 'bridge.instructions': if(m.submit!==false) throw Error('submit must be false');await stageInstructions();await save();break;
     case 'bridge.approve': await approve();break;
     case 'bridge.deliver': if(m.submit!==true) throw Error('submit must be true');await deliver(true);break;
@@ -71,10 +82,40 @@ async function connect({gateUrl,clientId}) {
   token=data.access_token;state.accessToken=token;state.demoMode=false;client=WebCodexMCP.createClient({baseUrl:url.origin,token});const init=await client.initialize();state.gateInstructions=typeof init?.instructions==='string'?init.instructions:'';const all=await client.listTools();state.tools=all.filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();state.connected=true;state.gateUrl=url.origin;state.clientId=clientId;state.session.phase='idle';demo=false;
 }
 function base64url(bytes){return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
-async function rememberAuto(m){if(!demo)await chrome.storage.local.set({bridgeAuto:{enabled:true,agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,consent:true}});}
-async function disableAuto(){await chrome.storage.local.set({bridgeAuto:{enabled:false}});}
+async function rememberAuto(m){if(!demo){const settings={enabled:true,agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,consent:true};await chrome.storage.local.set({bridgeAuto:settings});state.autoSettings=settings;updateAutoStatus(settings);}}
+async function disableAuto(){const {bridgeAuto={}}=await chrome.storage.local.get('bridgeAuto');const settings={...bridgeAuto,enabled:false};await chrome.storage.local.set({bridgeAuto:settings});state.autoSettings=settings;updateAutoStatus();}
+function updateAutoStatus(settings=state.autoSettings||{enabled:false}) {
+  if(!settings.enabled)return state.autoStatus='';
+  if(!settings.consent||!settings.agentId||!settings.toolNames?.length)return state.autoStatus='Выберите агента и инструменты';
+  if(!state.connected||demo)return state.autoStatus='Gate не подключён';
+  if(lastAutoRefresh>0&&!lastAutoRefreshOK)return state.autoStatus='Не удалось обновить Gate; повторяю';
+  const agent=state.agents.find(a=>String(a.id??a.name)===settings.agentId);
+  if(!agent||agent.online===false)return state.autoStatus='Агент не в сети';
+  if(!autoToolsAvailable)return state.autoStatus='Ожидаю выбранные инструменты';
+  if(settings.toolNames.some(name=>!state.tools.some(t=>t.name===name)))return state.autoStatus='Ожидаю выбранные инструменты';
+  return state.autoStatus='Готово';
+}
+async function refreshForAutoStart(settings) {
+  settings=settings||state.autoSettings||{enabled:false,toolNames:[]};
+  if(!state.connected||demo||!client||Date.now()-lastAutoRefresh<5000)return lastAutoRefreshOK;
+  lastAutoRefresh=Date.now();
+  try {
+    const signal=AbortSignal.timeout(5000),[agents,tools]=await Promise.all([client.listAgents(signal),client.listTools(signal)]);
+    if(Array.isArray(agents))state.agents=agents;
+    const visibleTools=Array.isArray(tools)?tools.filter(t=>!t.name.startsWith('browser_')):[];
+    autoToolsAvailable=visibleTools.length>0&&(!settings.toolNames?.length||settings.toolNames.every(n=>visibleTools.some(t=>t.name===n)));
+    if(Array.isArray(tools))state.tools=visibleTools;
+    lastAutoRefreshOK=true;
+  } catch(e) {
+    lastAutoRefreshOK=false;
+    if(e?.status===401)await expireAuth(e);
+  }
+  state.autoSettings=settings;updateAutoStatus(settings);await save();
+  return lastAutoRefreshOK;
+}
 async function autoStart(sender,m){
   let {bridgeAuto:settings}=await chrome.storage.local.get('bridgeAuto');
+  state.autoSettings=settings||state.autoSettings||{enabled:false};
   if(settings?.enabled&&!state.connected&&!demo){
     await restore();
     if(state.connected&&!state.session.pendingCall&&state.session.error?.startsWith('Could not restore Gate connection'))await clearSession();
@@ -83,7 +124,11 @@ async function autoStart(sender,m){
   if(!settings&&state.connected&&!demo&&s.agentId&&s.toolNames?.length&&!s.paused&&!['idle','stopped'].includes(s.phase)){
     await rememberAuto(s);settings=(await chrome.storage.local.get('bridgeAuto')).bridgeAuto;
   }
-  if(!settings?.enabled||!settings.consent||!state.connected||demo)return {accepted:false};
+  state.autoSettings=settings||{enabled:false};
+  if(settings?.enabled&&!state.connected&&!demo) {updateAutoStatus(settings);return {accepted:false};}
+  const refreshed=await refreshForAutoStart(settings);
+  const status=updateAutoStatus(settings);
+  if(!settings?.enabled||!settings.consent||!state.connected||demo||!refreshed||status!=='Готово')return {accepted:false};
   if(m.pageInstance&&s.pageInstance===m.pageInstance&&s.tabId===sender.tab.id)return {accepted:true};
   if(s.pendingCall||s.operationKey||s.phase==='delivery_uncertain'){
     if(s.tabId===sender.tab.id){s.paused=true;s.resumeBlocked=true;s.phase='paused';s.error='Page restarted with an unfinished operation; inspect its outcome before starting a new session';await save();}

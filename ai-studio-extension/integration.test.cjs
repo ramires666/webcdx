@@ -18,7 +18,8 @@ function saved(phase = 'waiting_model', name = 'read_file') {
 function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
   const localData = structuredClone(initialLocalData);
   const listeners = {}, calls = [], pageMessages = [], db = { [KEY]: structuredClone(initial) };
-  let createCount = 0, deliveryCount = 0;
+  let createCount = 0, deliveryCount = 0, clock = Date.now();
+  class TestDate extends Date { static now() { return clock; } }
   const chrome = {
     runtime: { id: 'test-id', getURL: p => 'chrome-extension://test-id/' + p, onMessage: { addListener: fn => { listeners.message = fn; } } },
     storage: { session: { setAccessLevel: async () => {}, get: async k => ({ [k]: db[k] && structuredClone(db[k]) }), set: async x => { for (const [k,v] of Object.entries(x)) db[k] = structuredClone(v); } }, local: { get: async k => ({[k]:localData[k]}), set: async x => Object.assign(localData,x), remove: async k => {delete localData[k];}, setAccessLevel: async () => {} } },
@@ -40,8 +41,8 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
     if (u.pathname === '/mcp/v5') {
       const body = JSON.parse(init.body || '{}');
       if (body.method === 'initialize') return json({ jsonrpc: '2.0', id: body.id, result: {} });
-      if (body.method === 'tools/list') return json({ jsonrpc: '2.0', id: body.id, result: { tools: [tool(), tool('write_file')] } });
-      if (body.method === 'tools/call') return json({ jsonrpc: '2.0', id: body.id, result: { structuredContent: { agents: [{ id: 'agent-1', name: 'test agent', online: true }] } } });
+      if (body.method === 'tools/list') return json({ jsonrpc: '2.0', id: body.id, result: { tools: tabBehavior.listTools ? tabBehavior.listTools() : [tool(), tool('write_file')] } });
+      if (body.method === 'tools/call') return json({ jsonrpc: '2.0', id: body.id, result: { structuredContent: { agents: tabBehavior.listAgents ? tabBehavior.listAgents() : [{ id: 'agent-1', name: 'test agent', online: true }] } } });
       if (body.method === 'notifications/initialized') return new Response(null, { status: 202 });
     }
     if (u.pathname === '/bridge/v1/operations' && method === 'POST') {
@@ -56,14 +57,14 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
     throw Error('Unexpected fetch ' + method + ' ' + url);
   };
   const mcp = { createClient: options => WebCodexMCP.createClient({ ...options, fetchImpl: fetch }) };
-  const context = { chrome, crypto: require('node:crypto').webcrypto, URL, URLSearchParams, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, JSON, Promise, Set, Map, Date, Math, Error, String, Object, Number, RegExp, console, btoa: s => Buffer.from(s, 'binary').toString('base64'), fetch, WebCodexProtocol, WebCodexMCP: mcp, importScripts() {}, setTimeout, clearTimeout };
+  const context = { chrome, crypto: require('node:crypto').webcrypto, URL, URLSearchParams, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, JSON, Promise, Set, Map, Date:TestDate, AbortSignal, Math, Error, String, Object, Number, RegExp, console, btoa: s => Buffer.from(s, 'binary').toString('base64'), fetch, WebCodexProtocol, WebCodexMCP: mcp, importScripts() {}, setTimeout, clearTimeout };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'background.js'), 'utf8'), context, { filename: 'background.js' });
   const panel = { url: 'chrome-extension://test-id/panel.html' }, page = { url: 'https://aistudio.google.com/app/prompts/test', frameId: 0, tab: { id: 7 } };
   const message = (msg, sender = panel) => new Promise(resolve => { const async = listeners.message(msg, sender, resolve); if (async !== true) resolve(undefined); });
   const status = () => message({ type: 'bridge.status' });
   const alarm = async () => { listeners.alarm({ name: 'webcodex-recover' }); await status(); };
   const call = async (turn, sender = page) => message({ type: 'studio.call', sessionId: 'session-1', conversationKey: 'chat-1', generating: false, text: '```webcodex-call\n' + JSON.stringify({ v: 1, turn, name: 'read_file', arguments: { path: 'safe.txt' } }) + '\n```' }, sender);
-  return { localData, chrome, message, status, call, alarm, listeners, panel, page, calls, pageMessages, db, token: TOKEN, get createCount() { return createCount; }, get deliveryCount() { return deliveryCount; } };
+  return { localData, chrome, message, status, call, alarm, listeners, panel, page, calls, pageMessages, db, token: TOKEN, advanceTime(ms){clock+=ms;}, get createCount() { return createCount; }, get deliveryCount() { return deliveryCount; } };
 }
 function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
 
@@ -200,6 +201,44 @@ test('automatic start respects drafts, pending operations, another bound tab and
   const state=(await pending.status()).state.session;
   assert.equal(state.phase,'paused');assert.equal(state.operationKey,'do-not-retry');
   assert.equal(pending.createCount,0);
+});
+
+test('saved preferences survive restart and offline discovery; hello retries after agent returns without OAuth',async()=>{
+  let online=false, toolLookups=0, oauth=0;
+  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
+  const initial=saved('idle');initial.agents=[];initial.tools=[];
+  const h=harness(initial,{listAgents:()=>[{id:'agent-1',online}],listTools:()=>{toolLookups++;return online?[tool()]:[{name:'list_agents'}];}}, {bridgeAuto:settings});
+  h.chrome.identity.launchWebAuthFlow=async()=>{oauth++;throw Error('should not request OAuth');};
+  const offline=await h.status();
+  assert.deepEqual(offline.state.autoSettings,settings);
+  assert.equal(offline.state.autoStatus,'Агент не в сети');
+  assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,false);
+  assert.deepEqual(h.localData.bridgeAuto,settings);
+  online=true;h.advanceTime(5001);
+  assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,true);
+  assert.equal((await h.status()).state.session.phase,'waiting_model');
+  assert.equal(toolLookups>=2,true);
+  assert.equal(oauth,0);
+  await h.message({type:'bridge.stop'});
+  assert.equal(h.localData.bridgeAuto.enabled,false);assert.equal(h.localData.bridgeAuto.consent,true);
+  assert.equal(h.localData.bridgeAuto.agentId,'agent-1');assert.deepEqual(Array.from(h.localData.bridgeAuto.toolNames),['read_file']);
+});
+
+test('Studio hello without saved preferences safely stays unarmed',async()=>{
+  const h=harness(saved('idle'));
+  await h.status();
+  const result=await h.message({type:'studio.hello'},h.page);
+  assert.equal(result.accepted,false);assert.equal(result.error,undefined);
+});
+
+test('preferences persist revoked consent and an empty tool selection without restoring old values',async()=>{
+  const h=harness(saved('idle'),{}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true}});
+  await h.status();
+  await h.message({type:'bridge.preferences',agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:false});
+  assert.equal(h.localData.bridgeAuto.enabled,false);assert.equal(h.localData.bridgeAuto.consent,false);
+  await h.message({type:'bridge.preferences',agentId:'agent-1',toolNames:[],automatic:true,consent:true});
+  assert.equal(h.localData.bridgeAuto.enabled,false);assert.equal(h.localData.bridgeAuto.consent,true);
+  assert.deepEqual(Array.from(h.localData.bridgeAuto.toolNames),[]);
 });
 
 test('conversation change pauses and prevents result delivery', async () => {

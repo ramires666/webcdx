@@ -14,19 +14,21 @@ function harness(stored={}, failInitialize=false, localStore={}, clientOverride=
     action:{onClicked:{addListener(fn){listeners.click=fn;}}},sidePanel:{open:async()=>{}},alarms:{create(){},onAlarm:{addListener(){}}},
     permissions:{contains:async()=>true},tabs:{get:async()=>({url:'https://aistudio.google.com/app/prompts/abc'}),sendMessage:async()=>({supported:true,conversationKey:'c',ok:true})},
     identity:{getRedirectURL:()=> 'https://test.chromiumapp.org/webcodex',launchWebAuthFlow:async()=>''}};
-  const context={chrome,crypto:require('node:crypto').webcrypto,URL,URLSearchParams,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,JSON,Promise,Set,Map,Date,Math,Error,String,Object,Number,RegExp,console,btoa:s=>Buffer.from(s,'binary').toString('base64'),fetch:async()=>{throw Error('fetch unexpected')},
+  const context={chrome,crypto:require('node:crypto').webcrypto,URL,URLSearchParams,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,JSON,Promise,Set,Map,Date,AbortSignal,Math,Error,String,Object,Number,RegExp,console,btoa:s=>Buffer.from(s,'binary').toString('base64'),fetch:async()=>{throw Error('fetch unexpected')},
     WebCodexProtocol,WebCodexMCP:clientOverride|| (failInitialize?{createClient:()=>({initialize:async()=>{throw Error('expired')}})}:WebCodexMCP),importScripts(){},setTimeout,clearTimeout};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'background.js'),'utf8'),context,{filename:'background.js'});
   return {listeners,data,sent,chrome};
 }
 function message(h,msg,sender){return new Promise(resolve=>{const async=h.listeners.message(msg,sender,resolve);if(async!==true)resolve(undefined);});}
 test('browser restart restores only credentials, refreshes tools and never starts a chat',async()=>{
-  const localStore={bridgeAuth:{gateUrl:'https://gate.example',clientId:'client',accessToken:'saved-secret'}};
+  const auto={enabled:true,agentId:'a',toolNames:['read_file'],automatic:true,consent:true};
+  const localStore={bridgeAuth:{gateUrl:'https://gate.example',clientId:'client',accessToken:'saved-secret'},bridgeAuto:auto};
   const mcp={createClient:()=>({initialize:async()=>({}),listTools:async()=>[{name:'read_file'}],listAgents:async()=>[{id:'a',online:true}]})};
   const h=harness({},false,localStore,mcp),panel={url:'chrome-extension://test-id/panel.html'};
   const reply=await message(h,{type:'bridge.status'},panel);
   assert.equal(reply.state.connected,true);assert.equal(reply.state.session.phase,'idle');
   assert.equal(reply.state.tools[0].name,'read_file');
+  assert.deepEqual(reply.state.autoSettings,auto);
   assert.equal(JSON.stringify(reply).includes('saved-secret'),false);
   await message(h,{type:'bridge.disconnect'},panel);
   assert.equal(localStore.bridgeAuth,undefined);

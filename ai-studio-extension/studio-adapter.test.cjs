@@ -116,6 +116,39 @@ test('updates only its existing bounded block, waits for Save, and rejects malfo
   assert.equal(closesOnSave.dialogs[0].save.clicked, true);
 });
 
+test('stages the observed system editor without a dialog or Save button and leaves Title and chat untouched', async () => {
+  const state = setup({ draft: 'chat draft' });
+  const opener = state.root.add(new Node('button', { 'aria-label': 'System instructions' }));
+  let pane, title, editor;
+  opener.click = () => {
+    pane = state.root.add(new Node('section'));
+    pane.add(new Node('h2', {}, 'System instructions'));
+    title = pane.add(new Node('input', { placeholder: 'Title' }, ''));
+    title.value = 'My title';
+    editor = pane.add(new Textarea('Keep these user instructions.'));
+    editor.attrs.placeholder = 'Optional tone and style instructions for the model';
+  };
+  assert.equal(await state.adapter.stageSystemInstructions('managed instructions'), true);
+  assert.equal(title.value, 'My title');
+  assert.equal(editor.value, 'Keep these user instructions.\n<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->');
+  assert.equal(state.editor.value, 'chat draft');
+  assert.equal(state.adapter.inspect().supported, true, 'system textarea stays excluded from chat editor discovery');
+});
+
+test('rejects duplicate observed system editor placeholders', async () => {
+  const state = setup();
+  const opener = state.root.add(new Node('button', { 'aria-label': 'System instructions' }));
+  opener.click = () => {
+    const pane = state.root.add(new Node('section'));
+    pane.add(new Node('h2', {}, 'System instructions'));
+    for (let i = 0; i < 2; i++) {
+      const editor = pane.add(new Textarea('Keep this'));
+      editor.attrs.placeholder = 'Optional tone and style instructions for the model';
+    }
+  };
+  assert.equal(await state.adapter.stageSystemInstructions('managed instructions'), false);
+});
+
 test('uses the nested native editor, explicit turn classes, and exact delivery markers', () => {
   const { adapter, editor } = setup();
   const state = adapter.inspect();

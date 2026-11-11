@@ -15,15 +15,16 @@ function createPanel(store = {}, options = {}) {
     constructor(id = '') { Object.assign(this, { id, children: [], listeners: {}, value: '', checked: false, disabled: false, hidden: false, textContent: '', type: '', name: '' }); }
     append(...items) { this.children.push(...items); }
     replaceChildren() { this.children = []; }
-    querySelectorAll(selector) { return selector === 'input:checked' ? this.children.flatMap(x => x.children || []).filter(x => x.type === 'checkbox' && x.checked) : []; }
+    querySelectorAll(selector) { const inputs = this.children.flatMap(x => x.children || []).filter(x => x.type === 'checkbox' || x.type === 'radio'); return selector === 'input:checked' ? inputs.filter(x => x.checked) : selector === 'input' ? inputs : []; }
     addEventListener(name, fn) { this.listeners[name] = fn; }
   }
   const document = { activeElement: null, getElementById(id) { if (!els.has(id)) els.set(id, new Element(id)); return els.get(id); }, createElement() { return new Element(); } };
-  let snapshot = { connected: false, session: { phase: 'idle', paused: false }, tools: [], agents: [] }, failAction = false, poll, connectCount = 0;
+  let snapshot = { connected: false, session: { phase: 'idle', paused: false }, tools: [], agents: [], autoSettings: store.autoSettings }, failAction = false, poll, connectCount = 0;
   const messages = [];
   const chrome = { runtime: { id: 'test', lastError: null, sendMessage(msg, cb) {
     messages.push(msg);
     if (msg.type === 'bridge.status') return cb({ ok: true, state: snapshot });
+    if (msg.type === 'bridge.preferences') { store.autoSettings = msg; snapshot.autoSettings = msg; return cb({ ok: true, state: snapshot }); }
     if (msg.type === 'bridge.connect') connectCount++;
     if (msg.type === 'bridge.connect' && options.connectReply) return options.connectReply.promise.then(reply => cb(reply));
     if (failAction) { failAction = false; return cb({ ok: false, error: 'Action failed' }); }
@@ -31,7 +32,7 @@ function createPanel(store = {}, options = {}) {
   } }, storage: { local: { async get() { if (options.storageRead) await options.storageRead.promise; return { bridgeConnection: store.bridgeConnection }; }, async set(values) { Object.assign(store, values); } } }, tabs: { query: async () => [{ id: 1 }] }, permissions: { request: () => options.permission?.promise || Promise.resolve(true) }, identity: { getRedirectURL: () => 'https://redirect/' } };
   const context = vm.createContext({ chrome, document, URL, setInterval(fn) { poll = fn; } });
   vm.runInContext(fs.readFileSync(require.resolve('./panel.js'), 'utf8'), context);
-  return { get: id => document.getElementById(id), messages, async ready() { if (options.storageRead) await options.storageRead.promise; await Promise.resolve(); await poll(); }, async update(value) { snapshot = value; await poll(); }, fail() { failAction = true; }, click(id) { return document.getElementById(id).listeners.click(); }, change(id, checked) { const el = document.getElementById(id); el.checked = checked; return el.listeners.change(); }, input(id, value) { const el = document.getElementById(id); el.value = value; return el.listeners.input(); }, get connectCount() { return connectCount; } };
+  return { get: id => document.getElementById(id), messages, async ready() { if (options.storageRead) await options.storageRead.promise; await Promise.resolve(); await poll(); }, async update(value) { snapshot = value; await poll(); }, fail() { failAction = true; }, click(id) { return document.getElementById(id).listeners.click(); }, change(id, checked) { const el = document.getElementById(id); el.checked = checked; return el.listeners.change(); }, select(group, value, checked = true) { const container = document.getElementById(group), input = container.querySelectorAll('input').find(x => x.value === value); for (const item of container.querySelectorAll('input')) item.checked = item === input && checked; return container.listeners.change(); }, input(id, value) { const el = document.getElementById(id); el.value = value; return el.listeners.input(); }, get connectCount() { return connectCount; } };
 }
 
 test('service JSON preference reflects state and sends both checkbox values', async () => {
@@ -102,6 +103,51 @@ test('slow storage restore does not overwrite fields edited while it is loading'
   await p.ready();
   assert.equal(p.get('gate-url').value, 'https://fresh.example');
   assert.equal(p.get('client-id').value, 'fresh');
+});
+
+test('saved agent and preferences restore on reopen, and polls preserve edits', async () => {
+  const store = { autoSettings: { agentId: 'agent-1', toolNames: ['read_file'], consent: true, automatic: true } };
+  const base = { connected: true, session: { phase: 'idle' }, tools: [{ name: 'read_file' }, { name: 'list_agents' }], agents: [{ id: 'agent-1', name: 'A' }, { id: 'agent-2', name: 'B' }], autoSettings: store.autoSettings, autoStatus: 'ready' };
+  const p = createPanel(store); await p.update(base);
+  assert.equal(p.get('agents').querySelectorAll('input:checked')[0].value, 'agent-1');
+  assert.deepEqual(p.get('tools').querySelectorAll('input:checked').map(x => x.value), ['read_file']);
+  assert.equal(p.get('consent').checked, true); assert.equal(p.get('automatic').checked, true);
+  await p.select('agents', 'agent-2'); await p.change('consent', false);
+  const updates = p.messages.filter(x => x.type === 'bridge.preferences');
+  assert.equal(updates[0].agentId, 'agent-2'); assert.equal(updates[1].consent, false);
+  await p.update(base);
+  assert.equal(p.get('agents').querySelectorAll('input:checked')[0].value, 'agent-2');
+  assert.equal(p.get('consent').checked, false);
+  const reopened = createPanel(store); await reopened.update({ ...base, autoSettings: store.autoSettings });
+  assert.equal(reopened.get('agents').querySelectorAll('input:checked')[0].value, 'agent-2');
+  assert.equal(reopened.get('consent').checked, false);
+  assert.match(reopened.get('status').textContent, /ready/);
+});
+
+test('remembered tools appear selected when tool metadata arrives after an offline poll', async () => {
+  const saved = { agentId: 'agent-1', toolNames: ['read_file'], consent: true, automatic: false };
+  const p = createPanel({ autoSettings: saved });
+  await p.update({ connected: true, session: { phase: 'idle' }, tools: [{ name: 'list_agents' }], agents: [{ id: 'agent-1', name: 'A', online: false }], autoSettings: saved, autoStatus: 'Агент не в сети' });
+  await p.update({ connected: true, session: { phase: 'idle' }, tools: [{ name: 'list_agents' }, { name: 'read_file' }], agents: [{ id: 'agent-1', name: 'A' }], autoSettings: saved, autoStatus: 'Готово' });
+  assert.deepEqual(p.get('tools').querySelectorAll('input:checked').map(x => x.value), ['read_file']);
+});
+
+test('saved tools absent from the current list can be unchecked', async () => {
+  const saved = { agentId: 'agent-1', toolNames: ['read_file'], consent: true, automatic: false };
+  const p = createPanel({ autoSettings: saved });
+  await p.update({ connected: true, session: { phase: 'idle' }, tools: [{ name: 'list_agents' }], agents: [{ id: 'agent-1', name: 'A', online: false }], autoSettings: saved });
+  const unavailable = p.get('tools').querySelectorAll('input').find(x => x.value === 'read_file');
+  assert.equal(unavailable.checked, true);
+  await p.select('tools', 'read_file', false);
+  assert.equal(p.messages.filter(x => x.type === 'bridge.preferences').at(-1).toolNames.length, 0);
+});
+
+test('active consent and automatic changes persist through bridge preferences', async () => {
+  const p = createPanel();
+  await p.update({ connected: true, session: { phase: 'ready', agentId: 'agent-1', toolNames: ['read_file'], automatic: true }, tools: [{ name: 'read_file' }], agents: [{ id: 'agent-1', name: 'A' }], autoSettings: { agentId: 'agent-1', toolNames: ['read_file'], consent: true, automatic: true } });
+  await p.change('automatic', false); await p.change('consent', false);
+  const updates = p.messages.filter(x => x.type === 'bridge.preferences');
+  assert.equal(updates[0].automatic, false); assert.equal(updates[1].consent, false);
 });
 
 test('connect stays locked across status polls, ignores duplicate clicks, and unlocks on error', async () => {

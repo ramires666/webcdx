@@ -5,6 +5,7 @@
   let state = null, toolSignature = '', agentSignature = '', toolsInitialized = false;
   let connecting = false;
   const edited = new Set();
+  const editedPreferences = new Set();
   function saveConnection() {
     return chrome.storage.local.set({ bridgeConnection: { gateUrl: $('gate-url').value, clientId: $('client-id').value } });
   }
@@ -28,6 +29,7 @@
   }
   function showError(error) { errorEl.textContent = error ? String(error.message || error) : ''; errorEl.hidden = !error; }
   function selected(container) { return [...container.querySelectorAll('input:checked')].map(el => el.value); }
+  function choose(container, values) { const selectedValues = new Set(values || []); for (const input of container.querySelectorAll('input')) input.checked = selectedValues.has(input.value); }
   function renderChoices(container, items, kind) {
     const signature = JSON.stringify(items);
     if (kind === 'tool' ? signature === toolSignature : signature === agentSignature) return;
@@ -47,8 +49,20 @@
     const session = next.session || {};
     const phaseNames = { idle: 'ожидает запуска', ready: 'готов', active: 'выполняется', running: 'выполняется', waiting_approval: 'ожидает подтверждения', paused: 'на паузе', stopped: 'остановлен', delivery_uncertain: 'передача результата не подтверждена', error: 'ошибка' };
     stateEl.textContent = `${session.demo || next.demoMode ? 'Демо режим · ' : ''}${session.phase ? `Gate ${next.connected ? 'подключён' : 'не подключён'} · сеанс: ${phaseNames[session.phase] || session.phase}` : next.connected ? 'Gate подключён' : 'Gate не подключён'}`;
+    const saved = next.autoSettings || {};
     renderChoices($('agents'), next.agents || [], 'agent');
-    renderChoices($('tools'), next.tools || [], 'tool');
+    const availableTools = next.tools || [];
+    renderChoices($('tools'), [...availableTools, ...(saved.toolNames || []).filter(name => !availableTools.some(tool => tool.name === name)).map(name => ({ name, description: 'недоступен, ожидаю агента' }))], 'tool');
+    if (!session.phase || ['idle', 'stopped'].includes(session.phase)) {
+      if (!editedPreferences.has('agentId') && saved.agentId) choose($('agents'), [String(saved.agentId)]);
+      if (!editedPreferences.has('toolNames') && Array.isArray(saved.toolNames)) choose($('tools'), saved.toolNames);
+      if (!editedPreferences.has('consent') && typeof saved.consent === 'boolean') $('consent').checked = saved.consent;
+      if (!editedPreferences.has('automatic') && typeof saved.automatic === 'boolean') $('automatic').checked = saved.automatic;
+    }
+    if (session.phase && !['idle', 'stopped'].includes(session.phase)) {
+      if (session.agentId) choose($('agents'), [String(session.agentId)]);
+      if (Array.isArray(session.toolNames)) choose($('tools'), session.toolNames);
+    }
     if (next.gateUrl && !$('gate-url').value) $('gate-url').value = next.gateUrl;
     if (next.clientId && !$('client-id').value) $('client-id').value = next.clientId;
     $('pending').textContent = session.pendingCall ? JSON.stringify(session.pendingCall, null, 2) : 'Нет ожидающего вызова';
@@ -57,6 +71,7 @@
     $('result').value = session.resultText || '';
     $('hide-service').checked = !!next.hideServiceMessages;
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;
+    if (next.autoStatus) stateEl.textContent += ` · ${typeof next.autoStatus === 'string' ? next.autoStatus : next.autoStatus.message || ''}`;
     const busy = connecting || next.connecting;
     $('connect').disabled = busy || !!next.connected;
     $('connect').textContent = busy ? 'Ожидается вход…' : 'Подключить';
@@ -106,8 +121,19 @@
   $('pause').addEventListener('click', () => act('bridge.pause'));
   $('resume').addEventListener('click', () => act('bridge.resume'));
   $('stop').addEventListener('click', () => act('bridge.stop'));
-  $('consent').addEventListener('change', () => render(state));
-  $('automatic').addEventListener('change', () => { if (state) state.session.automatic = $('automatic').checked; });
+  function savePreferences(field) {
+    editedPreferences.add(field);
+    const savedTools = state?.autoSettings?.toolNames || [];
+    const visibleTools = new Set($('tools').querySelectorAll('input').map(input => input.value));
+    const toolNames = [...new Set([...savedTools.filter(name => !visibleTools.has(name)), ...selected($('tools'))])];
+    const preferences = { agentId: selected($('agents'))[0] || state?.autoSettings?.agentId || '', toolNames, consent: $('consent').checked, automatic: $('automatic').checked };
+    if (state) state.autoSettings = preferences;
+    send('bridge.preferences', preferences).catch(showError);
+  }
+  $('agents').addEventListener('change', () => savePreferences('agentId'));
+  $('tools').addEventListener('change', () => savePreferences('toolNames'));
+  $('consent').addEventListener('change', () => { savePreferences('consent'); render(state); });
+  $('automatic').addEventListener('change', () => { if (state?.session) state.session.automatic = $('automatic').checked; savePreferences('automatic'); });
   $('hide-service').addEventListener('change', () => act('bridge.cleanupPreference', { enabled: $('hide-service').checked }));
   async function poll() { try { render(await send('bridge.status')); } catch (error) { showError(error); } }
   connectionLoaded.then(poll); setInterval(poll, 2000);
