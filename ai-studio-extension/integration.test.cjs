@@ -32,7 +32,7 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
       if (msg.type === 'studio.arm') return { ok: true, supported: true, conversationKey: 'chat-1' };
       if (msg.type === 'studio.stage') return { ok: true };
       if (msg.type === 'studio.deliver') { deliveryCount++; return { ok: true, confirmed: true, supported: true, conversationKey: 'chat-1' }; }
-      if (msg.type === 'studio.snapshot') return { ok: true, delivered: true, supported: true, conversationKey: 'chat-1', generating: false, editorEmpty: true };
+      if (msg.type === 'studio.snapshot') return { ok: true, delivered: tabBehavior.snapshotDelivered ?? true, supported: true, conversationKey: 'chat-1', generating: false, editorEmpty: true };
       return { ok: true };
     } },
     identity: { getRedirectURL: () => 'https://test.chromiumapp.org/webcodex' }
@@ -53,7 +53,7 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
     }
     if (u.pathname === '/bridge/v1/operations/op-1' && method === 'GET') {
       calls.push({ url: u.pathname, method });
-      return json({ id: 'op-1', status: 'completed', result: { content: [{ type: 'text', text: 'file contents' }], isError: false } });
+      return json({ id: 'op-1', status: 'completed', result: { content: [{ type: 'text', text: tabBehavior.resultText ?? 'file contents' }], isError: false } });
     }
     throw Error('Unexpected fetch ' + method + ' ' + url);
   };
@@ -117,6 +117,30 @@ test('resuming a paused write requires current consent and auto-approval', async
   assert.equal((await noConsent.message({ type: 'bridge.resume' })).ok, false); assert.equal(noConsent.createCount, 0);
 });
 
+test('large UTF-8 result is delivered intact once without a size pause', async () => {
+  const fullText='данные 🧪'.repeat(12000), initial=saved();initial.session.automatic=true;
+  const h=harness(initial,{resultText:fullText});await h.status();
+  assert.equal((await h.call('turn-1')).accepted,true);await h.alarm();await h.alarm();
+  const delivered=h.pageMessages.filter(m=>m.type==='studio.deliver');
+  assert.equal(delivered.length,1);
+  assert.equal(JSON.parse(delivered[0].text).result.content[0].text,fullText);
+  assert.equal((await h.status()).state.session.phase,'waiting_model');assert.equal(h.createCount,1);
+});
+
+test('legacy oversized result resumes without replaying its pending operation', async () => {
+  const envelope=JSON.stringify({type:'webcodex-result',v:1,turn:'turn-1',next_turn:'turn-2',operation_id:'op-old',name:'read_file',result:{content:[]}});
+  const make=automatic=>{const initial=saved('paused');Object.assign(initial.session,{paused:true,pausedPhase:'ready',error:'Result exceeds 32 KiB; reduce the tool output before delivery.',pendingCall:{name:'read_file',arguments:{path:'safe.txt'},turn:'turn-1'},operationId:'op-old',operationKey:'key-old',nextTurn:'turn-2',resultText:envelope,automatic});return initial;};
+  const manual=harness(make(false),{snapshotDelivered:false});await manual.status();
+  assert.equal((await manual.message({type:'bridge.resume'})).ok,true);
+  let state=(await manual.status()).state.session;
+  assert.equal(state.phase,'result_ready');assert.equal(state.turn,'turn-1');assert.equal(state.resultText,envelope);assert.equal(state.error,'');
+  assert.equal(manual.createCount,0);assert.equal(manual.deliveryCount,0);
+  const automatic=harness(make(true),{snapshotDelivered:false});await automatic.status();
+  assert.equal((await automatic.message({type:'bridge.resume'})).ok,true);
+  state=(await automatic.status()).state.session;
+  assert.equal(automatic.createCount,0);assert.equal(automatic.deliveryCount,1);assert.equal(state.phase,'waiting_model');assert.equal(state.turn,'turn-2');
+});
+
 test('restored token stays private; tab is bound and one operation delivers advertised next turn', async () => {
   const initial = saved(); initial.session.automatic = true;
   const h = harness(initial);
@@ -134,6 +158,47 @@ test('restored token stays private; tab is bound and one operation delivers adve
   assert.equal(h.calls[0].body.agent_id, 'agent-1');
   await h.call('turn-1'); await h.alarm();
   assert.equal(h.createCount, 2, 'repeated old model response must not create another operation');
+});
+
+test('an oversized saved result resumes after extension reload without refreshing the chat', async () => {
+  const initial=saved('paused');
+  const resultText=JSON.stringify({type:'webcodex-result',v:1,turn:'turn-1',next_turn:'turn-2',operation_id:'old-op',name:'read_file',result:{content:[{type:'text',text:'данные'.repeat(12000)}]}});
+  Object.assign(initial.session,{paused:true,error:'Result exceeds 32 KiB; reduce the tool output before delivery.',resultText,nextTurn:'turn-2',operationId:'old-op',operationKey:'old-key',pendingCall:{name:'read_file',arguments:{path:'safe.txt'}},automatic:true});
+  const injections=[];
+  const h=harness(initial,{sendMessage:async(_id,msg)=>{
+    if(msg.type==='studio.arm'&&!injections.some(item=>item.files))throw Error('Could not establish connection. Receiving end does not exist.');
+    return {ok:true,supported:true,conversationKey:'chat-1',delivered:false,confirmed:msg.type==='studio.deliver'};
+  }});
+  h.chrome.scripting={executeScript:async args=>{injections.push(args);}};
+  await h.status();
+  assert.equal((await h.message({type:'bridge.resume'})).ok,true);
+  assert.equal(injections.length,2);
+  const delivered=h.pageMessages.filter(msg=>msg.type==='studio.deliver');
+  assert.equal(delivered.length,1);assert.equal(delivered[0].text,resultText);
+  assert.equal(h.createCount,0);assert.equal((await h.status()).state.session.turn,'turn-2');
+  assert.equal(h.pageMessages.some(msg=>msg.type==='studio.stage'),false,'the current chat instructions and draft are preserved');
+});
+
+test('resume never injects the bridge into a tab that left AI Studio', async () => {
+  const initial=saved('paused');
+  const resultText=JSON.stringify({type:'webcodex-result',operation_id:'old-op',next_turn:'turn-2'});
+  Object.assign(initial.session,{paused:true,error:'Result exceeds 32 KiB; reduce the tool output before delivery.',resultText,nextTurn:'turn-2',operationId:'old-op',automatic:true});
+  let returned=false;
+  const h=harness(initial,{sendMessage:async(_id,msg)=>{
+    if(!returned)throw Error('Receiving end does not exist.');
+    return {ok:true,supported:true,conversationKey:'chat-1',delivered:false,confirmed:msg.type==='studio.deliver'};
+  }});
+  let injections=0;
+  h.chrome.tabs.get=async id=>({id,url:'https://other.example/'});
+  h.chrome.scripting={executeScript:async()=>{injections++;}};
+  await h.status();
+  assert.equal((await h.message({type:'bridge.resume'})).ok,false);
+  assert.equal(injections,0);assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+  assert.equal((await h.status()).state.session.resultText,resultText);
+  returned=true;
+  h.chrome.tabs.get=async id=>({id,url:'https://aistudio.google.com/prompts/new_chat'});
+  assert.equal((await h.message({type:'bridge.resume'})).ok,true);
+  assert.equal(h.pageMessages.filter(msg=>msg.type==='studio.deliver').length,1);
 });
 
 test('restoring a pending approval never dispatches it', async () => {
@@ -513,6 +578,25 @@ test('recovery rejects another conversation and does not recover a manually paus
   const restored=harness(legacy,{}, {bridgeAuto:auto});await restored.status();
   assert.equal((await restored.message({type:'studio.hello',pageInstance:'new-page'},restored.page)).accepted,true);
   assert.equal((await restored.status()).state.session.phase,'waiting_model');assert.equal(restored.createCount,0);assert.equal(restored.deliveryCount,0);
+});
+
+test('legacy oversized result reload is verified before one automatic delivery',async()=>{
+  const key='Result exceeds 32 KiB; reduce the tool output before delivery.',result=JSON.stringify({type:'webcodex-result',turn:'turn-1',next_turn:'turn-2',operation_id:'op-old'});
+  const make=()=>{const initial=saved('paused');Object.assign(initial.session,{paused:true,phase:'paused',error:key,pausedPhase:'ready',resultText:result,operationId:'op-old',operationKey:'key-old',nextTurn:'turn-2',pageInstance:'old-page',pendingCall:{name:'read_file',arguments:{path:'safe.txt'},turn:'turn-1'},automatic:true});return initial;};
+  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true};
+  const h=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:'chat-1'}:msg.type==='studio.snapshot'?{supported:true,conversationKey:'chat-1',delivered:false}:{ok:true,confirmed:true,supported:true,conversationKey:'chat-1'}},{bridgeAuto:settings});await h.status();
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,true);
+  let state=(await h.status()).state.session;
+  assert.equal(state.phase,'waiting_model');assert.equal(state.turn,'turn-2');assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+  assert.equal(h.pageMessages.filter(m=>m.type==='studio.deliver').length,1);
+
+  const wrong=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:'other-chat'}:{supported:true,conversationKey:'other-chat',delivered:true}},{bridgeAuto:settings});await wrong.status();
+  assert.equal((await wrong.message({type:'studio.hello',pageInstance:'new-page'},wrong.page)).accepted,false);
+  assert.equal(wrong.pageMessages.some(m=>m.type==='studio.deliver'),false);assert.equal(wrong.createCount,0);
+
+  const manual=harness(make(),{}, {bridgeAuto:settings});await manual.status();await manual.message({type:'bridge.pause'});
+  assert.equal((await manual.message({type:'studio.hello',pageInstance:'new-page'},manual.page)).accepted,false);
+  assert.equal(manual.pageMessages.some(m=>m.type==='studio.arm'&&m.recover),false);assert.equal(manual.createCount,0);assert.equal(manual.deliveryCount,0);
 });
 
 test('legacy query migration preserves the prompt path and conversation id',async()=>{
