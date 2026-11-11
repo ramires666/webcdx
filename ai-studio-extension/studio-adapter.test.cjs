@@ -103,6 +103,16 @@ test('stages a bounded system instruction block and preserves surrounding user t
   assert.equal(state.run.clicked, undefined, 'staging never runs the prompt');
 });
 
+test('skips input and Save when the managed block is already current, then closes its panel', async () => {
+  const original = 'Keep these user instructions.\n<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->';
+  const state = systemSetup({ original });
+  assert.equal(await state.system('managed instructions'), true);
+  assert.equal(state.dialogs[0].editor.value, original);
+  assert.deepEqual(state.dialogs[0].editor.events, []);
+  assert.equal(state.dialogs[0].save.clicked, undefined);
+  assert.equal(state.dialogs[0].panel.isConnected, false);
+});
+
 test('updates only its existing bounded block, waits for Save, and rejects malformed or ambiguous panels', async () => {
   const state = systemSetup({ original: 'User text $&\n<!-- WEBCODEX MCP BEGIN -->\nold\n<!-- WEBCODEX MCP END -->', saveDelay: true });
   assert.equal(await state.system('$&'), true);
@@ -173,6 +183,89 @@ test('stages the exact system textarea when its heading is a div and exposes saf
   assert.equal(await missing.adapter.stageSystemInstructions('managed'), false);
   assert.match(missing.adapter.getSystemStageError(), /System instructions pane not found/);
   assert.match(missing.adapter.getSystemStageError(), /exact-placeholder=0, textareas=1/);
+});
+
+test('reuses the exact named native preset, requeries its editor, and names only an empty Untitled preset', async () => {
+  const state = setup({ draft: 'chat draft' });
+  const opener = state.root.add(new Node('button', { 'aria-label': 'System instructions' }));
+  let panel, title, editor, oldEditor, select;
+  opener.click = () => {
+    panel = state.root.add(new Node('section', { role: 'dialog', 'aria-label': 'System instructions' }));
+    panel.add(new Node('h2', {}, 'System instructions'));
+    select = panel.add(new Node('select'));
+    const untitled = select.add(new Node('option', { value: 'untitled' }, 'Untitled'));
+    const named = select.add(new Node('option', { value: 'webcodex' }, 'WebCodex MCP'));
+    untitled.value = 'untitled'; named.value = 'webcodex';
+    select.value = untitled.attrs.value;
+    title = panel.add(new Node('input', { placeholder: 'Title' })); title.value = 'Untitled';
+    oldEditor = panel.add(new Textarea(''));
+    oldEditor.attrs.placeholder = 'Optional tone and style instructions for the model';
+    select.dispatchEvent = event => {
+      select.events.push(event);
+      if (select.value === named.attrs.value) {
+        oldEditor.isConnected = false;
+        panel.children = panel.children.filter(child => child !== oldEditor);
+        editor = panel.add(new Textarea(''));
+        editor.attrs.placeholder = 'Optional tone and style instructions for the model';
+      }
+    };
+    void untitled;
+  };
+  assert.equal(await state.adapter.stageSystemInstructions('managed instructions'), true);
+  assert.equal(select.value, 'webcodex');
+  assert.equal(title.value, 'WebCodex MCP');
+  assert.equal(editor.value, '<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->');
+  assert.equal(oldEditor.value, '', 'writes only to editor after preset selection');
+  assert.equal(state.editor.value, 'chat draft');
+});
+
+test('fails safely on duplicate named presets and never chooses among duplicate Untitled selectors', async () => {
+  const duplicate = setup();
+  const opener = duplicate.root.add(new Node('button', { 'aria-label': 'System instructions' }));
+  opener.click = () => {
+    const panel = duplicate.root.add(new Node('section', { role: 'dialog', 'aria-label': 'System instructions' }));
+    panel.add(new Node('h2', {}, 'System instructions'));
+    const select = panel.add(new Node('select'));
+    select.add(new Node('option', { value: 'one' }, 'WebCodex MCP'));
+    select.add(new Node('option', { value: 'two' }, 'WebCodex MCP'));
+    const editor = panel.add(new Textarea('')); editor.attrs.placeholder = 'Optional tone and style instructions for the model';
+  };
+  assert.equal(await duplicate.adapter.stageSystemInstructions('managed'), false);
+  assert.match(duplicate.adapter.getSystemStageError(), /preset WebCodex MCP not unique/);
+
+  const untitled = setup();
+  const untitledOpener = untitled.root.add(new Node('button', { 'aria-label': 'System instructions' }));
+  untitledOpener.click = () => {
+    const panel = untitled.root.add(new Node('section', { role: 'dialog', 'aria-label': 'System instructions' }));
+    panel.add(new Node('h2', {}, 'System instructions'));
+    for (let i = 0; i < 4; i++) panel.add(new Node('button', { role: 'button' }, 'Untitled'));
+    const title = panel.add(new Node('input', { placeholder: 'Title' })); title.value = 'User title';
+    const editor = panel.add(new Textarea('User text')); editor.attrs.placeholder = 'Optional tone and style instructions for the model';
+  };
+  assert.equal(await untitled.adapter.stageSystemInstructions('managed'), false);
+  assert.match(untitled.adapter.getSystemStageError(), /preset selector ambiguous/);
+  assert.equal(untitled.root.querySelectorAll('button').filter(button => button.attrs.role === 'button' && button.clicked).length, 0);
+});
+
+test('creates the named preset from the explicit Create new instruction control without choosing Untitled entries', async () => {
+  const state = setup();
+  state.document.defaultView.KeyboardEvent = class { constructor(type, init) { this.type = type; Object.assign(this, init); } };
+  const opener = state.root.add(new Node('button', { 'aria-label': 'System instructions' }));
+  let title, editor, create, closed = false;
+  opener.click = () => {
+    const panel = state.root.add(new Node('section', { role: 'dialog', 'aria-label': 'System instructions' }));
+    panel.add(new Node('h2', {}, 'System instructions'));
+    create = panel.add(new Node('button', { role: 'combobox' }, '+ Create new instruction'));
+    create.dispatchEvent = event => { create.events.push(event); if (event.key === 'Escape') closed = true; };
+    title = panel.add(new Node('input', { placeholder: 'Title' })); title.value = 'Untitled';
+    editor = panel.add(new Textarea('')); editor.attrs.placeholder = 'Optional tone and style instructions for the model';
+    for (let i = 0; i < 4; i++) state.root.add(new Node('div', { role: 'menuitem' }, 'Untitled'));
+  };
+  assert.equal(await state.adapter.stageSystemInstructions('managed instructions'), true);
+  assert.equal(closed, true, 'dismisses the menu after finding no named entry');
+  assert.equal(title.value, 'WebCodex MCP');
+  assert.equal(editor.value, '<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->');
+  assert.equal(state.root.querySelectorAll('[role="menuitem"]').filter(item => item.clicked).length, 0);
 });
 
 test('uses the nested native editor, explicit turn classes, and exact delivery markers', () => {

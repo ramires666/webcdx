@@ -5,7 +5,7 @@
   window.__webcodexBridgeLoaded = true;
   const adapter=WebCodexStudio.createAdapter(document,location);
   const pageInstance=Date.now()+'-'+Math.random();
-  let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, sawModel=false, attempted=new Set();
+  let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, sawModel=false, attempted=new Set(), recoverTurn='', recoverTools=[];
   let deliveryPending = false, retired = false;
   const serviceNodes=new Set();
   const send=async(type,data={})=>{
@@ -21,7 +21,8 @@
     if(s.generating)return;
     if(stopping){stopping=false;lastText=s.latestModel?.text||'';return;}
     const model=s.latestModel;if(!model||model.text===baselineText||!model.text||model.text===lastText)return;
-    const marker=sessionId+'\0'+model.text;if(attempted.has(model.text)||inFlight===marker)return;const callSession=sessionId;inFlight=marker;try{const response=await send('studio.call',{text:model.text,conversationKey,generating:s.generating});if(sessionId===callSession&&response?.accepted){lastText=model.text;attempted.add(model.text);if(/^```webcodex-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
+    const recoveringTurn=!!recoverTurn;if(recoveringTurn){try{if(!WebCodexProtocol.parseCall(model.text,recoverTurn,recoverTools))return;}catch{return;}}
+    const marker=sessionId+'\0'+model.text;if(attempted.has(model.text)||inFlight===marker)return;const callSession=sessionId;inFlight=marker;try{const response=await send('studio.call',{text:model.text,conversationKey,generating:s.generating});if(sessionId===callSession&&response?.accepted){lastText=model.text;if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```webcodex-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
   }
   const schedule=()=>{clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(()=>{}),250);};
   document.addEventListener('click',event=>{const button=event.target?.closest?.('button');const label=((button?.getAttribute('aria-label')||'')+' '+(button?.getAttribute('title')||'')+' '+(button?.innerText||'')).trim().toLowerCase();if(adapter.inspect().generating&&(/\b(stop|cancel)\b|остановить|отмена/.test(label)||button?.querySelector?.('.stoppable-spinner, ms-stoppable-spinner')))stopping=true;},true);
@@ -31,9 +32,9 @@
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
     if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup'].includes(m.type)){reply({ok:false});return;}
     if(m.type==='studio.arm'){
-      const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error});return;}
+      const s=adapter.inspect();if(!s.supported||m.recover&&s.conversationKey!==m.expectedConversationKey){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
       if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
-      sessionId=m.sessionId;conversationKey=s.conversationKey;baselineText=s.latestModel?.text||'';lastText=baselineText;lastDelivered='';inFlight='';stopping=false;sawModel=!!s.latestModel;attempted.clear();reply(snapshot());return;
+      sessionId=m.sessionId;conversationKey=s.conversationKey;recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;sawModel=!!s.latestModel;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
     }
     if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
     if(m.type==='studio.cleanup'){if(m.final)adapter.annotateContext();if(!m.enabled)adapter.restoreCleanup();else if(m.final)adapter.cleanup({turns:[...serviceNodes],operationIds:m.operationIds||[]});reply({ok:true});return;}
@@ -50,7 +51,7 @@
       })().catch(e=>reply({ok:false,...snapshot(),error:String(e.message||e)}));
       return true;
     }
-    if(m.type==='studio.snapshot'){reply(snapshot(m.operationId));return;}
+    if(m.type==='studio.snapshot'){const state=snapshot(m.operationId);if(state.delivered&&recoverTurn){recoverTurn='';baselineText=adapter.inspect().latestModel?.text||'';lastText=baselineText;}reply(state);return;}
     if(m.type==='studio.deliver'){
       const s=adapter.inspect(),state=snapshot();if(!s.supported||(!m.submit&&!s.editorEmpty)||s.generating||s.conversationKey!==conversationKey){reply({ok:false,attempted:false,...state});return;}
       if(!m.submit){const ok=adapter.stage(m.text);reply({ok,attempted:false,...state});return;}

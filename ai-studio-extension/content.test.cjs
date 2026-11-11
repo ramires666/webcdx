@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
+const WebCodexProtocol = require('./protocol.js');
 
 function harness() {
   const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'chat-1', latestModel: { text: 'old answer' } };
@@ -21,7 +22,7 @@ function harness() {
   const window = {}; window.top = window;
   class MutationObserver { constructor(callback) { observerCallback = callback; } observe() {} disconnect() { disconnected = true; } }
   const context = { window, location: new URL('https://aistudio.google.com/app/prompts/one'), document, chrome, WebCodexStudio: { createAdapter: () => adapter }, MutationObserver,
-    setTimeout: fn => { const id = ++timerId; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, structuredClone };
+    setTimeout: fn => { const id = ++timerId; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, structuredClone, WebCodexProtocol };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const send = message => new Promise(resolve => listeners.message(message, {}, response => resolve(structuredClone(response))));
   const flush = async () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn(); await new Promise(resolve => setImmediate(resolve)); };
@@ -103,6 +104,23 @@ test('reobserves a completed call after background rejects it while paused', asy
   assert.equal(h.sent.filter(m => m.type === 'studio.call').length, 1);
   h.setAccepted(true); h.mutate(); await h.flush();
   assert.equal(h.sent.filter(m => m.type === 'studio.call').length, 2);
+});
+
+test('recovery arm rejects another conversation without replacing the active session',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1'});h.state.conversationKey='chat-2';
+  const rejected=await h.send({type:'studio.arm',sessionId:'s2',recover:true,expectedConversationKey:'chat-1',recoverTurn:'next',toolNames:[]});
+  assert.equal(rejected.supported,false);
+  assert.equal((await h.send({type:'studio.snapshot',sessionId:'s1'})).conversationKey,'chat-2');
+  assert.equal((await h.send({type:'studio.snapshot',sessionId:'s2'})).error,'Stale session');
+});
+
+test('recovery observes only the advertised valid turn and retries until accepted',async()=>{
+  const h=harness();h.state.latestModel={text:'old rendered call'};
+  await h.send({type:'studio.arm',sessionId:'s1',recover:true,recoverTurn:'turn-2',toolNames:[{name:'read_file',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}],expectedConversationKey:'chat-1'});
+  await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  const valid='```webcodex-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'read_file',arguments:{path:'x'}})+'\n```';
+  h.state.latestModel={text:valid};h.setAccepted(false);h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+  h.setAccepted(true);h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,2);
 });
 
 test('does not suppress normal streaming spinner or duplicate in-flight observations', async () => {

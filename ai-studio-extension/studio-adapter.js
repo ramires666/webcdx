@@ -190,6 +190,7 @@
     };
     const controls = (panel) => elements('button', panel);
     const wait = () => new Promise(resolve => (document.defaultView?.setTimeout || setTimeout)(resolve, 50));
+    const presetName = 'WebCodex MCP';
     let panel = null, openedByUs = false;
     const alreadyOpen = panels();
     if (alreadyOpen.length === 1) panel = alreadyOpen[0];
@@ -210,6 +211,50 @@
       const textareas = elements('textarea');
       return fail(`System instructions pane not found (exact-placeholder=${textareas.filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model').length}, textareas=${textareas.length})`);
     }
+    const namedPresets = (scope) => allElements('option', scope).filter(option => text(option) === presetName);
+    const selects = elements('select', panel);
+    let presetManaged = false;
+    if (selects.length) {
+      if (selects.length !== 1) return fail(`System preset selector ambiguous (count=${selects.length})`);
+      const options = namedPresets(selects[0]);
+      if (options.length > 1) return fail(`System preset WebCodex MCP not unique (count=${options.length})`);
+      if (!options.length) {
+        const selected = allElements('option', selects[0]).find(option => option.value === selects[0].value);
+        if (!selected || !['create new instruction', 'untitled'].includes(text(selected).toLowerCase().replace(/^\+\s*/, '')))
+          return fail('System preset WebCodex MCP not found and current preset is not safe to rename');
+        presetManaged = true;
+      } else {
+        if (selects[0].value !== options[0].value) {
+          selects[0].value = options[0].value;
+          const EventCtor = document.defaultView?.Event;
+          if (EventCtor) selects[0].dispatchEvent(new EventCtor('change', { bubbles: true }));
+          else selects[0].dispatchEvent?.({ type: 'change', bubbles: true });
+          await wait();
+        }
+        presetManaged = true;
+      }
+    } else {
+      const selectorText = el => text(el).toLowerCase().replace(/^\+\s*/, '');
+      const selectors = elements('button, [role="combobox"], [role="button"]', panel).filter(el =>
+        ['create new instruction', 'untitled', presetName.toLowerCase()].includes(selectorText(el)));
+      const named = selectors.filter(el => selectorText(el) === presetName.toLowerCase());
+      if (named.length > 1) return fail(`System preset WebCodex MCP ambiguous (count=${named.length})`);
+      if (!named.length) {
+        if (selectors.length > 1) return fail(`System preset selector ambiguous (count=${selectors.length})`);
+        if (selectors.length === 1) {
+          selectors[0].click();
+          await wait();
+          const options = elements('[role="option"], [role="menuitem"]', document).filter(el => text(el) === presetName);
+          if (options.length === 1) { options[0].click(); presetManaged = true; await wait(); }
+          else {
+            const KeyEvent = document.defaultView?.KeyboardEvent;
+            if (KeyEvent) selectors[0].dispatchEvent(new KeyEvent('keydown', { key: 'Escape', bubbles: true }));
+            if (options.length > 1) return fail(`System preset WebCodex MCP ambiguous (count=${options.length})`);
+            presetManaged = true;
+          }
+        }
+      } else presetManaged = true;
+    }
     const exactEditors = elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model');
     const editors = exactEditors.length ? exactEditors.filter(el => panel === systemPanelForEditor(el)) : elements('textarea, [contenteditable="true"]', panel);
     const writable = editors.filter(el => !el.disabled && !el.readOnly && attr(el, 'aria-disabled') !== 'true');
@@ -217,10 +262,22 @@
       const textareas = elements('textarea', panel).length;
       return fail(`System editor ambiguous (count=${writable.length}, exact-placeholder=${exactEditors.length}, textareas=${textareas})`);
     }
-    const editor = writable[0], start = '<!-- WEBCODEX MCP BEGIN -->', end = '<!-- WEBCODEX MCP END -->';
-    const current = editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
+    let editor = writable[0];
+    const titles = elements('input', panel).filter(el => attr(el, 'placeholder') === 'Title');
+    if (titles.length > 1) return fail(`System preset title ambiguous (count=${titles.length})`);
+    const start = '<!-- WEBCODEX MCP BEGIN -->', end = '<!-- WEBCODEX MCP END -->';
+    let current = editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
+    const onlyManaged = current.startsWith(`${start}\n`) && current.endsWith(`\n${end}`) && current.split(start).length === 2 && current.split(end).length === 2;
     const starts = current.split(start).length - 1, ends = current.split(end).length - 1;
     if (starts !== ends || starts > 1 || (starts === 1 && current.indexOf(start) > current.indexOf(end))) return fail(`System instruction markers invalid (begin=${starts}, end=${ends})`);
+    if (presetManaged && titles.length && ['', 'untitled'].includes(String(titles[0].value || '').trim().toLowerCase()) && (!current.trim() || onlyManaged)) {
+      const title = titles[0], proto = Object.getPrototypeOf(title), setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) setter.call(title, presetName); else title.value = presetName;
+      const EventCtor = document.defaultView?.InputEvent || document.defaultView?.Event;
+      if (EventCtor) title.dispatchEvent(new EventCtor('input', { bubbles: true }));
+      if (document.defaultView?.Event) title.dispatchEvent(new document.defaultView.Event('change', { bubbles: true }));
+      if (String(title.value || '') !== presetName) return fail('System preset title write mismatch');
+    }
     const block = `${start}\n${String(value)}\n${end}`;
     const next = starts ? current.replace(new RegExp(`${start}[\\s\\S]*?${end}`), () => block) : `${current}${current && !current.endsWith('\n') ? '\n' : ''}${block}`;
     const setValue = (target, content) => {
@@ -233,16 +290,19 @@
       if (EventCtor) target.dispatchEvent(new EventCtor('input', { bubbles: true, inputType: 'insertText', data: content }));
       if (document.defaultView?.Event) target.dispatchEvent(new document.defaultView.Event('change', { bubbles: true }));
     };
-    setValue(editor, next);
+    const unchanged = current === next;
+    if (!unchanged) setValue(editor, next);
     const valueNow = () => editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
     if (valueNow() !== next) { setValue(editor, current); return fail('System instruction write mismatch'); }
-    for (let attempt = 0; attempt <= 60; attempt++) {
-      const save = controls(panel).filter(el => exactLabel(el, ['save', 'done']));
-      if (!save.length) break;
-      if (save.length !== 1) { setValue(editor, current); return fail(`System Save ambiguous (count=${save.length})`); }
-      if (!save[0].disabled && attr(save[0], 'aria-disabled') !== 'true') { save[0].click(); break; }
-      if (attempt === 60) { setValue(editor, current); return fail('System Save not enabled'); }
-      await wait();
+    if (!unchanged) {
+      for (let attempt = 0; attempt <= 60; attempt++) {
+        const save = controls(panel).filter(el => exactLabel(el, ['save', 'done']));
+        if (!save.length) break;
+        if (save.length !== 1) { setValue(editor, current); return fail(`System Save ambiguous (count=${save.length})`); }
+        if (!save[0].disabled && attr(save[0], 'aria-disabled') !== 'true') { save[0].click(); break; }
+        if (attempt === 60) { setValue(editor, current); return fail('System Save not enabled'); }
+        await wait();
+      }
     }
     if (openedByUs && !panels().includes(panel)) return true;
     const close = controls(panel).filter(el => labels(el).some(label => /close/.test(label)));

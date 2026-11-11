@@ -65,8 +65,8 @@ async function command(m) {
     case 'bridge.instructions': if(m.submit!==false) throw Error('submit must be false');await stageInstructions();await save();break;
     case 'bridge.approve': await approve();break;
     case 'bridge.deliver': if(m.submit!==true) throw Error('submit must be true');await deliver(true);break;
-    case 'bridge.pause': await disableAuto();if(state.session.phase!=='paused')state.session.pausedPhase=state.session.phase;if(state.session.phase==='delivery_uncertain'||state.session.resumeBlocked)state.session.resumeBlocked=true;state.session.paused=true;state.session.phase='paused';break;
-    case 'bridge.resume': if(state.session.phase==='stopped'||state.session.resumeBlocked||state.session.phase==='delivery_uncertain'||state.session.pausedPhase==='delivery_uncertain'||state.session.error?.includes('outcome is unknown'))throw Error('Resolve the uncertain operation or re-arm this chat before resuming');state.session.paused=false;state.session.count=0;state.session.budgetStart=Date.now();state.session.phase=state.session.pausedPhase|| (state.session.pendingCall?(state.session.operationKey?'recovering':'waiting_approval'):(state.session.resultText?'result_ready':'waiting_model'));state.session.pausedPhase='';break;
+    case 'bridge.pause': await disableAuto();if(state.session.phase!=='paused')state.session.pausedPhase=state.session.phase;if(state.session.phase==='delivery_uncertain'||state.session.resumeBlocked)state.session.resumeBlocked=true;state.session.paused=true;state.session.userPaused=true;state.session.phase='paused';break;
+    case 'bridge.resume': if(state.session.phase==='stopped'||state.session.resumeBlocked||state.session.phase==='delivery_uncertain'||state.session.pausedPhase==='delivery_uncertain'||state.session.error?.includes('outcome is unknown'))throw Error('Resolve the uncertain operation or re-arm this chat before resuming');state.session.paused=false;state.session.userPaused=false;state.session.count=0;state.session.budgetStart=Date.now();state.session.phase=state.session.pausedPhase|| (state.session.pendingCall?(state.session.operationKey?'recovering':'waiting_approval'):(state.session.resultText?'result_ready':'waiting_model'));state.session.pausedPhase='';break;
     case 'bridge.stop': await disableAuto();await stop();break;
     default: throw Error('Unknown bridge command');
   }
@@ -149,6 +149,7 @@ async function autoStart(sender,m){
   const status=updateAutoStatus(settings);
   if(!settings?.enabled||!settings.consent||!state.connected||demo||!refreshed||status!=='Готово')return {accepted:false};
   if(m.pageInstance&&s.pageInstance===m.pageInstance&&s.tabId===sender.tab.id)return {accepted:true};
+  if(s.tabId===sender.tab.id&&m.pageInstance&&s.pageInstance!==m.pageInstance&&recoverableDelivery(s))return reattachDelivery(sender,m);
   if(s.pendingCall||s.operationKey||s.phase==='delivery_uncertain'){
     if(s.tabId===sender.tab.id){s.paused=true;s.resumeBlocked=true;s.phase='paused';s.error='Page restarted with an unfinished operation; inspect its outcome before starting a new session';await save();}
     return {accepted:false};
@@ -161,6 +162,19 @@ async function autoStart(sender,m){
   await clearSession();
   try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
   catch(e){return {accepted:false};}
+}
+function recoverableDelivery(s){return !!(s.resultText&&s.nextTurn&&s.operationId&&s.conversationKey&&(s.phase==='delivery_uncertain'||(s.phase==='paused'&&!s.userPaused&&s.pausedPhase!=='delivery_uncertain'&&s.error==='AI Studio session is unavailable; stop and re-arm this chat')));}
+async function reattachDelivery(sender,m){
+  const s=state.session;
+  try{
+    const armed=await chrome.tabs.sendMessage(sender.tab.id,{type:'studio.arm',sessionId:s.sessionId,recover:true,recoverTurn:s.nextTurn,toolNames:s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean),expectedConversationKey:s.conversationKey});
+    if(!armed?.supported||armed.conversationKey!==s.conversationKey){s.error='AI Studio conversation does not match the saved session; delivery remains uncertain';await save();return {accepted:false};}
+    s.pageInstance=m.pageInstance;s.paused=false;s.userPaused=false;s.resumeBlocked=false;s.phase='delivery_uncertain';s.pausedPhase='';s.error='Checking whether the saved result reached this chat';await save();
+    const chk=await chrome.tabs.sendMessage(sender.tab.id,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId});
+    if(chk?.conversationKey!==s.conversationKey||!chk?.supported){s.error='AI Studio conversation changed; delivery remains uncertain';await save();return {accepted:true};}
+    if(chk.delivered){completeDelivery();await save();}else{s.error='Result is not visible yet; waiting for delivery proof. It will not be sent again.';await save();}
+    return {accepted:true};
+  }catch(e){s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.error='Could not check delivery in AI Studio; the saved result will not be sent again';await save();return {accepted:false};}
 }
 async function readLimited(response,limit){if(!response.body?.getReader){const text=await response.text();if(new TextEncoder().encode(text).length>limit)throw Error('OAuth response exceeds 64 KiB');return text;}const reader=response.body.getReader(),chunks=[];let size=0;try{while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>limit){await reader.cancel();throw Error('OAuth response exceeds 64 KiB');}chunks.push(part.value);}}finally{reader.releaseLock?.();}const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return new TextDecoder().decode(bytes);}
 async function arm(m) {
@@ -218,7 +232,7 @@ async function dispatch(){const s=state.session,p=s.pendingCall;if(!p)throw Erro
     await finishResult(result);
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);s.phase='recovering';await save();}
 }
-async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey});if(chk?.conversationKey!==s.conversationKey||!chk?.supported){s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='Conversation changed';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='AI Studio session is unavailable; stop and re-arm this chat';await save();}return;}
+async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey});if(chk?.conversationKey!==s.conversationKey||!chk?.supported){s.error='Conversation changed; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
   if(s.phase!=='recovering'||!s.pendingCall)return;
   try{let result;if(demo)result={content:[{type:'text',text:'DEMO MODE: sample content'}],isError:false};else if(s.operationId)result=await client.getOperation(s.operationId);else result=await client.createOperation({key:s.operationKey,name:s.pendingCall.name,arguments:s.dispatchArgs,agentId:s.agentId});
     if(['accepted','dispatching','starting','running'].includes(result?.status)){s.operationId=result.operation_id||result.id||s.operationId;await save();return;}

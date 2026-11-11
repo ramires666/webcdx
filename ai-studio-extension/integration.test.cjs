@@ -358,3 +358,35 @@ test('prose, unselected tools and calls from another conversation cannot prove d
   assert.equal((await h.status()).state.session.phase,'delivery_uncertain');
   assert.equal(h.createCount,0);
 });
+
+test('lost receiver reattaches the same tab and completes only from delivery proof',async()=>{
+  const initial=saved('delivery_uncertain');Object.assign(initial.session,{resultText:JSON.stringify({type:'webcodex-result',operation_id:'op-1'}),operationId:'op-1',nextTurn:'turn-2',pageInstance:'old-page'});
+  const h=harness(initial,{}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true}});await h.status();
+  const hello=await h.message({type:'studio.hello',pageInstance:'new-page'},h.page);
+  assert.equal(hello.accepted,true);assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+  assert.equal((await h.status()).state.session.phase,'waiting_model');
+  const arm=h.pageMessages.find(m=>m.type==='studio.arm');assert.equal(arm.sessionId,'session-1');assert.equal(arm.recover,true);assert.equal(arm.expectedConversationKey,'chat-1');assert.equal(arm.recoverTurn,'turn-2');
+});
+
+test('reattach with no delivery proof stays uncertain and never resends',async()=>{
+  const initial=saved('delivery_uncertain');Object.assign(initial.session,{resultText:'saved result',operationId:'op-1',nextTurn:'turn-2',pageInstance:'old-page'});
+  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:'chat-1'}:msg.type==='studio.snapshot'?{supported:true,conversationKey:'chat-1',delivered:false}:{ok:true}}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true}});await h.status();
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,true);
+  const state=(await h.status()).state.session;assert.equal(state.phase,'delivery_uncertain');assert.equal(state.resultText,'saved result');
+  assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+});
+
+test('recovery rejects another conversation and does not recover a manually paused session',async()=>{
+  const make=()=>{const initial=saved('delivery_uncertain');Object.assign(initial.session,{resultText:'saved',operationId:'op-1',nextTurn:'turn-2',pageInstance:'old-page'});return initial;};
+  const auto={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true};
+  const other=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:'different-chat'}:{supported:true,conversationKey:'different-chat',delivered:true}}, {bridgeAuto:auto});await other.status();
+  assert.equal((await other.message({type:'studio.hello',pageInstance:'new-page'},other.page)).accepted,false);
+  assert.equal((await other.status()).state.session.phase,'delivery_uncertain');assert.equal(other.createCount,0);assert.equal(other.deliveryCount,0);
+  const paused=harness(make(),{}, {bridgeAuto:auto});await paused.status();await paused.message({type:'bridge.pause'},paused.panel);
+  assert.equal((await paused.message({type:'studio.hello',pageInstance:'new-page'},paused.page)).accepted,false);
+  assert.equal((await paused.status()).state.session.phase,'paused');assert.equal(paused.pageMessages.some(m=>m.type==='studio.arm'&&m.recover),false);
+  const legacy=make();legacy.session.phase='paused';legacy.session.paused=true;legacy.session.error='AI Studio session is unavailable; stop and re-arm this chat';
+  const restored=harness(legacy,{}, {bridgeAuto:auto});await restored.status();
+  assert.equal((await restored.message({type:'studio.hello',pageInstance:'new-page'},restored.page)).accepted,true);
+  assert.equal((await restored.status()).state.session.phase,'waiting_model');assert.equal(restored.createCount,0);assert.equal(restored.deliveryCount,0);
+});
