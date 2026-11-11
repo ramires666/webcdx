@@ -96,7 +96,8 @@
         let exactCall = false;
         try {
           const parsed = JSON.parse(raw);
-          exactCall = !!parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).sort().join(',') === 'arguments,name,turn,v';
+          const keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.keys(parsed).sort().join(',') : '';
+          exactCall = keys === 'arguments,name,v' || keys === 'arguments,name,turn,v';
         } catch {}
         if ((!prose || !text(prose).trim()) && exactCall)
           return `\`\`\`webcodex-call\n${raw}\n\`\`\``;
@@ -106,7 +107,7 @@
   };
   const inspect = () => {
     if (!location.hostname || location.hostname.toLowerCase() !== 'aistudio.google.com')
-      return { conversationKey: '', generating: false, editorEmpty: false, supported: false, error: 'unsupported site', latestModel: null };
+      return { conversationKey: '', generating: false, editorEmpty: false, supported: false, error: 'unsupported site', latestModel: null, latestUser: null };
     const candidateEditors = editors();
     const recognized = turns();
     const roles = recognized.map(role);
@@ -123,10 +124,15 @@
     else if (recognized.length && !roles.some(Boolean)) error = 'unrecognized conversation roles';
     else if (runs.length > 1 || explicitStops.length > 1) error = `ambiguous generation controls: Run=${runs.length}, Stop=${explicitStops.length}`;
     const model = recognized.filter((el) => role(el) === 'model').pop() || null;
+    const user = recognized.filter((el) => role(el) === 'user').pop() || null;
+    const userContent = user && [...new Set(allElements('[data-turn-role], .chat-turn-container', user))]
+      .find(el => roleValue(el) === 'user' || el.matches?.('.chat-turn-container.user'));
     return {
       conversationKey: conversationKey(), generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
       supported: !error, error, latestModel: model ? { element: model, text: finalText(model) } : null,
+      latestUser: user ? { element: user, text: finalText(userContent || user) } : null,
+      modelAfterUser: !user || recognized.indexOf(model) > recognized.indexOf(user),
     };
   };
   const stage = (value) => {

@@ -380,6 +380,32 @@ test('only reconstructs a sole exact JSON call block without prose or language s
   prose.chunk.add(proseBlock);
   assert.doesNotMatch(prose.adapter.inspect().latestModel.text, /^```webcodex-call/);
 });
+test('reconstructs the current three-field call envelope', () => {
+  const state = setup(); state.chunk.children = []; state.chunk._text = '';
+  state.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
+  assert.equal(state.adapter.inspect().latestModel.text, '```webcodex-call\n{"v":1,"name":"read","arguments":{}}\n```');
+});
+test('inspect exposes the latest user message without turn headers or other role text', () => {
+  const state = setup();
+  state.user._text = '';
+  state.user.children = [];
+  state.user.add(new Node('div', {}, 'User\nNov 11, 2026, 10:30 AM'));
+  const content = state.user.add(new Node('div', { 'data-turn-role': 'User' }));
+  content.add(new Node('ms-prompt-chunk', {}, 'distinct tool result'));
+  const oldUser = new Node('ms-chat-turn');
+  oldUser.add(new Node('div', { 'data-turn-role': 'User' }, 'old result'));
+  state.root.children.splice(state.root.children.indexOf(state.user), 0, oldUser);
+  const latest = state.adapter.inspect().latestUser;
+  assert.equal(latest.element, state.user);
+  assert.equal(latest.text, 'distinct tool result');
+  assert.equal(state.adapter.inspect().modelAfterUser, true);
+  state.root.children.splice(state.root.children.indexOf(state.user), 1);
+  state.root.add(state.user);
+  assert.equal(state.adapter.inspect().modelAfterUser, false);
+  state.root.children.splice(state.root.children.indexOf(state.model), 1);
+  state.root.add(state.model);
+  assert.equal(state.adapter.inspect().modelAfterUser, true);
+});
 test('reads nested data roles and extracts final text chunks without role headers', () => {
   const state = setup({ nestedRoles: false });
   const header = new Node('div', {}, 'Model');

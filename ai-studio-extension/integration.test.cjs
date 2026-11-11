@@ -85,6 +85,47 @@ test('sessions continue beyond ten operations and five minutes', async () => {
   assert.equal(h.createCount, 12);
 });
 
+test('one bound chat executes calls without model turn IDs and deduplicates the same response', async () => {
+  const initial=saved();initial.session.turnless=true;initial.session.automatic=true;
+  const h=harness(initial);await h.status();
+  const text='```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
+  const message={type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false,text,responseKey:'user-task-1-and-model-response'};
+  assert.equal((await h.message(message,h.page)).accepted,true);await h.alarm();
+  assert.equal(h.createCount,1);
+  const result=JSON.parse(h.pageMessages.find(item=>item.type==='studio.deliver').text);
+  assert.equal(Object.hasOwn(result,'turn'),false);assert.equal(Object.hasOwn(result,'next_turn'),false);
+  assert.equal(result.operation_id,'op-1');
+  assert.equal((await h.message(message,h.page)).accepted,true);
+  assert.equal(h.createCount,1,'rerendering or resending the same observed response never replays it');
+  assert.equal((await h.message({...message,responseKey:'next-tool-result-and-model-response'},h.page)).accepted,true);
+  assert.equal(h.createCount,2,'identical arguments are allowed for a new response after a distinct tool result');
+});
+
+test('turnless mode retains selected tools, approval and tab binding checks', async () => {
+  const initial=saved('waiting_model','write_file');initial.session.turnless=true;
+  const h=harness(initial);await h.status();
+  const text='```webcodex-call\n'+JSON.stringify({v:1,name:'write_file',arguments:{path:'safe.txt'}})+'\n```';
+  const message={type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false,text,responseKey:'user-and-write-response'};
+  assert.equal((await h.message(message,{...h.page,tab:{id:8}})).accepted,false);
+  assert.equal((await h.message(message,h.page)).accepted,true);
+  assert.equal((await h.status()).state.session.phase,'waiting_approval');assert.equal(h.createCount,0);
+});
+
+test('a turnless follow-up proves delivery only with an observed matching result envelope', async () => {
+  const initial=saved('delivery_uncertain');
+  Object.assign(initial.session,{turnless:true,nextTurn:'internal-next',operationId:'old-op',operationKey:'old-key',resultText:'saved result',pendingCall:{name:'read_file',arguments:{path:'old'}}});
+  const h=harness(initial);await h.status();
+  const text='```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
+  const message={type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false,text,responseKey:'result-and-next-response'};
+  for(const precedingResultId of [undefined,'other-op']){
+    assert.equal((await h.message({...message,precedingResultId},h.page)).accepted,false);
+    assert.equal(h.createCount,0);
+  }
+  assert.equal((await h.message({...message,precedingResultId:'old-op'},h.page)).accepted,true);
+  assert.equal(h.createCount,1);assert.equal(h.deliveryCount,0);
+  assert.notEqual(h.calls.find(item=>item.method==='POST').body.key,'old-key');
+});
+
 test('legacy limit pauses wait for explicit resume and preserve approval and uncertainty guards', async () => {
   const legacy = saved('paused'); Object.assign(legacy.session, { paused: true, pausedPhase: 'ready', error: 'Session operation limit reached; resume to continue.', pendingCall: { name: 'read_file', arguments: { path: 'safe.txt' }, turn: 'turn-1' } });
   const consent = { bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: ['read_file'], autoApprove: false } };
@@ -443,7 +484,7 @@ test('a new chat can retry startup after a temporary Gate refresh failure', asyn
   assert.notEqual(session.turn,'turn-1');
   assert.equal(session.phase,'waiting_model');
   assert.equal(h.pageMessages.filter(m => m.type === 'studio.stage').length,1);
-  assert.ok(h.pageMessages.find(m => m.type === 'studio.stage').text.includes(session.turn));
+  assert.equal(h.pageMessages.find(m => m.type === 'studio.stage').text, '');
   assert.equal(h.createCount,0);
 });
 
@@ -456,7 +497,7 @@ test('an explicit New chat can rearm after reload of an automatically paused rep
   assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page',conversationReplaced:true},h.page)).accepted,true);
   const session=(await h.status()).state.session;
   assert.equal(session.phase,'waiting_model');assert.notEqual(session.turn,'turn-1');
-  assert.ok(h.pageMessages.find(m=>m.type==='studio.stage').text.includes(session.turn));
+  assert.equal(h.pageMessages.find(m=>m.type==='studio.stage').text, '');
   assert.equal(h.createCount,0);
 });
 
@@ -468,7 +509,7 @@ test('a cleared chat automatically gets a fresh turn once, while unsafe states s
   let state=(await h.status()).state.session;
   assert.equal(state.phase,'waiting_model');assert.equal(state.tabId,7);assert.notEqual(state.sessionId,'session-1');assert.notEqual(state.turn,'turn-1');
   assert.equal(h.pageMessages.filter(m=>m.type==='studio.arm').length,1);
-  const staged=h.pageMessages.find(m=>m.type==='studio.stage');assert.ok(staged.text.includes(state.turn));assert.ok(staged.systemText);
+  const staged=h.pageMessages.find(m=>m.type==='studio.stage');assert.equal(staged.text,'');assert.equal(state.turnless,true);assert.ok(staged.systemText);
   await h.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'chat-1',conversationReplaced:true},h.page);
   assert.equal(h.pageMessages.filter(m=>m.type==='studio.arm').length,1,'repeated observer reports do not create extra turns');
 

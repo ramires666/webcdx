@@ -6,10 +6,10 @@ const path = require('node:path');
 const WebCodexProtocol = require('./protocol.js');
 
 function harness() {
-  const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'chat-1', latestModel: { text: 'old answer' } };
+  const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'chat-1', latestModel: { text: 'old answer' }, latestUser: null };
   let timerId = 0, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false, submitHandler;
   const adapter = {
-    inspect: () => ({ ...state, latestModel: state.latestModel && { ...state.latestModel } }),
+    inspect: () => ({ ...state, latestModel: state.latestModel && { ...state.latestModel }, latestUser: state.latestUser && { ...state.latestUser } }),
     stage: text => { staged.push(text); return state.editorEmpty && !state.generating; }, stageSystemInstructions: async () => true,
     submit: async (text, isCurrent) => { if(submitHandler)return submitHandler(text,isCurrent);if(!state.editorEmpty)return false;submitted.push(text);return true; },
     hasDelivery: operationId => submitted.some(text => JSON.parse(text).operation_id === operationId),
@@ -22,11 +22,11 @@ function harness() {
   const window = {}; window.top = window;
   class MutationObserver { constructor(callback) { observerCallback = callback; } observe() {} disconnect() { disconnected = true; } }
   const context = { window, location: new URL('https://aistudio.google.com/app/prompts/one'), document, chrome, WebCodexStudio: { createAdapter: () => adapter }, MutationObserver,
-    setTimeout: fn => { const id = ++timerId; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, structuredClone, WebCodexProtocol };
+    setTimeout: fn => { const id = ++timerId; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, TextEncoder, structuredClone, WebCodexProtocol };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const send = message => new Promise(resolve => listeners.message(message, {}, response => resolve(structuredClone(response))));
   const flush = async () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn(); await new Promise(resolve => setImmediate(resolve)); };
-  return { state, sent, staged, submitted, send, flush, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
+  return { state, sent, staged, submitted, send, flush, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), run: () => { const button={getAttribute:name=>name==='aria-label'?null:'',innerText:'Run\nkeyboard_return',textContent:''};documentListeners.click({target:{closest:()=>button}}); }, setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
 }
 
 test('delivery waits for async Run readiness and aborts after disarm', async () => {
@@ -243,4 +243,75 @@ test('cleanup annotates final answers, hides accepted service turns, and leaves 
   assert.deepEqual(Array.from(h.cleanups[1].turns),[turn]);
   await h.send({type:'studio.cleanup',sessionId:'s1',enabled:false,final:true,operationIds:[]});
   assert.equal(h.restores,1);assert.equal(h.annotations,3);assert.equal(h.cleanups.length,2);
+});
+
+test('turnless system-only stage preserves an occupied prompt', async () => {
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});h.state.editorEmpty=false;
+  const result=await h.send({type:'studio.stage',sessionId:'s1',text:'',systemText:'instructions'});
+  assert.equal(result.ok,true);assert.deepEqual(h.staged,[]);
+});
+
+test('turnless accepts the same call once for each user and deduplicates rerenders', async () => {
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  const call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
+  h.state.latestUser={text:'first'};h.state.modelAfterUser=true;h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();h.mutate();await h.flush();
+  h.state.latestUser={text:'second'};h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();
+  const calls=h.sent.filter(m=>m.type==='studio.call');assert.equal(calls.length,2);assert.notEqual(calls[0].responseKey,calls[1].responseKey);
+});
+
+test('turnless anchors identical user prompts to distinct delivered results', async () => {
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  const call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
+  h.state.modelAfterUser=true;h.state.latestUser={text:JSON.stringify({type:'webcodex-result',operation_id:'op-1'})};h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();h.mutate();await h.flush();
+  h.state.latestUser={text:JSON.stringify({type:'webcodex-result',operation_id:'op-2'})};h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();h.mutate();await h.flush();
+  const calls=h.sent.filter(m=>m.type==='studio.call');assert.equal(calls.length,2);assert.equal(calls[0].precedingResultId,'op-1');assert.equal(calls[1].precedingResultId,'op-2');assert.notEqual(calls[0].responseKey,calls[1].responseKey);
+});
+
+test('turnless ignores a stale model before the new user result', async () => {
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.state.latestUser={text:'new request'};h.state.latestModel={text:'```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```'};h.state.modelAfterUser=false;h.mutate();await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+});
+
+test('turnless history rerenders do not dispatch without a new Run', async () => {
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.state.latestUser={text:'scrolled history'};h.state.latestModel={text:'```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```',element:{}};h.state.modelAfterUser=true;h.mutate();await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+});
+
+test('turnless Run does not replay a cloned copy of the previous model', async () => {
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});h.run();
+  h.state.latestModel={text:'old answer',element:{}};h.mutate();await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+});
+
+test('stopping a turnless response consumes its Run gate', async () => {
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});h.run();h.state.generating=true;h.mutate();await h.flush();
+  const stop={getAttribute:name=>name==='aria-label'?'Stop':'',innerText:'',textContent:''};h.click({target:{closest:()=>stop}});
+  h.state.generating=false;h.state.latestModel={text:'partial answer',element:{}};h.mutate();await h.flush();
+  h.state.latestModel={text:'historical call',element:{}};h.mutate();await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+});
+
+test('turnless recovery waits for delivered snapshot proof', async () => {
+  const h=harness(),call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
+  h.state.latestUser={text:'request'};h.state.latestModel={text:call};h.state.modelAfterUser=true;
+  await h.send({type:'studio.arm',sessionId:'s1',turnless:true,recover:true,recoverTurn:'',toolNames:[{name:'tool',inputSchema:{type:'object',properties:{},additionalProperties:false}}],expectedConversationKey:'chat-1'});
+  await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'unproven'});await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'webcodex-result',operation_id:'proven'}),submit:true});
+  await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'proven'});await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+});
+
+test('turnless recovery proof clears recovery when the new call has not rendered yet', async () => {
+  const h=harness(),call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
+  h.state.latestUser={text:'request'};h.state.latestModel={text:'previous prose'};h.state.modelAfterUser=false;
+  await h.send({type:'studio.arm',sessionId:'s1',turnless:true,recover:true,recoverTurn:'',toolNames:[{name:'tool',inputSchema:{type:'object',properties:{},additionalProperties:false}}],expectedConversationKey:'chat-1'});
+  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'webcodex-result',operation_id:'proof'}),submit:true});
+  await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'proof'});
+  h.state.latestModel={text:call};h.state.modelAfterUser=true;h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
 });

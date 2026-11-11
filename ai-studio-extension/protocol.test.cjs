@@ -9,6 +9,12 @@ const tools = [
 ];
 const block = (turn, name='write_file', args={path:'x',content:'hi',if_absent:true}) => '```webcodex-call\n'+JSON.stringify({v:1,turn,name,arguments:args})+'\n```';
 test('parses one matching, schema-valid tool call', () => assert.deepEqual(parseCall(block('turn-3'),'turn-3',tools),{name:'write_file',arguments:{path:'x',content:'hi',if_absent:true}}));
+test('turnless mode accepts calls without a turn or with a legacy turn', () => {
+  for (const call of [{v:1,name:'write_file',arguments:{path:'x',content:'hi',if_absent:true}},{v:1,turn:'stale-turn',name:'write_file',arguments:{path:'x',content:'hi',if_absent:true}}]) {
+    assert.deepEqual(parseCall('```webcodex-call\n'+JSON.stringify(call)+'\n```',null,tools),{name:'write_file',arguments:call.arguments});
+  }
+  assert.throws(()=>parseCall('```webcodex-call\n'+JSON.stringify({v:1,name:'write_file',arguments:{path:1,content:'hi',if_absent:true}})+'\n```',null,tools));
+});
 test('plain prose without marker is not a call', () => assert.equal(parseCall('Thinking...', 'turn-1',tools),null));
 test('rejects wrong turn, partial, extra prose, and multiple blocks', () => {
   for (const text of [block('turn-2'), '```webcodex-call\n{', 'before\n'+block('turn-1'), block('turn-1')+'\n'+block('turn-1')]) assert.throws(()=>parseCall(text,'turn-1',tools));
@@ -32,6 +38,9 @@ test('instructions and results retain protocol data', () => {
   assert.deepEqual(result.result.structuredContent,{ok:true}); assert.equal(result.type,'webcodex-result'); assert.equal(result.next_turn,2); assert.equal(result.operation_id,'o');
   const failed=JSON.parse(buildResult({turn:'t',nextTurn:'t2',operationId:'o',name:'t',error:'failed'}));
   assert.equal(failed.transport_error,'failed'); assert.equal('result' in failed,false);
+  const turnless=JSON.parse(buildResult({turn:'internal-t',nextTurn:'internal-t2',operationId:'o2',name:'t',result:{ok:true},turnless:true}));
+  assert.equal('turn' in turnless,false); assert.equal('next_turn' in turnless,false);
+  assert.equal(turnless.operation_id,'o2'); assert.deepEqual(turnless.result,{ok:true});
 });
 test('system instructions contain stable protocol and schemas, session instructions contain only the active turn', () => {
   const system=buildSystemInstructions({agentId:'a',tools,instructions:'do work'});
@@ -42,4 +51,9 @@ test('system instructions contain stable protocol and schemas, session instructi
   assert.doesNotMatch(system,/Return one call per full reply/);
   assert.doesNotMatch(system,/nonce-2|active turn:.*nonce/i);
   assert.match(session,/nonce-2/); assert.match(session,/system MCP rules/); assert.doesNotMatch(session,/inputSchema|Run a command|webcodex-call/);
+});
+test('turnless system instructions omit active turn requirements', () => {
+  const system=buildSystemInstructions({agentId:'a',tools,turnless:true});
+  assert.match(system,/\{"v":1,"name":"tool_name","arguments":/);
+  assert.doesNotMatch(system,/active turn|next_turn|"turn"/i);
 });
