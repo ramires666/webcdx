@@ -41,13 +41,13 @@
     if(m.type==='studio.stage'){
       (async()=>{
         let s=adapter.inspect();
-        if(!s.supported||s.conversationKey!==conversationKey||!s.editorEmpty){reply({ok:false,error:'AI Studio prompt field is not empty; existing text was preserved',...snapshot()});return;}
-        if(!await adapter.stageSystemInstructions(m.systemText)){reply({ok:false,error:'Could not set AI Studio System instructions',...snapshot()});return;}
+        if(!s.supported||s.conversationKey!==conversationKey||!s.editorEmpty){const error=!s.supported?(s.error||'AI Studio editor is not supported'):s.conversationKey!==conversationKey?'AI Studio conversation changed':'AI Studio prompt field is not empty; existing text was preserved';reply({ok:false,...snapshot(),error});return;}
+        if(!await adapter.stageSystemInstructions(m.systemText)){reply({ok:false,...snapshot(),error:adapter.getSystemStageError?.()||'Не удалось заполнить System instructions: редактор не найден или неоднозначен'});return;}
         s=adapter.inspect();
-        if(sessionId!==m.sessionId||!s.supported||s.conversationKey!==conversationKey||!s.editorEmpty){reply({ok:false,error:'AI Studio session or empty prompt field changed while setting System instructions',...snapshot()});return;}
+        if(sessionId!==m.sessionId||!s.supported||s.conversationKey!==conversationKey||!s.editorEmpty){const error=sessionId!==m.sessionId?'AI Studio session changed':!s.supported?(s.error||'AI Studio editor is not supported'):s.conversationKey!==conversationKey?'AI Studio conversation changed':'AI Studio prompt field is not empty; existing text was preserved';reply({ok:false,...snapshot(),error});return;}
         const ok=adapter.stage(m.text);
-        reply({ok,error:ok?undefined:'Could not stage session instructions in the empty prompt field',...snapshot()});
-      })().catch(e=>reply({ok:false,error:String(e.message||e),...snapshot()}));
+        reply({ok,...snapshot(),error:ok?undefined:'Could not stage session instructions in the empty prompt field'});
+      })().catch(e=>reply({ok:false,...snapshot(),error:String(e.message||e)}));
       return true;
     }
     if(m.type==='studio.snapshot'){reply(snapshot(m.operationId));return;}
@@ -64,7 +64,7 @@
           const ok=await adapter.submit(m.text,()=>sessionId===deliverySession&&conversationKey===deliveryConversation);
           if(ok)lastDelivered=m.text;
           reply({ok,attempted:ok,confirmed:ok&&adapter.hasDelivery(operationId),...snapshot()});
-        }catch(e){reply({ok:false,attempted:true,error:'Delivery outcome is unknown',...snapshot()});}
+        }catch(e){reply({ok:false,attempted:true,...snapshot(),error:'Delivery outcome is unknown'});}
         finally{deliveryPending=false;}
       })();
       return true;

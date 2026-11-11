@@ -147,6 +147,32 @@ test('rejects duplicate observed system editor placeholders', async () => {
     }
   };
   assert.equal(await state.adapter.stageSystemInstructions('managed instructions'), false);
+  assert.match(state.adapter.getSystemStageError(), /pane not found.*duplicate editor placeholders=2/);
+});
+
+test('stages the exact system textarea when its heading is a div and exposes safe failure diagnostics', async () => {
+  const state = setup({ draft: 'chat draft' });
+  const opener = state.root.add(new Node('button', { 'aria-label': 'System instructions' }));
+  let pane, title, editor;
+  opener.click = () => {
+    pane = state.root.add(new Node('section'));
+    pane.add(new Node('div', {}, 'System instructions'));
+    title = pane.add(new Node('input', { placeholder: 'Title' })); title.value = 'Untouched title';
+    editor = pane.add(new Textarea('Keep this'));
+    editor.attrs.placeholder = 'Optional tone and style instructions for the model';
+  };
+  assert.equal(await state.adapter.stageSystemInstructions('managed'), true);
+  assert.equal(title.value, 'Untouched title');
+  assert.equal(state.editor.value, 'chat draft');
+  assert.match(editor.value, /managed/);
+  assert.equal(state.adapter.getSystemStageError(), '');
+
+  const missing = setup();
+  const missingOpener = missing.root.add(new Node('button', { 'aria-label': 'System instructions' }));
+  missingOpener.click = () => missing.root.add(new Node('section'));
+  assert.equal(await missing.adapter.stageSystemInstructions('managed'), false);
+  assert.match(missing.adapter.getSystemStageError(), /System instructions pane not found/);
+  assert.match(missing.adapter.getSystemStageError(), /exact-placeholder=0, textareas=1/);
 });
 
 test('uses the nested native editor, explicit turn classes, and exact delivery markers', () => {

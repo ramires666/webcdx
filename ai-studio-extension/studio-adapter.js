@@ -28,14 +28,16 @@
     if (attr(editor, 'placeholder') !== 'Optional tone and style instructions for the model') return null;
     const matches = elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model');
     const headings = elements('h1, h2, h3').filter(el => text(el).toLowerCase() === 'system instructions');
-    if (matches.length !== 1 || matches[0] !== editor || headings.length !== 1) return null;
+    if (matches.length !== 1 || matches[0] !== editor) return null;
+    if (headings.length !== 1) return editor.parentElement || editor.parent || null;
     for (let node = editor.parentElement || editor.parent; node; node = node.parentElement || node.parent)
-      if (!['body', 'html', 'document'].includes(node.tag) && (node === headings[0] || allElements('h1, h2, h3', node).includes(headings[0]))) return node;
-    return null;
+      if (!['body', 'html', 'document'].includes(String(node.tagName || node.tag || '').toLowerCase()) && (node === headings[0] || allElements('h1, h2, h3', node).includes(headings[0]))) return node;
+    return editor.parentElement || editor.parent || null;
   };
   const editors = () => {
-    const scoped = elements('ms-prompt-input-wrapper textarea, ms-prompt-box textarea, ms-autosize-textarea textarea, ms-prompt-input-wrapper [contenteditable="true"], ms-prompt-box [contenteditable="true"], ms-autosize-textarea [contenteditable="true"]').filter(el => !inSystemPanel(el));
-    const candidates = scoped.length ? scoped : elements('textarea, [contenteditable="true"]').filter(el => !inSystemPanel(el));
+    const isSystemEditor = el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model';
+    const scoped = elements('ms-prompt-input-wrapper textarea, ms-prompt-box textarea, ms-autosize-textarea textarea, ms-prompt-input-wrapper [contenteditable="true"], ms-prompt-box [contenteditable="true"], ms-autosize-textarea [contenteditable="true"]').filter(el => !isSystemEditor(el) && !inSystemPanel(el));
+    const candidates = scoped.length ? scoped : elements('textarea, [contenteditable="true"]').filter(el => !isSystemEditor(el) && !inSystemPanel(el));
     return [...new Set(candidates)].filter((el) => !el.disabled && !el.readOnly && attr(el, 'aria-disabled') !== 'true');
   };
   const controls = () => elements('button');
@@ -168,7 +170,10 @@
     pendingSubmit = promise;
     return promise;
   };
+  let systemStageError = '';
   const stageSystemInstructions = async (value) => {
+    systemStageError = '';
+    const fail = reason => (systemStageError = reason, false);
     const exactLabel = (el, choices) => [attr(el, 'aria-label'), attr(el, 'title'), text(el)]
       .some(label => choices.includes(String(label || '').trim().toLowerCase()));
     const panels = () => {
@@ -190,26 +195,32 @@
     if (alreadyOpen.length === 1) panel = alreadyOpen[0];
     else if (!alreadyOpen.length) {
       const openers = elements('button').filter(el => exactLabel(el, ['system instructions']));
-      if (openers.length !== 1) return false;
+      if (openers.length !== 1) return fail(`System instructions opener not unique (count=${openers.length})`);
       const before = new Set(alreadyOpen);
       openers[0].click(); openedByUs = true;
       for (let attempt = 0; attempt <= 60; attempt++) {
-        if (elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model').length > 1) return false;
+        if (elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model').length > 1) return fail(`System instructions pane not found (duplicate editor placeholders=${elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model').length})`);
         const matches = panels(), opened = matches.filter(candidate => !before.has(candidate));
         if (opened.length === 1) { panel = opened[0]; break; }
-        if (opened.length > 1) return false;
+        if (opened.length > 1) return fail(`System instructions pane ambiguous (count=${opened.length})`);
         if (attempt < 60) await wait();
       }
-    } else return false;
-    if (!panel) return false;
+    } else return fail(`System instructions pane not unique (count=${alreadyOpen.length})`);
+    if (!panel) {
+      const textareas = elements('textarea');
+      return fail(`System instructions pane not found (exact-placeholder=${textareas.filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model').length}, textareas=${textareas.length})`);
+    }
     const exactEditors = elements('textarea').filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model');
     const editors = exactEditors.length ? exactEditors.filter(el => panel === systemPanelForEditor(el)) : elements('textarea, [contenteditable="true"]', panel);
     const writable = editors.filter(el => !el.disabled && !el.readOnly && attr(el, 'aria-disabled') !== 'true');
-    if (writable.length !== 1) return false;
+    if (writable.length !== 1) {
+      const textareas = elements('textarea', panel).length;
+      return fail(`System editor ambiguous (count=${writable.length}, exact-placeholder=${exactEditors.length}, textareas=${textareas})`);
+    }
     const editor = writable[0], start = '<!-- WEBCODEX MCP BEGIN -->', end = '<!-- WEBCODEX MCP END -->';
     const current = editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
     const starts = current.split(start).length - 1, ends = current.split(end).length - 1;
-    if (starts !== ends || starts > 1 || (starts === 1 && current.indexOf(start) > current.indexOf(end))) return false;
+    if (starts !== ends || starts > 1 || (starts === 1 && current.indexOf(start) > current.indexOf(end))) return fail(`System instruction markers invalid (begin=${starts}, end=${ends})`);
     const block = `${start}\n${String(value)}\n${end}`;
     const next = starts ? current.replace(new RegExp(`${start}[\\s\\S]*?${end}`), () => block) : `${current}${current && !current.endsWith('\n') ? '\n' : ''}${block}`;
     const setValue = (target, content) => {
@@ -224,13 +235,13 @@
     };
     setValue(editor, next);
     const valueNow = () => editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
-    if (valueNow() !== next) { setValue(editor, current); return false; }
+    if (valueNow() !== next) { setValue(editor, current); return fail('System instruction write mismatch'); }
     for (let attempt = 0; attempt <= 60; attempt++) {
       const save = controls(panel).filter(el => exactLabel(el, ['save', 'done']));
       if (!save.length) break;
-      if (save.length !== 1) { setValue(editor, current); return false; }
+      if (save.length !== 1) { setValue(editor, current); return fail(`System Save ambiguous (count=${save.length})`); }
       if (!save[0].disabled && attr(save[0], 'aria-disabled') !== 'true') { save[0].click(); break; }
-      if (attempt === 60) { setValue(editor, current); return false; }
+      if (attempt === 60) { setValue(editor, current); return fail('System Save not enabled'); }
       await wait();
     }
     if (openedByUs && !panels().includes(panel)) return true;
@@ -238,8 +249,8 @@
     if (openedByUs && close.length === 1) {
       close[0].click();
       for (let attempt = 0; attempt <= 60 && panels().includes(panel); attempt++) if (attempt < 60) await wait();
-      if (panels().includes(panel)) return false;
-    }
+      if (panels().includes(panel)) return fail('System instructions close not completed');
+    } else if (openedByUs && close.length > 1) return fail(`System instructions close not completed (close controls=${close.length})`);
     return true;
   };
   const deliveryTurns = (operationId) => {
@@ -309,5 +320,5 @@
     model.appendChild(note);
     return count;
   };
-  return { inspect, stage, submit, stageSystemInstructions, hasDelivery, deliveryTurns, cleanup, restoreCleanup, annotateContext };
+  return { inspect, stage, submit, stageSystemInstructions, getSystemStageError: () => systemStageError, hasDelivery, deliveryTurns, cleanup, restoreCleanup, annotateContext };
 });

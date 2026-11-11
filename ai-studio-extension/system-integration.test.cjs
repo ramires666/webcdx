@@ -5,13 +5,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Protocol = require('./protocol.js');
 
-function harness({ editorEmpty = true, system = async () => true } = {}) {
+function harness({ editorEmpty = true, system = async () => true, stage = () => true } = {}) {
   const listeners = {}, calls = [], staged = [];
   const state = { supported: true, conversationKey: 'chat-1', editorEmpty, generating: false, latestModel: null };
   const adapter = {
     inspect: () => ({ ...state }),
     stageSystemInstructions: async value => { calls.push(['system', value]); return system(value); },
-    stage: value => { staged.push(value); return state.editorEmpty && !state.generating; },
+    stage: value => { staged.push(value); return stage(value) && state.editorEmpty && !state.generating; },
     restoreCleanup() {}, hasDelivery: () => false, submit: async () => false
   };
   const chrome = { runtime: { sendMessage: async () => ({ accepted: true }), onMessage: { addListener: fn => { listeners.message = fn; } } } };
@@ -53,7 +53,28 @@ test('a rejected system-instructions editor leaves the prompt untouched', async 
   await h.send({ type: 'studio.arm', sessionId: 's1' });
   const reply = await h.send({ type: 'studio.stage', sessionId: 's1', systemText: 'rules', text: 'nonce' });
   assert.equal(reply.ok, false);
+  assert.match(reply.error, /System instructions/);
   assert.deepEqual(h.staged, []);
+});
+
+test('stage precheck and staging failures retain their specific error after snapshot', async () => {
+  const occupied = harness({ editorEmpty: false });
+  await occupied.send({ type: 'studio.arm', sessionId: 's1' });
+  const blocked = await occupied.send({ type: 'studio.stage', sessionId: 's1', systemText: 'rules', text: 'nonce' });
+  assert.match(blocked.error, /existing text was preserved/);
+  assert.deepEqual(occupied.calls, []);
+
+  const rejected = harness({ stage: () => false });
+  await rejected.send({ type: 'studio.arm', sessionId: 's1' });
+  const failed = await rejected.send({ type: 'studio.stage', sessionId: 's1', systemText: 'rules', text: 'nonce' });
+  assert.match(failed.error, /Could not stage session instructions/);
+});
+
+test('stage exception message takes precedence over an empty snapshot error', async () => {
+  const h = harness({ system: async () => { throw Error('adapter failure'); } });
+  await h.send({ type: 'studio.arm', sessionId: 's1' });
+  const reply = await h.send({ type: 'studio.stage', sessionId: 's1', systemText: 'rules', text: 'nonce' });
+  assert.equal(reply.error, 'adapter failure');
 });
 
 test('an existing prompt draft prevents any system or chat write', async () => {
