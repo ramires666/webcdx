@@ -1,4 +1,4 @@
-# WebCodex AI Studio Bridge — alpha 0.1.2
+# WebCodex AI Studio Bridge — alpha 0.1.3
 
 Расширение связывает AI Studio Playground в браузере с WebCodex Gate и выбранным агентом. Это alpha: селекторы страницы AI Studio не проверялись в живом браузере, поэтому интерфейс может измениться.
 
@@ -14,7 +14,17 @@
 
 В `bin/ai-studio-bridge` подготовлены ZIP расширения, Gate версии
 `1.5.0-ai-studio-alpha.3` и агент версии `1.5.0-ai-studio-alpha.1`.
-Расширение имеет собственную версию `0.1.1`.
+Расширение имеет собственную версию `0.1.3`.
+
+### Обновление до 0.1.3
+
+Исправлено распознавание кнопки AI Studio с текстом `Run` и значком
+`keyboard_return`, которая вызывала `ambiguous generation controls`.
+Распакуйте новый ZIP поверх прежней папки, сохранив путь. Нажмите «Обновить»
+у AI Studio Bridge в chrome://extensions и перезагрузите вкладку AI Studio.
+Gate alpha.3 и агент alpha.1 обновлять или перезапускать для этой правки не нужно.
+Готовый агент уже скомпилирован: bin/ai-studio-bridge/webcodex-agent.exe;
+самостоятельная сборка не нужна.
 
 | Файл | Назначение |
 | --- | --- |

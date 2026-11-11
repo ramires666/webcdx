@@ -25,7 +25,7 @@
   const hasSpinner = (scope = document) => elements('.stoppable-spinner, ms-stoppable-spinner', scope).length > 0;
   const labels = (el) => [attr(el, 'aria-label'), attr(el, 'title'), text(el)].filter(Boolean).map(value => value.trim().toLowerCase());
   const hasLabel = (el, words, keyboardSuffix = false) => labels(el).some(value => {
-    const normalized = keyboardSuffix ? value.replace(/\s*\(?\s*(?:ctrl|control)\s*\+\s*enter\s*\)?$/i, '').trim() : value;
+    const normalized = keyboardSuffix ? value.replace(/\s*keyboard_return\s*$/i, '').replace(/\s*\(?\s*(?:ctrl|control)\s*\+\s*enter\s*\)?$/i, '').trim() : value;
     return words.includes(normalized);
   });
   const submitButton = () => {

@@ -96,6 +96,18 @@ test('rejects unsupported roles and accepts Russian submit label', () => {
 test('recognizes duplicate Run aria and text labels with keyboard shortcut suffix', () => {
   assert.equal(setup({ runText: 'Run Ctrl+Enter' }).adapter.inspect().supported, true);
 });
+
+test('recognizes the observed Run icon text without aria and ignores rerun controls', () => {
+  const state = setup({ runText: 'Run\nkeyboard_return' });
+  delete state.run.attrs['aria-label'];
+  state.root.add(new Node('button', { 'aria-label': 'Rerun this turn' }, ''));
+  assert.equal(state.adapter.inspect().supported, true);
+  assert.equal(state.adapter.submit('test prompt'), true);
+  assert.equal(state.run.clicked, true);
+  const duplicate = setup({ runText: 'Run\nkeyboard_return' });
+  duplicate.root.add(new Node('button', {}, 'Run\nkeyboard_return'));
+  assert.equal(duplicate.adapter.inspect().supported, false);
+});
 test('CSS stoppable spinner and Stop-only generation remain observable but cannot stage', () => {
   const active = setup({ generating: true, spinnerClass: true, withoutRun: true });
   assert.equal(active.adapter.inspect().supported, true);
