@@ -467,6 +467,43 @@ test('conversation change pauses and prevents result delivery', async () => {
   assert.equal(h.createCount, 0); assert.equal(h.deliveryCount, 0);
 });
 
+test('the first saved address keeps the active temporary chat session', async () => {
+  const initial=saved();Object.assign(initial.session,{turnless:true,conversationKey:'/prompts/new_chat'});
+  const h=harness(initial);await h.status();
+  const key='/prompts/1N41-xJVAM4U8lJzWroKVIA098051NMUO';
+  const snapshot={type:'studio.tick',sessionId:'session-1',supported:true,conversationKey:key};
+  assert.equal((await h.message(snapshot,h.page)).conversationKey,key);
+  assert.equal((await h.message({...snapshot,type:'studio.snapshot'},h.page)).conversationKey,key,'a racing observer receives the adopted address too');
+  const session=(await h.status()).state.session;
+  assert.equal(session.phase,'waiting_model');assert.equal(session.sessionId,'session-1');
+  const text='Проверю файл.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
+  assert.equal((await h.message({type:'studio.call',sessionId:'session-1',conversationKey:key,generating:false,text,responseKey:'saved-chat-response'},h.page)).accepted,true);
+  assert.equal(h.createCount,1);
+});
+
+test('saving does not bypass a pending operation or a different saved chat', async () => {
+  for(const blocked of [{conversationKey:'/prompts/other-saved-chat'}, {conversationKey:'/prompts/new_chat',operationKey:'pending-key',pendingCall:{name:'read_file',arguments:{path:'safe.txt'}}}]){
+    const initial=saved();Object.assign(initial.session,{turnless:true,...blocked});
+    const h=harness(initial);await h.status();
+    await h.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'/prompts/new-saved-chat'},h.page);
+    assert.equal((await h.status()).state.session.phase,'paused');
+    assert.equal((await h.status()).state.session.conversationKey,blocked.conversationKey);
+    assert.equal(h.createCount,0);
+  }
+});
+
+test('reload recovers a temporary chat paused when it first acquired a saved address', async () => {
+  const initial=saved('paused');Object.assign(initial.session,{turnless:true,paused:true,resumeBlocked:true,pausedPhase:'waiting_model',error:'Conversation changed',conversationKey:'/prompts/new_chat'});
+  const key='/prompts/saved-chat';
+  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};
+  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:key}:{ok:true}},{bridgeAuto:settings});await h.status();
+  const page={...h.page,url:'https://aistudio.google.com'+key};
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},page)).accepted,true);
+  const session=(await h.status()).state.session;
+  assert.equal(session.phase,'waiting_model');assert.equal(session.conversationKey,key);assert.equal(session.turnless,true);
+  assert.equal(h.createCount,0);assert.equal(h.pageMessages.find(msg=>msg.type==='studio.stage').text,'');
+});
+
 test('a new chat can retry startup after a temporary Gate refresh failure', async () => {
   let offline = true;
   const settings = {enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,consent:true};

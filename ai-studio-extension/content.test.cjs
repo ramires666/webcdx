@@ -251,6 +251,18 @@ test('turnless system-only stage preserves an occupied prompt', async () => {
   assert.equal(result.ok,true);assert.deepEqual(h.staged,[]);
 });
 
+test('a saved-address acknowledgement updates the local binding without losing the active response', async () => {
+  const h=harness();h.state.conversationKey='/prompts/new_chat';
+  await h.send({type:'studio.arm',sessionId:'s1',turnless:true});h.run();
+  h.state.generating=true;h.mutate();await h.flush();
+  h.state.conversationKey='/prompts/saved-chat';h.state.generating=false;h.state.modelAfterUser=true;
+  h.state.latestModel={text:'```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```',element:{}};
+  h.setSendHandler(msg=>({accepted:true,conversationKey:msg.type==='studio.snapshot'?h.state.conversationKey:undefined}));
+  h.mutate();await h.flush();h.mutate();await h.flush();
+  const calls=h.sent.filter(msg=>msg.type==='studio.call');
+  assert.equal(calls.length,1);assert.equal(calls[0].conversationKey,'/prompts/saved-chat');
+});
+
 test('turnless accepts the same call once for each user and deduplicates rerenders', async () => {
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
   const call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';

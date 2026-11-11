@@ -385,6 +385,30 @@ test('reconstructs the current three-field call envelope', () => {
   state.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
   assert.equal(state.adapter.inspect().latestModel.text, '```webcodex-call\n{"v":1,"name":"read","arguments":{}}\n```');
 });
+test('reconstructs a current call alongside prose, including across chunks', () => {
+  const state = setup(); state.chunk.children = []; state.chunk._text = 'I will read that now.';
+  state.chunk.add(new Node('ms-code-block', { 'data-test-language': 'webcodex-call' })).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
+  assert.equal(state.adapter.inspect().latestModel.text, 'I will read that now.\n```webcodex-call\n{"v":1,"name":"read","arguments":{}}\n```');
+
+  const multi = setup(); multi.chunk._text = 'I will read that now.';
+  multi.model.children[0].add(new Node('ms-text-chunk', {}, 'One more note.'))
+    .add(new Node('ms-code-block', { 'data-test-language': 'webcodex-call' })).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
+  assert.equal(multi.adapter.inspect().latestModel.text, 'I will read that now.\nOne more note.\n```webcodex-call\n{"v":1,"name":"read","arguments":{}}\n```');
+});
+test('does not promote an unmarked three-field JSON example in prose', () => {
+  const state = setup(); state.chunk.children = []; state.chunk._text = 'Example payload:';
+  state.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
+  assert.doesNotMatch(state.adapter.inspect().latestModel.text, /^```webcodex-call/);
+});
+test('does not promote duplicate code blocks or legacy calls with prose', () => {
+  const duplicate = setup(); duplicate.chunk.children = []; duplicate.chunk._text = '';
+  for (let i = 0; i < 2; i++) duplicate.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
+  assert.doesNotMatch(duplicate.adapter.inspect().latestModel.text, /^```webcodex-call/);
+
+  const legacy = setup(); legacy.chunk.children = []; legacy.chunk._text = 'Please run this: ';
+  legacy.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"turn":2,"name":"read","arguments":{}}'));
+  assert.doesNotMatch(legacy.adapter.inspect().latestModel.text, /^```webcodex-call/);
+});
 test('inspect exposes the latest user message without turn headers or other role text', () => {
   const state = setup();
   state.user._text = '';

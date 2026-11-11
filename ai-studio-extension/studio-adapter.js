@@ -84,26 +84,33 @@
       for (const junk of content.querySelectorAll('ms-thought-accordion, ms-thought-chunk, button')) junk.remove();
     }
     const chunks = content.querySelectorAll ? [...content.querySelectorAll('ms-text-chunk')] : [];
-    if (chunks.length > 1) return chunks.map(cleanContentText).filter(Boolean).join('\n');
-    const scope = chunks[0] || content;
-    const codes = scope.querySelectorAll ? [...scope.querySelectorAll('ms-code-block')] : [];
+    const scopes = chunks.length ? chunks : [content];
+    const codes = scopes.flatMap(scope => scope.querySelectorAll ? [...scope.querySelectorAll('ms-code-block')] : []);
     if (codes.length === 1) {
       const code = codes[0].querySelectorAll ? codes[0].querySelectorAll('pre code')[0] : null;
       if (code) {
         const raw = text(code);
-        const prose = scope.cloneNode ? scope.cloneNode(true) : null;
-        if (prose) for (const block of prose.querySelectorAll('ms-code-block')) block.remove();
-        let exactCall = false;
+        let shape = '';
         try {
           const parsed = JSON.parse(raw);
           const keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.keys(parsed).sort().join(',') : '';
-          exactCall = keys === 'arguments,name,v' || keys === 'arguments,name,turn,v';
+          if (keys === 'arguments,name,v') shape = 'current';
+          else if (keys === 'arguments,name,turn,v') shape = 'legacy';
         } catch {}
-        if ((!prose || !text(prose).trim()) && exactCall)
-          return `\`\`\`webcodex-call\n${raw}\n\`\`\``;
+        const prose = content.cloneNode ? content.cloneNode(true) : null;
+        if (prose) for (const block of prose.querySelectorAll('ms-code-block')) block.remove();
+        const proseChunks = prose && chunks.length ? [...prose.querySelectorAll('ms-text-chunk')] : prose ? [prose] : [];
+        const proseText = proseChunks.map(cleanContentText).filter(Boolean).join('\n');
+        const explicitlyMarked = attr(codes[0], 'data-test-language') === 'webcodex-call' ||
+          /(?:^|\s)language-webcodex-call(?:\s|$)/.test(attr(code, 'class') || '');
+        const hasContext = !!proseText.trim() || chunks.length > 1;
+        if ((shape === 'current' && (!hasContext || explicitlyMarked)) || (shape === 'legacy' && chunks.length <= 1 && !proseText.trim())) {
+          const call = `\`\`\`webcodex-call\n${raw}\n\`\`\``;
+          return proseText.trim() ? `${proseText}\n${call}` : call;
+        }
       }
     }
-    return chunks.length ? cleanContentText(scope) : cleanContentText(content);
+    return chunks.length ? chunks.map(cleanContentText).filter(Boolean).join('\n') : cleanContentText(content);
   };
   const inspect = () => {
     if (!location.hostname || location.hostname.toLowerCase() !== 'aistudio.google.com')

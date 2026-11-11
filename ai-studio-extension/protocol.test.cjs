@@ -15,6 +15,15 @@ test('turnless mode accepts calls without a turn or with a legacy turn', () => {
   }
   assert.throws(()=>parseCall('```webcodex-call\n'+JSON.stringify({v:1,name:'write_file',arguments:{path:1,content:'hi',if_absent:true}})+'\n```',null,tools));
 });
+test('turnless mode accepts concise Russian explanation around one correctly fenced call', () => {
+  const reply='Сначала проверю файл и сохраню его только если он ещё не существует.\n\n```webcodex-call\n{"v":1,"name":"write_file","arguments":{"path":"notes.txt","content":"Готово","if_absent":true}}\n```\n\nПосле выполнения сообщу результат.';
+  assert.deepEqual(parseCall(reply,null,tools),{name:'write_file',arguments:{path:'notes.txt',content:'Готово',if_absent:true}});
+  assert.throws(()=>parseCall(reply,'turn-1',tools));
+});
+test('turnless mode rejects multiple blocks and inline or malformed fence examples', () => {
+  const call='```webcodex-call\n{"v":1,"name":"write_file","arguments":{"path":"x","content":"hi","if_absent":true}}\n```';
+  for (const reply of [call+'\n'+call, 'Example: ```webcodex-call {"v":1}```\n'+call, '```webcodex-call {"v":1}\n```\n'+call]) assert.throws(()=>parseCall(reply,null,tools));
+});
 test('plain prose without marker is not a call', () => assert.equal(parseCall('Thinking...', 'turn-1',tools),null));
 test('rejects wrong turn, partial, extra prose, and multiple blocks', () => {
   for (const text of [block('turn-2'), '```webcodex-call\n{', 'before\n'+block('turn-1'), block('turn-1')+'\n'+block('turn-1')]) assert.throws(()=>parseCall(text,'turn-1',tools));
@@ -55,5 +64,8 @@ test('system instructions contain stable protocol and schemas, session instructi
 test('turnless system instructions omit active turn requirements', () => {
   const system=buildSystemInstructions({agentId:'a',tools,turnless:true});
   assert.match(system,/\{"v":1,"name":"tool_name","arguments":/);
+  assert.match(system,/concise user-facing explanation/);
+  assert.match(system,/Do not include meta reasoning/);
+  assert.doesNotMatch(system,/no prose or additional calls/);
   assert.doesNotMatch(system,/active turn|next_turn|"turn"/i);
 });

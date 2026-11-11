@@ -10,9 +10,9 @@ const tool = { name: 'read_file', description: 'test', inputSchema: { type: 'obj
 
 function harness() {
   let model = { text: 'existing answer' }, latestUser = null, modelAfterUser = true, editorEmpty = true, supported = true;
-  let refreshFails = 1, systemStageFails = 1, now = 10000, generating = false, observerCallback;
+  let refreshFails = 1, systemStageFails = 1, now = 10000, generating = false, observerCallback, conversationKey = '/prompts/new_chat';
   const operations = [], messages = [], staged = [], bgListeners = [], contentListeners = [], timers = new Map(), intervals = new Map(); let timerId = 0;
-  const session = { phase: 'waiting_model', agentId: 'agent-1', toolNames: ['read_file'], automatic: true, paused: false, turn: 'old-turn', instructions: '', pendingCall: null, resultText: '', error: '', count: 0, tabId: 7, sessionId: 'old-session', conversationKey: 'chat-1', pageInstance: 'page-1' };
+  const session = { phase: 'waiting_model', agentId: 'agent-1', toolNames: ['read_file'], automatic: true, paused: false, turn: 'old-turn', instructions: '', pendingCall: null, resultText: '', error: '', count: 0, tabId: 7, sessionId: 'old-session', conversationKey, pageInstance: 'page-1' };
   const db = { [KEY]: { connected: true, gateUrl: 'https://gate.example', clientId: 'client', accessToken: TOKEN, agents: [{ id: 'agent-1', name: 'test', online: true }], tools: [tool], session }, };
   const local = { bridgeAuth: { gateUrl: 'https://gate.example', clientId: 'client', accessToken: TOKEN }, bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: ['read_file'], automatic: true, autoApprove: false }, bridgeAutoSetupV1: true };
   const chrome = {
@@ -22,7 +22,7 @@ function harness() {
     tabs: { get: async id => ({ id, url: 'https://aistudio.google.com/app/prompts/chat' }), sendMessage: async (_id, msg) => new Promise(resolve => { messages.push(structuredClone(msg)); const listener = contentListeners[0]; if (!listener) throw Error('No content listener'); const async = listener(msg, {}, resolve); if (async !== true && !['studio.stage'].includes(msg.type)) resolve(undefined); }) }
   };
   const adapters = { createAdapter: () => ({
-    inspect: () => ({ supported, generating, controlsPending: false, editorEmpty, conversationKey: 'chat-1', latestModel: model, latestUser, modelAfterUser, error: supported ? '' : 'editor unavailable' }),
+    inspect: () => ({ supported, generating, controlsPending: false, editorEmpty, conversationKey, latestModel: model, latestUser, modelAfterUser, error: supported ? '' : 'editor unavailable' }),
     stageSystemInstructions: async text => { if (systemStageFails-- > 0) return false; staged.push({ kind: 'system', text }); return true; },
     getSystemStageError: () => 'transient system editor', stage: text => { staged.push({ kind: 'turn', text }); editorEmpty = false; return true; },
     restoreCleanup() {}, hasDelivery: operationId => { try { return JSON.parse(latestUser?.text || '{}').operation_id === operationId; } catch { return false; } }, submit: async text => { latestUser={text};modelAfterUser=false;return true; }
@@ -34,7 +34,7 @@ function harness() {
   // Content owns its listener on runtime.onMessage; separate the background listener installed first.
   context.chrome.runtime.onMessage.addListener = fn => contentListeners.push(fn);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
-  return { chrome, local, messages, staged, db, operations, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() { const pending = [...timers.values()]; timers.clear(); for (const fn of [...pending, ...intervals.values()]) fn(); await this.flush(); }, advance(ms) { now += ms; }, get state() { return db[KEY].session; } };
+  return { chrome, local, messages, staged, db, operations, saveChat: () => { conversationKey='/prompts/saved-chat'; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() { const pending = [...timers.values()]; timers.clear(); for (const fn of [...pending, ...intervals.values()]) fn(); await this.flush(); }, advance(ms) { now += ms; }, get state() { return db[KEY].session; } };
 }
 
 test('New chat retries startup after Gate refresh and system instruction staging failures', async () => {
@@ -74,4 +74,16 @@ test('a new chat runs repeated calls without inserting an ID or replaying an old
     assert.equal(Object.hasOwn(JSON.parse(delivery.text),'turn'),false);
     assert.equal(Object.hasOwn(JSON.parse(delivery.text),'next_turn'),false);
   }
+});
+
+test('saving the current chat during its first response does not pause or lose the call', async () => {
+  const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  const sessionId=h.state.sessionId;
+  h.userMessage('Read the file');h.saveChat();
+  h.modelMessage('Проверю файл.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
+  await h.tick();await h.tick();
+  assert.equal(h.state.sessionId,sessionId);assert.equal(h.state.conversationKey,'/prompts/saved-chat');
+  assert.equal(h.state.phase,'waiting_model');assert.equal(h.operations.length,1);
+  assert.equal(h.messages.find(msg=>msg.type==='studio.call').conversationKey,'/prompts/saved-chat');
 });

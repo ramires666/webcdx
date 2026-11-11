@@ -32,7 +32,7 @@ chrome.alarms.create('webcodex-recover',{periodInMinutes:0.5});
 chrome.alarms.onAlarm.addListener(a=>{if(a.name==='webcodex-recover') enqueue(async()=>{await ready;await recover();});});
 chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
   if(connecting&&msg?.type==='bridge.status'&&sender.url===chrome.runtime.getURL('panel.html')){ready.then(()=>reply({ok:true,state:publicState()})).catch(()=>reply({ok:false,error:'Не удалось загрузить состояние'}));return true;}
-  if(msg?.type?.startsWith('studio.')) { enqueue(async()=>{await ready;if(sender.frameId!==0||!Number.isInteger(sender.tab?.id)||new URL(sender.url||'').origin!=='https://aistudio.google.com')throw Error('Untrusted Studio sender');if(msg.type==='studio.hello')return autoStart(sender,msg);if(sender.tab.id!==state.session.tabId)throw Error('Untrusted Studio sender');return studioMessage(msg,sender);}).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)})); return true; }
+  if(msg?.type?.startsWith('studio.')) { enqueue(async()=>{await ready;if(sender.frameId!==0||!Number.isInteger(sender.tab?.id)||new URL(sender.url||'').origin!=='https://aistudio.google.com')throw Error('Untrusted Studio sender');if(msg.type==='studio.hello')return autoStart(sender,msg);if(sender.tab.id!==state.session.tabId)throw Error('Untrusted Studio sender');return studioMessage(msg,sender);}).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted,...(value?.conversationKey?{conversationKey:value.conversationKey}:{})})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)})); return true; }
   const connectRequest=msg?.type==='bridge.connect'&&sender.url===chrome.runtime.getURL('panel.html');
   if(connectRequest&&connecting){reply({ok:false,error:'Вход в Gate уже выполняется. Завершите или закройте окно входа.'});return;}
   if(connectRequest)connecting=true;
@@ -177,7 +177,8 @@ async function autoStart(sender,m){
     const existing=await chrome.tabs.get(s.tabId).catch(()=>null);
     if(existing)return {accepted:false};
   }
-  if((s.paused&&s.phase!=='stopped'&&!(m.conversationReplaced&&!s.userPaused&&['Conversation changed','Conversation was replaced'].includes(s.error)))||s.userPaused)return {accepted:false};
+  const promoted=s.turnless&&s.error==='Conversation changed'&&savedChatPromotion(s.conversationKey,new URL(sender.url).pathname);
+  if((s.paused&&s.phase!=='stopped'&&!promoted&&!(m.conversationReplaced&&!s.userPaused&&['Conversation changed','Conversation was replaced'].includes(s.error)))||s.userPaused)return {accepted:false};
   await clearSession();
   try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
   catch(e){return {accepted:false};}
@@ -226,12 +227,20 @@ async function arm(m) {
 }
 async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});state.session={phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null};await save();}
 async function stageInstructions(){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
+function savedChatPromotion(from,to){
+  return /^\/(?:app\/)?prompts\/new_chat$/.test(String(from).split('#')[0])&&/^\/(?:app\/)?prompts\/(?!new_chat$)[^/#?]+$/.test(String(to).split('#')[0]);
+}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
+  if(['studio.snapshot','studio.tick'].includes(m.type)&&s.turnless&&!m.conversationReplaced&&m.supported&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&['waiting_model','ready','paused'].includes(s.phase)&&(!s.paused||s.error==='Conversation changed')&&savedChatPromotion(s.conversationKey,m.conversationKey)){
+    s.conversationKey=m.conversationKey;
+    if(s.paused){s.paused=false;s.resumeBlocked=false;s.phase=s.pausedPhase||'waiting_model';s.pausedPhase='';s.error='';}
+    await save();return {accepted:true,conversationKey:s.conversationKey};
+  }
   if(!m.conversationReplaced&&m.conversationKey===s.conversationKey&&s.phase==='paused'&&s.error==='Conversation changed'&&recoverableDelivery(s)&&(m.type==='studio.call'||m.supported)){
     s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.pausedPhase='';s.error='Checking whether the saved result reached this chat';
   }
-  if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationReplaced||m.conversationKey!==s.conversationKey||!m.supported){if(m.conversationReplaced&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&s.phase!=='delivery_uncertain'){const restarted=await autoStart(sender,{pageInstance:s.pageInstance,conversationReplaced:true});if(restarted.accepted)return restarted;}if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'Conversation changed';await save();return {accepted:true};}await recover();return {accepted:true};}
+  if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationReplaced||m.conversationKey!==s.conversationKey||!m.supported){if(m.conversationReplaced&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&s.phase!=='delivery_uncertain'){const restarted=await autoStart(sender,{pageInstance:s.pageInstance,conversationReplaced:true});if(restarted.accepted)return restarted;}if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'Conversation changed';await save();return {accepted:true};}await recover();return {accepted:true,conversationKey:s.conversationKey};}
     if(m.type==='studio.call'){
     if(s.paused)return {accepted:false};
     if(s.turnless){
@@ -255,7 +264,7 @@ async function studioMessage(m,sender) {
     }
     await save();return {accepted:!s.paused};
   }
-  if(m.type==='studio.tick'){await recover();return {accepted:true};}
+  if(m.type==='studio.tick'){await recover();return {accepted:true,conversationKey:s.conversationKey};}
   throw Error('Unknown Studio message');
 }
 async function approve(){const s=state.session;if(s.phase!=='waiting_approval'||!s.pendingCall||s.paused)throw Error('No pending approval');await dispatch();}
