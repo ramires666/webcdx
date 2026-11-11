@@ -519,6 +519,29 @@ test('confirms only an exact result envelope in the submitted user turn', () => 
   assert.equal(setup().adapter.hasDelivery('op-1'), true, 'legacy exact marker remains supported');
 });
 
+test('proves legacy Markdown-rendered delivery against the exact expected envelope', () => {
+  const payload = JSON.stringify({
+    type: 'webcodex-result', v: 1, operation_id: 'op-legacy', name: 'browser',
+    result: { content: [{ type: 'text', text: JSON.stringify({ path: 'C:\\Users\\alice\\file.txt', quote: 'say "hello"' }) }] },
+  });
+  const rendered = payload.replace(/\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
+  assert.throws(() => JSON.parse(rendered));
+
+  const state = setup();
+  state.user.attrs['data-turn-role'] = 'User';
+  state.user.children = [];
+  state.user.add(new Node('div', { class: 'turn-content' }, `User 12:35\u202fAM\n\n${rendered}`));
+  assert.equal(state.adapter.hasDelivery('op-legacy', payload), true);
+  assert.equal(state.adapter.hasDelivery('op-other', payload), false);
+
+  const changed = setup();
+  changed.user.attrs['data-turn-role'] = 'User';
+  changed.user.children = [];
+  changed.user.add(new Node('ms-text-chunk', {}, rendered.replace('alice', 'mallory')));
+  assert.equal(changed.adapter.hasDelivery('op-legacy', payload), false);
+  assert.equal(changed.adapter.hasDelivery('op-legacy'), false, 'malformed Markdown output is not accepted without the expected envelope');
+});
+
 test('exposes the latest user result operation id from wrapped text and nested result nodes only', () => {
   const payload = '{"type":"webcodex-result","operation_id":"op-latest"}';
   const header = setup();

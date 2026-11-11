@@ -17,7 +17,7 @@
   delete window.__webcodexBridgeReattach;
   function parsedResult(text){try{const result=JSON.parse(text||'');return result?.type==='webcodex-result'&&typeof result.operation_id==='string'&&result.operation_id?result:null;}catch{return null;}}
   function visibleResultId(user){const parsed=parsedResult(user?.text)?.operation_id,id=typeof user?.operationId==='string'&&user.operationId?user.operationId:'';return id||parsed||'';}
-  function snapshot(operationId,conversationReplaced=false){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser);return {supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered:operationId?resultId===operationId||adapter.hasDelivery(operationId):undefined};}
+  function snapshot(operationId,conversationReplaced=false,expectedResultText){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser);return {supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered:operationId?resultId===operationId||adapter.hasDelivery(operationId,expectedResultText):undefined};}
   function trackGeneration(s){if(turnless&&s.generating&&!s.controlsPending){if(!awaitingResponse){awaitingResponse=true;generationCounter++;attempted.clear();lastText='';baselineText='';baselineModelText=s.latestModel?.text||'';}generationSeen=true;}}
   async function observe(){const s=adapter.inspect(),conversationReplaced=newChatPending&&s.supported&&(!s.generating||s.controlsPending)&&s.editorEmpty&&!s.latestModel;if(conversationReplaced){if(newChatRequestInFlight)return;newChatRequestInFlight=true;try{const transition={...snapshot(undefined,true),error:'Conversation was replaced'};if(sessionId)await send('studio.snapshot',transition);else await send('studio.hello',{pageInstance,...transition});}finally{newChatRequestInFlight=false;}return;}if(!sessionId||newChatPending)return;if(!s.supported){await send('studio.snapshot',snapshot());return;}
     if(turnless){const userText=s.latestUser?.text||'',resultId=visibleResultId(s.latestUser);if(resultId)observedResultId=resultId;observedUserText=userText;const context=JSON.stringify([observedResultId,observedUserText]);if(context!==observedContext){observedContext=context;attempted.clear();lastText='';baselineText='';}trackGeneration(s);if(resultId&&resultId===allowedFollowupId&&s.modelAfterUser===true&&!awaitingResponse){generationCounter++;awaitingResponse=true;generationSeen=true;baselineModelText='';}if(s.modelAfterUser===false)return;}
@@ -56,10 +56,11 @@
       })().catch(e=>reply({ok:false,...snapshot(),error:String(e.message||e)}));
       return true;
     }
-    if(m.type==='studio.snapshot'){const state=snapshot(m.operationId);if(state.delivered&&turnless){observedResultId=m.operationId||observedResultId;}if(state.delivered&&(recoverTurn||turnlessRecovery)){const current=adapter.inspect(),model=current.latestModel;let valid=false;try{valid=!!model&&(!turnless||current.modelAfterUser!==false)&&!!WebCodexProtocol.parseCall(model.text,turnless?null:recoverTurn,recoverTools);}catch{}if(turnless){recoverTurn='';turnlessRecovery=false;baselineText=valid?'':model?.text||'';lastText=valid?'':baselineText;if(valid){awaitingResponse=true;generationSeen=true;baselineModelText='';schedule();}}else if(valid)schedule();else{recoverTurn='';baselineText=model?.text||'';lastText=baselineText;}}reply(state);return;}
+    if(m.type==='studio.snapshot'){const state=snapshot(m.operationId,false,m.expectedResultText);if(state.delivered&&turnless){observedResultId=m.operationId||observedResultId;}if(state.delivered&&(recoverTurn||turnlessRecovery)){const current=adapter.inspect(),model=current.latestModel;let valid=false;try{valid=!!model&&(!turnless||current.modelAfterUser!==false)&&!!WebCodexProtocol.parseCall(model.text,turnless?null:recoverTurn,recoverTools);}catch{}if(turnless){recoverTurn='';turnlessRecovery=false;baselineText=valid?'':model?.text||'';lastText=valid?'':baselineText;if(valid){awaitingResponse=true;generationSeen=true;baselineModelText='';schedule();}}else if(valid)schedule();else{recoverTurn='';baselineText=model?.text||'';lastText=baselineText;}}reply(state);return;}
     if(m.type==='studio.deliver'){
       const s=adapter.inspect();const state=snapshot();if(!s.supported||(!m.submit&&!s.editorEmpty)||s.generating){reply({ok:false,attempted:false,...state});return;}
-      if(!m.submit){const ok=adapter.stage(m.text);reply({ok,attempted:false,...state});return;}
+      const wrapped=`\`\`\`webcodex-result\n${m.text}\n\`\`\``;
+      if(!m.submit){const ok=adapter.stage(wrapped);reply({ok,attempted:false,...state});return;}
       if(lastDelivered===m.text){reply({ok:false,attempted:true,...state});return;}
       if(deliveryPending){reply({ok:false,attempted:true,...state});return;}
       let operationId;try{const result=JSON.parse(m.text);if(result.type!=='webcodex-result')throw Error();operationId=result.operation_id;}catch{reply({ok:false,attempted:false,...state});return;}
@@ -67,9 +68,9 @@
       deliveryPending=true;
       (async()=>{
         try{
-          const ok=await adapter.submit(m.text,()=>sessionId===deliverySession);
+          const ok=await adapter.submit(wrapped,()=>sessionId===deliverySession);
           if(ok){lastDelivered=m.text;if(turnless)allowedFollowupId=operationId;}
-          const proof=snapshot(operationId);reply({ok,attempted:ok,confirmed:ok&&proof.delivered,...proof});
+          const proof=snapshot(operationId,false,m.text);reply({ok,attempted:ok,confirmed:ok&&proof.delivered,...proof});
         }catch(e){reply({ok:false,attempted:true,...snapshot(),error:'Delivery outcome is unknown'});}
         finally{deliveryPending=false;}
       })();

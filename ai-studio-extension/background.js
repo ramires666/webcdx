@@ -196,7 +196,7 @@ async function reattachDelivery(sender,m){
     const armed=await armPage(sender.tab.id,{type:'studio.arm',sessionId:s.sessionId,turnless:!!s.turnless,recover:true,recoverTurn:s.nextTurn,toolNames:s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean)});
     if(!armed?.supported){s.error='AI Studio page is not ready; delivery remains uncertain';if(unsentSizeResult)retainUnsent();await save();return {accepted:false};}
     s.pageInstance=m.pageInstance;s.paused=false;s.userPaused=false;s.resumeBlocked=false;s.phase='delivery_uncertain';s.pausedPhase='';s.error='Checking whether the saved result reached this chat';await save();
-    const chk=await chrome.tabs.sendMessage(sender.tab.id,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId});
+    const chk=await chrome.tabs.sendMessage(sender.tab.id,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId,expectedResultText:s.resultText});
     if(!chk?.supported){s.error='AI Studio page is not ready; delivery remains uncertain';if(unsentSizeResult)retainUnsent();await save();return {accepted:!unsentSizeResult};}
     if(chk.delivered){completeDelivery();await save();}else if(unsentSizeResult){s.phase='result_ready';s.paused=false;s.error='';await save();if(s.automatic)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}else{s.error='Result is not visible yet; waiting for delivery proof. It will not be sent again.';await save();}
     return {accepted:true};
@@ -270,7 +270,7 @@ async function dispatch(){const s=state.session,p=s.pendingCall;if(!p)throw Erro
     await finishResult(result);
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);s.phase='recovering';await save();}
 }
-async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey});if(!chk?.supported){s.error='AI Studio session is unavailable; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
+async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey,expectedResultText:s.resultText});if(!chk?.supported){s.error='AI Studio session is unavailable; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
   if(s.phase!=='recovering'||!s.pendingCall)return;
   try{let result;if(demo)result={content:[{type:'text',text:'DEMO MODE: sample content'}],isError:false};else if(s.operationId)result=await client.getOperation(s.operationId);else result=await client.createOperation({key:s.operationKey,name:s.pendingCall.name,arguments:s.dispatchArgs,agentId:s.agentId});
     if(['accepted','dispatching','starting','running'].includes(result?.status)){s.operationId=result.operation_id||result.id||s.operationId;await save();return;}

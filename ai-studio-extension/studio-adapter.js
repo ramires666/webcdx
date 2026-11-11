@@ -121,6 +121,32 @@
     const json = value.match(/^User\s*\n[^\n]+\n(\{[\s\S]*\})$/i)?.[1];
     return json ? parse(json) : '';
   };
+  const stripUserHeader = (raw) => String(raw).trim().replace(/^User(?:[ \t]*\d{1,2}:\d{2}(?:AM|PM)?[^\n]*|[ \t]+[^\n]*)?\n+|^User\n[^\n]+\n+/i, '');
+  const commonMarkUnescape = (raw) => {
+    let result = '';
+    for (let i = 0; i < raw.length; i++) {
+      if (raw[i] === '\\' && i + 1 < raw.length) {
+        const code = raw.charCodeAt(i + 1);
+        if ((code >= 33 && code <= 47) || (code >= 58 && code <= 64) || (code >= 91 && code <= 96) || (code >= 123 && code <= 126)) {
+          result += raw[++i];
+          continue;
+        }
+      }
+      result += raw[i];
+    }
+    return result;
+  };
+  const expectedDeliveryText = (operationId, expectedText) => {
+    if (typeof expectedText !== 'string') return '';
+    try {
+      const expected = JSON.parse(expectedText);
+      return expected?.type === 'webcodex-result' && expected.operation_id === operationId ? expectedText : '';
+    } catch { return ''; }
+  };
+  const matchesExpectedDelivery = (raw, expectedText) => {
+    const candidate = stripUserHeader(raw);
+    return candidate === expectedText || candidate === commonMarkUnescape(expectedText);
+  };
   const inspect = () => {
     if (!location.hostname || location.hostname.toLowerCase() !== 'aistudio.google.com')
       return { conversationKey: '', generating: false, editorEmpty: false, supported: false, error: 'unsupported site', latestModel: null, latestUser: null };
@@ -338,16 +364,18 @@
     } else if (openedByUs && close.length > 1) return fail(`System instructions close not completed (close controls=${close.length})`);
     return true;
   };
-  const deliveryTurns = (operationId) => {
+  const deliveryTurns = (operationId, expectedText) => {
     const marker = String(operationId);
+    const expected = expectedDeliveryText(marker, expectedText);
     return turns().filter((el) => {
       if (role(el) !== 'user') return false;
       const nested = [...new Set(allElements('.turn-content, ms-prompt-chunk, ms-cmark-node, ms-text-chunk, pre code', el))];
+      if (expected) return nested.some((node) => matchesExpectedDelivery(text(node), expected)) || matchesExpectedDelivery(text(el), expected);
       if (nested.some((node) => text(node).includes(`[WebCodex operation ${marker}]`) || parseResultOperationId(text(node)) === marker)) return true;
       return text(el).includes(`[WebCodex operation ${marker}]`) || parseResultOperationId(text(el), true) === marker;
     });
   };
-  const hasDelivery = (operationId) => deliveryTurns(operationId).length > 0;
+  const hasDelivery = (operationId, expectedText) => deliveryTurns(operationId, expectedText).length > 0;
   const hiddenByUs = new Map();
   const cleanup = ({ turns: requestedTurns = [], operationIds = [] } = {}) => {
     const recognized = new Set(turns());

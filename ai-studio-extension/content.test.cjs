@@ -4,6 +4,10 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const WebCodexProtocol = require('./protocol.js');
+const unwrapResult = text => {
+  const match = /^```webcodex-result\n([\s\S]*)\n```$/.exec(text);
+  return match ? match[1] : text;
+};
 
 function harness() {
   const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', latestModel: { text: 'old answer' }, latestUser: null };
@@ -12,7 +16,10 @@ function harness() {
     inspect: () => ({ ...state, latestModel: state.latestModel && { ...state.latestModel }, latestUser: state.latestUser && { ...state.latestUser } }),
     stage: text => { staged.push(text); return state.editorEmpty && !state.generating; }, stageSystemInstructions: async () => true,
     submit: async (text, isCurrent) => { if(submitHandler)return submitHandler(text,isCurrent);if(!state.editorEmpty)return false;submitted.push(text);return true; },
-    hasDelivery: operationId => submitted.some(text => JSON.parse(text).operation_id === operationId),
+    hasDelivery: (operationId, expectedText) => submitted.some(text => {
+      const raw = unwrapResult(text);
+      return JSON.parse(raw).operation_id === operationId && (expectedText === undefined || raw === expectedText);
+    }),
     cleanup: options => cleanups.push(options), restoreCleanup: () => { restores++; }, annotateContext: () => { annotations++; }
   };
   const cleanups=[];let restores=0,annotations=0;
@@ -84,8 +91,26 @@ test('safe draft, submitted result, delivery confirmation and disarm', async () 
   assert.equal(delivered.ok, true); assert.equal(delivered.attempted, true); assert.equal(delivered.confirmed, true); assert.equal(h.submitted.length, 1);
   const duplicate = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true });
   assert.equal(duplicate.attempted, true); assert.equal(h.submitted.length, 1);
+  assert.equal(h.submitted[0], `\`\`\`webcodex-result\n${text}\n\`\`\``);
   assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: true });
   assert.deepEqual(await h.send({ type: 'studio.disarm', sessionId: 's1' }), { ok: true });
+});
+
+test('result payload stays raw inside the submitted and staged code fence', async () => {
+  const h = harness(); await h.send({ type: 'studio.arm', sessionId: 's1' });
+  const text = JSON.stringify({ type: 'webcodex-result', operation_id: 'op-escaped', path: 'C:\\Users\\thunder\\file.json', innercontent: 'He said "hello"\\nthen left', code: '```html\n<div>sample</div>\n```' });
+  const expected = `\`\`\`webcodex-result\n${text}\n\`\`\``;
+  assert.equal((await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: false })).ok, true);
+  assert.equal(h.staged[0], expected);
+  const delivered = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true });
+  assert.equal(delivered.ok, true);
+  assert.equal(h.submitted[0], expected);
+  assert.equal(JSON.parse(unwrapResult(h.submitted[0])).path, 'C:\\Users\\thunder\\file.json');
+  assert.equal(JSON.parse(unwrapResult(h.submitted[0])).innercontent, 'He said "hello"\\nthen left');
+  assert.equal(JSON.parse(unwrapResult(h.submitted[0])).code, '```html\n<div>sample</div>\n```');
+  assert.equal(h.submitted[0].split('\n').length,3,'JSON.stringify keeps embedded newlines escaped inside the result line');
+  assert.equal((await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true })).attempted, true);
+  assert.equal(h.submitted.length, 1);
 });
 
 test('blocks draft when editor is not safe and reports an unsupported page', async () => {
@@ -336,6 +361,14 @@ test('snapshot reports only an exactly parsed visible result as delivery proof',
   snap=await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-visible'});assert.equal(snap.delivered,true);assert.equal(snap.deliveredOperationId,'op-visible');
   h.state.latestUser={text:'{"type":"webcodex-result","operation_id":'};
   snap=await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-visible'});assert.equal(snap.delivered,false);assert.equal(snap.deliveredOperationId,'');
+});
+
+test('snapshot delivery fallback requires the exact expected result text',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1'});
+  const text=JSON.stringify({type:'webcodex-result',operation_id:'op-exact',result:'expected'});
+  await h.send({type:'studio.deliver',sessionId:'s1',text,submit:true});
+  assert.equal((await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-exact',expectedResultText:text})).delivered,true);
+  assert.equal((await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-exact',expectedResultText:text.replace('expected','different')})).delivered,false);
 });
 
 test('an old call acknowledgement cannot consume a newer Run gate',async()=>{

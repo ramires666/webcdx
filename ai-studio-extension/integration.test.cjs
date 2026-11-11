@@ -138,6 +138,18 @@ test('the visible result envelope confirms delivery without resending or rerunni
   assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
 });
 
+test('recovery supplies the saved result for full matching of a legacy Markdown-rendered message', async () => {
+  const resultText=JSON.stringify({type:'webcodex-result',v:1,operation_id:'old-op',name:'read_file',result:{content:[{type:'text',text:JSON.stringify({path:'C:\\projects'})}]}});
+  const initial=saved('delivery_uncertain');
+  Object.assign(initial.session,{turnless:true,nextTurn:'internal-next',operationId:'old-op',operationKey:'old-key',resultText,pendingCall:{name:'read_file',arguments:{path:'safe.txt'}},pageInstance:'old-page'});
+  const settings={enabled:true,consent:true,agentId:'agent-1',toolNames:['read_file'],automatic:true};
+  const h=harness(initial,{sendMessage:async(_id,msg)=>({ok:true,supported:true,delivered:msg.type==='studio.snapshot'&&msg.operationId==='old-op'&&msg.expectedResultText===resultText})},{bridgeAuto:settings});await h.status();
+  assert.equal((await h.message({type:'studio.hello',pageInstance:'new-page'},h.page)).accepted,true);
+  assert.equal((await h.status()).state.session.phase,'waiting_model');
+  assert.equal(h.pageMessages.find(msg=>msg.type==='studio.snapshot').expectedResultText,resultText);
+  assert.equal(h.createCount,0);assert.equal(h.pageMessages.some(msg=>msg.type==='studio.deliver'),false);
+});
+
 test('legacy limit pauses wait for explicit resume and preserve approval and uncertainty guards', async () => {
   const legacy = saved('paused'); Object.assign(legacy.session, { paused: true, pausedPhase: 'ready', error: 'Session operation limit reached; resume to continue.', pendingCall: { name: 'read_file', arguments: { path: 'safe.txt' }, turn: 'turn-1' } });
   const consent = { bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: ['read_file'], autoApprove: false } };
