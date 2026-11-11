@@ -313,6 +313,48 @@ test('conversation change pauses and prevents result delivery', async () => {
   assert.equal(h.createCount, 0); assert.equal(h.deliveryCount, 0);
 });
 
+test('a cleared chat automatically gets a fresh turn once, while unsafe states stay untouched', async () => {
+  const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true};
+  const fresh=()=>{const initial=saved('waiting_model');initial.session.nextTurn='stale-next-turn';const h=harness(initial,{}, {bridgeAuto:settings});return h;};
+  const h=fresh();await h.status();
+  await h.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'chat-1',conversationReplaced:true},h.page);
+  let state=(await h.status()).state.session;
+  assert.equal(state.phase,'waiting_model');assert.equal(state.tabId,7);assert.notEqual(state.sessionId,'session-1');assert.notEqual(state.turn,'turn-1');
+  assert.equal(h.pageMessages.filter(m=>m.type==='studio.arm').length,1);
+  const staged=h.pageMessages.find(m=>m.type==='studio.stage');assert.ok(staged.text.includes(state.turn));assert.ok(staged.systemText);
+  await h.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'chat-1',conversationReplaced:true},h.page);
+  assert.equal(h.pageMessages.filter(m=>m.type==='studio.arm').length,1,'repeated observer reports do not create extra turns');
+
+  const paused=fresh();await paused.status();await paused.message({type:'bridge.pause'});
+  await paused.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'chat-1',conversationReplaced:true},paused.page);
+  assert.equal((await paused.status()).state.session.phase,'paused');assert.equal(paused.pageMessages.some(m=>m.type==='studio.arm'),false);
+
+  const disabled=harness(saved('stopped'),{}, {bridgeAuto:{...settings,enabled:false}});await disabled.status();
+  await disabled.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'chat-1',conversationReplaced:true},disabled.page);
+  assert.equal(disabled.pageMessages.some(m=>m.type==='studio.arm'),false);
+
+  for(const phase of ['recovering','delivery_uncertain']){
+    const initial=saved(phase);Object.assign(initial.session,{pendingCall:{name:'read_file',arguments:{path:'x'}},operationKey:'do-not-replay'});
+    const guarded=harness(initial,{}, {bridgeAuto:settings});await guarded.status();
+    await guarded.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'chat-1',conversationReplaced:true},guarded.page);
+    const savedSession=(await guarded.status()).state.session;
+    assert.equal(savedSession.operationKey,'do-not-replay');assert.equal(savedSession.pendingCall.arguments.path,'x');assert.equal(guarded.pageMessages.some(m=>m.type==='studio.arm'),false);
+    assert.equal(guarded.createCount,0);
+  }
+
+  const resultOnly=saved('waiting_model');Object.assign(resultOnly.session,{resultText:'unconfirmed result',operationId:'op-unknown'});
+  const uncertain=harness(resultOnly,{}, {bridgeAuto:settings});await uncertain.status();
+  await uncertain.message({type:'studio.snapshot',sessionId:'session-1',supported:true,conversationKey:'chat-1',conversationReplaced:true},uncertain.page);
+  assert.equal((await uncertain.status()).state.session.resultText,'unconfirmed result');assert.equal(uncertain.pageMessages.some(m=>m.type==='studio.arm'),false);
+
+  const draft=harness(saved('waiting_model'),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:'chat-1'}:msg.type==='studio.stage'?{ok:false,error:'AI Studio prompt field is not empty; existing text was preserved'}:{ok:true}}, {bridgeAuto:settings});
+  await draft.status();
+  await draft.message({type:'studio.snapshot',sessionId:'session-1',supported:false,conversationKey:'chat-1',conversationReplaced:true},draft.page);
+  assert.equal(draft.pageMessages.some(m=>m.type==='studio.stage'),true);
+  assert.equal(draft.pageMessages.some(m=>m.type==='studio.deliver'),false);
+  assert.equal((await draft.status()).state.session.phase,'stopped');
+});
+
 test('uncertain delivery is checked by snapshot and never submitted a second time', async () => {
   const initial = saved('result_ready'); initial.session.operationId = 'op-1'; initial.session.nextTurn = 'turn-2'; initial.session.resultText = JSON.stringify({ type: 'webcodex-result', v: 1, turn: 'turn-1', next_turn: 'turn-2', operation_id: 'op-1', name: 'read_file', result: { content: [] } });
   const h = harness(initial, { sendMessage: async (_id, msg, ctx) => {

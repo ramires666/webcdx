@@ -148,9 +148,9 @@ async function autoStart(sender,m){
   await migrateAutoSetup();settings=(await chrome.storage.local.get('bridgeAuto')).bridgeAuto||settings;state.autoSettings=settings;if(settings)settings.autoApprove=!!settings.autoApprove;
   const status=updateAutoStatus(settings);
   if(!settings?.enabled||!settings.consent||!state.connected||demo||!refreshed||status!=='Готово')return {accepted:false};
-  if(m.pageInstance&&s.pageInstance===m.pageInstance&&s.tabId===sender.tab.id)return {accepted:true};
+  if(m.pageInstance&&s.pageInstance===m.pageInstance&&s.tabId===sender.tab.id&&!m.conversationReplaced)return {accepted:true};
   if(s.tabId===sender.tab.id&&m.pageInstance&&s.pageInstance!==m.pageInstance&&recoverableDelivery(s))return reattachDelivery(sender,m);
-  if(s.pendingCall||s.operationKey||s.phase==='delivery_uncertain'){
+  if(s.pendingCall||s.operationKey||s.phase==='delivery_uncertain'||s.resultText||s.operationId){
     if(s.tabId===sender.tab.id){s.paused=true;s.resumeBlocked=true;s.phase='paused';s.error='Page restarted with an unfinished operation; inspect its outcome before starting a new session';await save();}
     return {accepted:false};
   }
@@ -158,7 +158,7 @@ async function autoStart(sender,m){
     const existing=await chrome.tabs.get(s.tabId).catch(()=>null);
     if(existing)return {accepted:false};
   }
-  if(s.paused&&s.phase!=='stopped')return {accepted:false};
+  if((s.paused&&s.phase!=='stopped'&&!(m.conversationReplaced&&!s.userPaused&&['Conversation changed','Conversation was replaced'].includes(s.error)))||s.userPaused)return {accepted:false};
   await clearSession();
   try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
   catch(e){return {accepted:false};}
@@ -200,7 +200,7 @@ async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)awa
 async function stageInstructions(){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].join('\n\n');if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
-  if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationKey!==s.conversationKey||!m.supported){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'Conversation changed';await save();return {accepted:true};}await recover();return {accepted:true};}
+  if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationReplaced||m.conversationKey!==s.conversationKey||!m.supported){if(m.conversationReplaced&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&s.phase!=='delivery_uncertain'){const restarted=await autoStart(sender,{pageInstance:s.pageInstance,conversationReplaced:true});if(restarted.accepted)return restarted;}if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'Conversation changed';await save();return {accepted:true};}await recover();return {accepted:true};}
     if(m.type==='studio.call'){
     if(s.paused)return {accepted:false};
     if(s.phase==='delivery_uncertain'&&m.conversationKey===s.conversationKey&&!m.generating&&s.nextTurn){

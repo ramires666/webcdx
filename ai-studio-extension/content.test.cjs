@@ -146,6 +146,24 @@ test('a user click on the active stop spinner suppresses its partial reply', asy
   assert.equal(h.sent.some(m => m.type === 'studio.call' && m.text === 'partial answer'), false);
 });
 
+test('only a clicked, supported empty New chat produces one conversation replacement snapshot', async () => {
+  const h = harness(); await h.send({ type: 'studio.arm', sessionId: 's1' });
+  const newChat = { getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: 'add', querySelector: () => null };
+  h.state.latestModel = null; h.mutate(); await h.flush();
+  assert.equal(h.sent.some(m => m.conversationReplaced), false, 'virtualized model disappearance alone is ignored');
+  h.click({ target: { closest: () => newChat } });
+  h.state.supported = false; h.state.conversationKey = 'chat-2'; h.mutate(); await h.flush();
+  assert.equal(h.sent.some(m => m.conversationReplaced), false, 'transient unsupported DOM does not rearm');
+  h.tick();await h.flush();assert.equal(h.sent.some(m=>m.type==='studio.snapshot'&&!m.conversationReplaced),false,'pending transition does not pause on an unsupported intermediate snapshot');
+  h.state.supported = true; h.state.latestModel = { text: 'saved conversation model' }; h.mutate(); await h.flush();
+  assert.equal(h.sent.some(m => m.conversationReplaced), false, 'a saved route with a model is not treated as a new chat');
+  h.state.latestModel = null; h.state.editorEmpty = true; h.mutate(); await h.flush();
+  const replacements = h.sent.filter(m => m.conversationReplaced);
+  assert.equal(replacements.length, 1); assert.equal(replacements[0].supported, true);
+  h.mutate(); await h.flush();
+  assert.equal(h.sent.filter(m => m.conversationReplaced).length, 1, 'same URL blank New chat is reported once');
+});
+
 test('cleanup annotates final answers, hides accepted service turns, and leaves context visible when hiding is off', async () => {
   const h=harness();const turn={};
   await h.send({type:'studio.arm',sessionId:'s1',hideServiceMessages:true});
