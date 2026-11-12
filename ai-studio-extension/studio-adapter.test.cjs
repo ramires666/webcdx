@@ -264,6 +264,40 @@ test('fails safely on duplicate named presets and never chooses among duplicate 
   assert.equal(untitled.root.querySelectorAll('button').filter(button => button.attrs.role === 'button' && button.clicked).length, 0);
 });
 
+test('installs missing WebCodex instructions in a saved personal preset and leaves matching instructions untouched',async()=>{
+  const state=setup({draft:'keep my draft'});
+  const panel=state.root.add(new Node('section',{role:'dialog','aria-label':'System instructions'}));
+  panel.add(new Node('h2',{},'System instructions'));
+  const select=panel.add(new Node('select'));
+  const custom=select.add(new Node('option',{value:'personal'},'Personal rules'));custom.value='personal';select.value='personal';
+  const title=panel.add(new Node('input',{placeholder:'Title'}));title.value='Personal rules';
+  const editor=panel.add(new Textarea('Keep personal instructions.'));editor.attrs.placeholder='Optional tone and style instructions for the model';
+  assert.equal(await state.adapter.stageSystemInstructions('WebCodex tools'),true);
+  assert.equal(editor.value,'Keep personal instructions.\n<!-- WEBCODEX MCP BEGIN -->\nWebCodex tools\n<!-- WEBCODEX MCP END -->');
+  assert.equal(title.value,'Personal rules');assert.equal(select.value,'personal');assert.equal(state.editor.value,'keep my draft');
+  const eventCount=editor.events.length;
+  assert.equal(await state.adapter.stageSystemInstructions('WebCodex tools'),true);
+  assert.equal(editor.events.length,eventCount,'an installed matching block is not rewritten');
+});
+
+test('selects an existing WebCodex preset when a saved chat has another named combobox preset selected',async()=>{
+  const state=setup({draft:'preserve this draft'});
+  const panel=state.root.add(new Node('section',{role:'dialog','aria-label':'System instructions'}));
+  panel.add(new Node('h2',{},'System instructions'));
+  const selector=panel.add(new Node('button',{role:'combobox'},'Personal rules'));
+  const previous=panel.add(new Textarea('Personal preset contents'));previous.attrs.placeholder='Optional tone and style instructions for the model';
+  let selectedEditor;
+  selector.click=()=>{
+    const named=state.root.add(new Node('div',{role:'option'},'WebCodex MCP'));
+    named.click=()=>{named.remove();previous.remove();selector._text='WebCodex MCP';selectedEditor=panel.add(new Textarea(''));selectedEditor.attrs.placeholder='Optional tone and style instructions for the model';};
+  };
+  assert.equal(await state.adapter.stageSystemInstructions('WebCodex tools'),true);
+  assert.equal(selector._text,'WebCodex MCP');
+  assert.equal(previous.value,'Personal preset contents');
+  assert.match(selectedEditor.value,/WebCodex tools/);
+  assert.equal(state.editor.value,'preserve this draft');
+});
+
 test('creates the named preset from the explicit Create new instruction control without choosing Untitled entries', async () => {
   const state = setup();
   state.document.defaultView.KeyboardEvent = class { constructor(type, init) { this.type = type; Object.assign(this, init); } };

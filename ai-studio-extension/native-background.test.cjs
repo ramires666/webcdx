@@ -92,3 +92,28 @@ test('a selected empty tab in the same window can take over an idle chat without
     assert.equal(h.sessionStore.webcodexState.session.tabId,pending?1:2);
   }
 });
+
+test('saved-chat instruction checks only stage system text and preserve pending operations',async()=>{
+  for(const pending of [false,true]){
+    const h=harness({bridgeAuto:{enabled:true,consent:true,agentId:'local',toolNames:['read_file'],automatic:true},session:{session:{phase:'waiting_model',transport:'local',localEndpoint:'http://127.0.0.1:47831',localAgentIdentity:'agent-one',agentId:'local',toolNames:['read_file'],automatic:true,paused:false,error:'',tabId:1,sessionId:'current-session',pendingCall:pending?{name:'read_file',arguments:{path:'pending.txt'}}:null,resultText:'',count:0}}});
+    const staged=[];h.chrome.tabs.sendMessage=async(_tab,message)=>{staged.push(message);return{ok:true,supported:true};};
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const response=await new Promise(resolve=>h.listeners.message({type:'studio.ensureInstructions',sessionId:'current-session'},{url:'https://aistudio.google.com/app/prompts/saved',frameId:0,tab:{id:1}},resolve));
+    assert.equal(response.accepted,!pending);
+    assert.equal(staged.length,pending?0:1);
+    if(!pending){assert.equal(staged[0].type,'studio.stage');assert.equal(staged[0].text,'');assert.equal(staged[0].ensureOnly,true);}
+    assert.equal(h.sessionStore.webcodexState.session.sessionId,'current-session');
+    assert.equal(h.calls.gate,0);
+  }
+});
+
+test('opening a selected saved-chat tab starts its instructions without taking over pending work',async()=>{
+  for(const pending of [false,true]){
+    const h=harness({bridgeAuto:{enabled:true,consent:true,agentId:'local',toolNames:['read_file'],automatic:true},session:{session:{phase:'waiting_model',transport:'local',localEndpoint:'http://127.0.0.1:47831',localAgentIdentity:'agent-one',agentId:'local',toolNames:['read_file'],paused:false,tabId:1,sessionId:'old-session',pageInstance:'old-page',pendingCall:pending?{name:'read_file',arguments:{path:'pending.txt'}}:null,resultText:'',count:0}}});
+    h.chrome.tabs.get=async()=>({windowId:5,url:'https://aistudio.google.com/app/prompts/chat'});
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const response=await new Promise(resolve=>h.listeners.message({type:'studio.hello',pageInstance:'saved-page',hasHistory:true,supported:true,editorEmpty:false,generating:false},{url:'https://aistudio.google.com/app/prompts/saved',frameId:0,tab:{id:2,active:true,windowId:5}},resolve));
+    assert.equal(response.accepted,!pending);
+    assert.equal(h.sessionStore.webcodexState.session.tabId,pending?1:2);
+  }
+});

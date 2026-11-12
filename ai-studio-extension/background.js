@@ -246,6 +246,7 @@ async function autoStart(sender,m){
   const status=updateAutoStatus(settings);
   if(!settings?.enabled||!settings.consent||!state.connected||demo||!refreshed||status!=='Готово')return {accepted:false};
   const freshBlank=m.blankChat===true&&m.supported===true&&m.editorEmpty===true&&s.tabId===sender.tab.id&&m.pageInstance&&s.pageInstance!==m.pageInstance;
+  const freshSaved=m.hasHistory===true&&m.supported===true&&s.tabId===sender.tab.id&&m.pageInstance&&s.pageInstance!==m.pageInstance;
   if(m.pageInstance&&s.pageInstance===m.pageInstance&&s.tabId===sender.tab.id&&!m.conversationReplaced)return {accepted:true};
   if(s.tabId===sender.tab.id&&m.pageInstance&&s.pageInstance!==m.pageInstance&&recoverableDelivery(s))return reattachDelivery(sender,m);
   if(s.pendingCall||s.operationKey||s.phase==='delivery_uncertain'||s.resultText||s.operationId){
@@ -254,10 +255,10 @@ async function autoStart(sender,m){
   }
   if(s.tabId!==null&&s.tabId!==sender.tab.id&&!['idle','stopped'].includes(s.phase)){
     const existing=await chrome.tabs.get(s.tabId).catch(()=>null);
-    if(existing&&!(m.blankChat===true&&m.supported===true&&m.editorEmpty===true&&sender.tab.active===true&&sender.tab.windowId===existing.windowId))return {accepted:false};
+    if(existing&&!((m.hasHistory===true||m.blankChat===true&&m.editorEmpty===true)&&m.supported===true&&sender.tab.active===true&&sender.tab.windowId===existing.windowId))return {accepted:false};
   }
   const changedWithoutPending=s.tabId===sender.tab.id&&s.error==='Conversation changed'&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId;
-  if((s.paused&&s.phase!=='stopped'&&!changedWithoutPending&&!((m.conversationReplaced||freshBlank)&&!s.userPaused))||s.userPaused)return {accepted:false};
+  if((s.paused&&s.phase!=='stopped'&&!changedWithoutPending&&!((m.conversationReplaced||freshBlank||freshSaved)&&!s.userPaused))||s.userPaused)return {accepted:false};
   await clearSession();
   try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
   catch(e){return {accepted:false};}
@@ -308,9 +309,16 @@ async function arm(m) {
   } catch(e){await chrome.tabs.sendMessage(m.tabId,{type:'studio.disarm',sessionId:state.session.sessionId}).catch(()=>{});state.session.phase='stopped';state.session.error=String(e.message||e);await save();throw e;}
 }
 async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});state.session={phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null};await save();}
-async function stageInstructions(){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
+async function stageInstructions({ensureOnly=false}={}){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=ensureOnly||s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text,...(ensureOnly?{ensureOnly:true}:{})});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
+  if(m.type==='studio.ensureInstructions'){
+    const {bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');
+    if(!settings.enabled||!settings.consent||s.userPaused||!state.connected||demo)return {accepted:false};
+    if(s.pendingCall||s.operationKey||s.operationId||s.resultText||s.phase==='delivery_uncertain'||s.error?.includes('outcome is unknown'))return {accepted:false};
+    try{await stageInstructions({ensureOnly:true});s.error='';if(s.paused){s.paused=false;s.resumeBlocked=false;s.phase='waiting_model';}await save();return {accepted:true};}
+    catch(e){s.error=String(e.message||e);await save();return {accepted:false};}
+  }
   if(!m.conversationReplaced&&s.phase==='paused'&&s.error==='Conversation changed'&&recoverableDelivery(s)&&(m.type==='studio.call'||m.supported)){
     s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.pausedPhase='';s.error='Checking whether the saved result reached this chat';
   }

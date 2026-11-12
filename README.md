@@ -10,11 +10,12 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.3.3)
+## AI Studio Bridge (alpha 0.3.4)
 
-Version `0.3.3` repairs content-script reinjection after an extension update,
-detects a cleared empty chat, and recovers new chats after automatic editor
-pauses. The panel shows the installed extension and page-script versions.
+Version `0.3.4` also checks system instructions when a saved chat is selected.
+It selects the WebCodex preset or adds the missing managed block while preserving
+personal text and drafts; matching instructions are left unchanged. Historical
+tool calls are not executed. The panel shows extension and page-script versions.
 With agent
 `1.5.0-ai-studio-alpha.4` already installed, update only the extension, reload it
 in `chrome://extensions`, reload a saved AI Studio tab, and repeat the request.
@@ -31,7 +32,7 @@ An uncertain command is not automatically replayed. The live AI Studio page has
 not been verified; its DOM selectors remain alpha.
 
 The ready-to-use kit is in
-[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.3`
+[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.4`
 and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.4`. No local
 build is required. Gate remains `1.5.0-ai-studio-alpha.4`; local mode does not
 need it. To update, replace the extension and agent, reload the extension in

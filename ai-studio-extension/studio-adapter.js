@@ -182,6 +182,8 @@
       conversationKey: conversationKey(), generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
       supported: !error, error, latestModel: model ? { element: model, text: finalText(model) } : null,
+      historyAnchor: recognized[0] || null,
+      historyStart: recognized[0] ? finalText(recognized[0]).slice(0,2048) : '',
       latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,
       modelAfterUser: !user || recognized.indexOf(model) > recognized.indexOf(user),
     };
@@ -276,9 +278,9 @@
       if (options.length > 1) return fail(`System preset WebCodex MCP not unique (count=${options.length})`);
       if (!options.length) {
         const selected = allElements('option', selects[0]).find(option => option.value === selects[0].value);
-        if (!selected || !['create new instruction', 'untitled'].includes(text(selected).toLowerCase().replace(/^\+\s*/, '')))
-          return fail('System preset WebCodex MCP not found and current preset is not safe to rename');
-        presetManaged = true;
+        if (!selected) return fail('Current system preset is not selected');
+        // A personal preset keeps its name and text; append only our managed block.
+        presetManaged = ['create new instruction', 'untitled'].includes(text(selected).toLowerCase().replace(/^\+\s*/, ''));
       } else {
         if (selects[0].value !== options[0].value) {
           selects[0].value = options[0].value;
@@ -292,7 +294,7 @@
     } else {
       const selectorText = el => text(el).toLowerCase().replace(/^\+\s*/, '');
       const selectors = elements('button, [role="combobox"], [role="button"]', panel).filter(el =>
-        ['create new instruction', 'untitled', presetName.toLowerCase()].includes(selectorText(el)));
+        attr(el,'role')==='combobox'||['create new instruction', 'untitled', presetName.toLowerCase()].includes(selectorText(el)));
       const named = selectors.filter(el => selectorText(el) === presetName.toLowerCase());
       if (named.length > 1) return fail(`System preset WebCodex MCP ambiguous (count=${named.length})`);
       if (!named.length) {
@@ -306,7 +308,7 @@
             const KeyEvent = document.defaultView?.KeyboardEvent;
             if (KeyEvent) selectors[0].dispatchEvent(new KeyEvent('keydown', { key: 'Escape', bubbles: true }));
             if (options.length > 1) return fail(`System preset WebCodex MCP ambiguous (count=${options.length})`);
-            presetManaged = true;
+            presetManaged = ['create new instruction','untitled'].includes(selectorText(selectors[0]));
           }
         }
       } else presetManaged = true;

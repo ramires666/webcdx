@@ -107,6 +107,24 @@ test('recognizes an icon-bearing New chat control without an aria label even bef
   assert.equal(h.sent.filter(message=>message.conversationReplaced).length,1);
 });
 
+test('selecting saved history checks system instructions once without executing the old tool call',async()=>{
+  const h=harness();
+  h.state.historyAnchor={};h.state.historyStart='original first message';h.state.latestUser={text:'old user'};
+  await h.send({type:'studio.arm',sessionId:'saved-session',turnless:true});
+  h.state.historyAnchor={};h.state.historyStart='saved chat first message';
+  const oldCall='```webcodex-call\n{"v":1,"name":"read_file","arguments":{"path":"old.txt"}}\n```';
+  h.state.latestModel={text:oldCall};h.state.latestUser={text:'saved user'};
+  h.mutate();await h.flush();h.tick();await h.flush();
+  assert.equal(h.sent.filter(message=>message.type==='studio.ensureInstructions').length,1);
+  assert.equal(h.sent.some(message=>message.type==='studio.call'),false);
+  h.tick();await h.flush();
+  assert.equal(h.sent.filter(message=>message.type==='studio.ensureInstructions').length,1,'unchanged saved history is not checked repeatedly');
+  h.run();h.state.latestUser={text:'new request'};h.state.latestModel={text:'fresh model answer'};
+  h.mutate();await h.flush();
+  assert.equal(h.sent.filter(message=>message.type==='studio.call').length,1);
+  assert.equal(h.sent.find(message=>message.type==='studio.call').text,'fresh model answer');
+});
+
 test('ignores history and sends one completed new reply as a call', async () => {
   const h = harness();
   assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: undefined });
