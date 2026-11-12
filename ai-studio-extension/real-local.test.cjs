@@ -62,7 +62,7 @@ test('compiled local agent discovers, executes once and reconnects without Gate 
   assert.deepEqual(await client.getOperation(op.operation_id), op);
   assert.deepEqual(await client.createOperation(args), op);
   client.close();
-  assert.match(logs, /Studio local connected: agent=1\.5\.0-ai-studio-alpha\.5 extension=0\.3\.8/);
+  assert.match(logs, /Studio local connected: agent=1\.5\.0-ai-studio-alpha\.5 extension=0\.3\.9/);
   assert.match(logs, /Gate не используется/);
   assert.doesNotMatch(logs, /connected to Gate|Не удалось получить настройки/);
   assert.equal(fs.existsSync(path.join(appdata, 'webcodex', 'studio', 'native-host.json')), false);

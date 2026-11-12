@@ -64,7 +64,7 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
   const message = (msg, sender = panel) => new Promise(resolve => { const async = listeners.message(msg, sender, resolve); if (async !== true) resolve(undefined); });
   const status = () => message({ type: 'bridge.status' });
   const alarm = async () => { listeners.alarm({ name: 'webcodex-recover' }); await status(); };
-  const call = async (turn, sender = page, name = 'read_file') => message({ type: 'studio.call', sessionId: 'session-1', conversationKey: 'chat-1', generating: false, text: '```webcodex-call\n' + JSON.stringify({ v: 1, turn, name, arguments: { path: 'safe.txt' } }) + '\n```' }, sender);
+  const call = async (turn, sender = page, name = 'read_file') => message({ type: 'studio.call', sessionId: 'session-1', conversationKey: 'chat-1', generating: false, text: '```helper-call\n' + JSON.stringify({ v: 1, turn, name, arguments: { path: 'safe.txt' } }) + '\n```' }, sender);
   return { localData, chrome, message, status, call, alarm, listeners, panel, page, calls, pageMessages, db, token: TOKEN, advanceTime(ms){clock+=ms;}, get createCount() { return createCount; }, get deliveryCount() { return deliveryCount; } };
 }
 function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -88,7 +88,7 @@ test('sessions continue beyond ten operations and five minutes', async () => {
 test('one bound chat executes calls without model turn IDs and deduplicates the same response', async () => {
   const initial=saved();initial.session.turnless=true;initial.session.automatic=true;
   const h=harness(initial);await h.status();
-  const text='```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
+  const text='```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
   const message={type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false,text,responseKey:'user-task-1-and-model-response'};
   assert.equal((await h.message(message,h.page)).accepted,true);await h.alarm();
   assert.equal(h.createCount,1);
@@ -104,7 +104,7 @@ test('one bound chat executes calls without model turn IDs and deduplicates the 
 test('turnless mode retains selected tools, approval and tab binding checks', async () => {
   const initial=saved('waiting_model','write_file');initial.session.turnless=true;
   const h=harness(initial);await h.status();
-  const text='```webcodex-call\n'+JSON.stringify({v:1,name:'write_file',arguments:{path:'safe.txt'}})+'\n```';
+  const text='```helper-call\n'+JSON.stringify({v:1,name:'write_file',arguments:{path:'safe.txt'}})+'\n```';
   const message={type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false,text,responseKey:'user-and-write-response'};
   assert.equal((await h.message(message,{...h.page,tab:{id:8}})).accepted,false);
   assert.equal((await h.message(message,h.page)).accepted,true);
@@ -115,7 +115,7 @@ test('a turnless follow-up proves delivery only with an observed matching result
   const initial=saved('delivery_uncertain');
   Object.assign(initial.session,{turnless:true,nextTurn:'internal-next',operationId:'old-op',operationKey:'old-key',resultText:'saved result',pendingCall:{name:'read_file',arguments:{path:'old'}}});
   const h=harness(initial);await h.status();
-  const text='```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
+  const text='```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
   const message={type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false,text,responseKey:'result-and-next-response'};
   for(const precedingResultId of [undefined,'other-op']){
     assert.equal((await h.message({...message,precedingResultId},h.page)).accepted,false);
@@ -139,7 +139,7 @@ test('the visible result envelope confirms delivery without resending or rerunni
 });
 
 test('recovery supplies the saved result for full matching of a legacy Markdown-rendered message', async () => {
-  const resultText=JSON.stringify({type:'webcodex-result',v:1,operation_id:'old-op',name:'read_file',result:{content:[{type:'text',text:JSON.stringify({path:'C:\\projects'})}]}});
+  const resultText=JSON.stringify({type:'helper-result',v:1,operation_id:'old-op',name:'read_file',result:{content:[{type:'text',text:JSON.stringify({path:'C:\\projects'})}]}});
   const initial=saved('delivery_uncertain');
   Object.assign(initial.session,{turnless:true,nextTurn:'internal-next',operationId:'old-op',operationKey:'old-key',resultText,pendingCall:{name:'read_file',arguments:{path:'safe.txt'}},pageInstance:'old-page'});
   const settings={enabled:true,consent:true,agentId:'agent-1',toolNames:['read_file'],automatic:true};
@@ -193,7 +193,7 @@ test('large UTF-8 result is delivered intact once without a size pause', async (
 });
 
 test('legacy oversized result resumes without replaying its pending operation', async () => {
-  const envelope=JSON.stringify({type:'webcodex-result',v:1,turn:'turn-1',next_turn:'turn-2',operation_id:'op-old',name:'read_file',result:{content:[]}});
+  const envelope=JSON.stringify({type:'helper-result',v:1,turn:'turn-1',next_turn:'turn-2',operation_id:'op-old',name:'read_file',result:{content:[]}});
   const make=automatic=>{const initial=saved('paused');Object.assign(initial.session,{paused:true,pausedPhase:'ready',error:'Result exceeds 32 KiB; reduce the tool output before delivery.',pendingCall:{name:'read_file',arguments:{path:'safe.txt'},turn:'turn-1'},operationId:'op-old',operationKey:'key-old',nextTurn:'turn-2',resultText:envelope,automatic});return initial;};
   const manual=harness(make(false),{snapshotDelivered:false});await manual.status();
   assert.equal((await manual.message({type:'bridge.resume'})).ok,true);
@@ -215,7 +215,7 @@ test('restored token stays private; tab is bound and one operation delivers adve
   assert.equal((await h.message({ type: 'studio.snapshot', sessionId: 'session-1', supported: true, conversationKey: 'chat-1' }, h.page)).ok, true);
   assert.equal((await h.call('turn-1')).ok, true); await h.alarm();
   const resultMsg = h.pageMessages.find(m => m.type === 'studio.deliver'); assert.ok(resultMsg);
-  const result = JSON.parse(resultMsg.text); assert.equal(result.type, 'webcodex-result'); assert.equal(result.result.content[0].text, 'file contents');
+  const result = JSON.parse(resultMsg.text); assert.equal(result.type, 'helper-result'); assert.equal(result.result.content[0].text, 'file contents');
   assert.equal((await h.call(result.next_turn)).ok, true); await h.alarm();
   assert.equal(h.calls.filter(x => x.method === 'POST').length, 2);
   const posts = h.calls.filter(x => x.method === 'POST');
@@ -227,7 +227,7 @@ test('restored token stays private; tab is bound and one operation delivers adve
 
 test('an oversized saved result resumes after extension reload without refreshing the chat', async () => {
   const initial=saved('paused');
-  const resultText=JSON.stringify({type:'webcodex-result',v:1,turn:'turn-1',next_turn:'turn-2',operation_id:'old-op',name:'read_file',result:{content:[{type:'text',text:'данные'.repeat(12000)}]}});
+  const resultText=JSON.stringify({type:'helper-result',v:1,turn:'turn-1',next_turn:'turn-2',operation_id:'old-op',name:'read_file',result:{content:[{type:'text',text:'данные'.repeat(12000)}]}});
   Object.assign(initial.session,{paused:true,error:'Result exceeds 32 KiB; reduce the tool output before delivery.',resultText,nextTurn:'turn-2',operationId:'old-op',operationKey:'old-key',pendingCall:{name:'read_file',arguments:{path:'safe.txt'}},automatic:true});
   const injections=[];
   const h=harness(initial,{sendMessage:async(_id,msg)=>{
@@ -246,7 +246,7 @@ test('an oversized saved result resumes after extension reload without refreshin
 
 test('resume never injects the bridge into a tab that left AI Studio', async () => {
   const initial=saved('paused');
-  const resultText=JSON.stringify({type:'webcodex-result',operation_id:'old-op',next_turn:'turn-2'});
+  const resultText=JSON.stringify({type:'helper-result',operation_id:'old-op',next_turn:'turn-2'});
   Object.assign(initial.session,{paused:true,error:'Result exceeds 32 KiB; reduce the tool output before delivery.',resultText,nextTurn:'turn-2',operationId:'old-op',automatic:true});
   let returned=false;
   const h=harness(initial,{sendMessage:async(_id,msg)=>{
@@ -588,7 +588,7 @@ test('a cleared chat automatically gets a fresh turn once, while unsafe states s
 });
 
 test('uncertain delivery is checked by snapshot and never submitted a second time', async () => {
-  const initial = saved('result_ready'); initial.session.operationId = 'op-1'; initial.session.nextTurn = 'turn-2'; initial.session.resultText = JSON.stringify({ type: 'webcodex-result', v: 1, turn: 'turn-1', next_turn: 'turn-2', operation_id: 'op-1', name: 'read_file', result: { content: [] } });
+  const initial = saved('result_ready'); initial.session.operationId = 'op-1'; initial.session.nextTurn = 'turn-2'; initial.session.resultText = JSON.stringify({ type: 'helper-result', v: 1, turn: 'turn-1', next_turn: 'turn-2', operation_id: 'op-1', name: 'read_file', result: { content: [] } });
   const h = harness(initial, { sendMessage: async (_id, msg, ctx) => {
     if (msg.type === 'studio.deliver') { if (ctx.deliveryCount) throw Error('counter unavailable'); return { ok: false, attempted: true }; }
     if (msg.type === 'studio.snapshot') return { ok: true, delivered: false, supported: true, conversationKey: 'chat-1', generating: false, editorEmpty: true };
@@ -624,17 +624,17 @@ test('prose and unselected tools cannot prove delivery; a valid call can across 
   const initial=saved('delivery_uncertain');initial.session.nextTurn='turn-2';
   const h=harness(initial);await h.status();
   const base={type:'studio.call',sessionId:'session-1',conversationKey:'chat-1',generating:false};
-  for(const text of ['A final answer','```webcodex-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'delete_path',arguments:{path:'x'}})+'\n```']){
+  for(const text of ['A final answer','```helper-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'delete_path',arguments:{path:'x'}})+'\n```']){
     assert.equal((await h.message({...base,text},h.page)).accepted,false);
   }
-  const text='```webcodex-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'read_file',arguments:{path:'x'}})+'\n```';
+  const text='```helper-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'read_file',arguments:{path:'x'}})+'\n```';
   assert.equal((await h.message({...base,text,conversationKey:'unrelated-legacy-value'},h.page)).accepted,true);
   assert.equal((await h.status()).state.session.phase,'recovering');
   assert.equal(h.createCount,1);
 });
 
 test('lost receiver reattaches the same tab and completes only from delivery proof',async()=>{
-  const initial=saved('delivery_uncertain');Object.assign(initial.session,{resultText:JSON.stringify({type:'webcodex-result',operation_id:'op-1'}),operationId:'op-1',nextTurn:'turn-2',pageInstance:'old-page'});
+  const initial=saved('delivery_uncertain');Object.assign(initial.session,{resultText:JSON.stringify({type:'helper-result',operation_id:'op-1'}),operationId:'op-1',nextTurn:'turn-2',pageInstance:'old-page'});
   const h=harness(initial,{}, {bridgeAuto:{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:false,consent:true}});await h.status();
   const hello=await h.message({type:'studio.hello',pageInstance:'new-page'},h.page);
   assert.equal(hello.accepted,true);assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
@@ -666,7 +666,7 @@ test('recovery requires an available receiver and does not recover a manually pa
 });
 
 test('legacy oversized result reload is verified before one automatic delivery',async()=>{
-  const key='Result exceeds 32 KiB; reduce the tool output before delivery.',result=JSON.stringify({type:'webcodex-result',turn:'turn-1',next_turn:'turn-2',operation_id:'op-old'});
+  const key='Result exceeds 32 KiB; reduce the tool output before delivery.',result=JSON.stringify({type:'helper-result',turn:'turn-1',next_turn:'turn-2',operation_id:'op-old'});
   const make=()=>{const initial=saved('paused');Object.assign(initial.session,{paused:true,phase:'paused',error:key,pausedPhase:'ready',resultText:result,operationId:'op-old',operationKey:'key-old',nextTurn:'turn-2',pageInstance:'old-page',pendingCall:{name:'read_file',arguments:{path:'safe.txt'},turn:'turn-1'},automatic:true});return initial;};
   const settings={enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true};
   const h=harness(make(),{sendMessage:async(_id,msg)=>msg.type==='studio.arm'?{supported:true,conversationKey:'chat-1'}:msg.type==='studio.snapshot'?{supported:true,conversationKey:'chat-1',delivered:false}:{ok:true,confirmed:true,supported:true,conversationKey:'chat-1'}},{bridgeAuto:settings});await h.status();
@@ -770,4 +770,13 @@ test('explicit file recovery never bypasses consent, selected tools or unfinishe
   const h=harness(initial,{listTools:()=>[largeWriteTool]},{bridgeAuto:{enabled:true,consent:variant!=='consent',agentId:'agent-1',toolNames:['write_file']}});
   await h.status();assert.equal((await h.message({type:'bridge.saveFromReply'})).ok,false);assert.equal(h.createCount,0);
  }
+});
+
+test('explicit recovery executes the latest selected call once and keeps its result recoverable',async()=>{
+  const selected=tool('list_directory'),initial=saved('waiting_model','list_directory');initial.tools=[selected];
+  const text=JSON.stringify({v:1,name:'list_directory',arguments:{path:'W:\\_python'}});
+  const h=harness(initial,{listTools:()=>[selected],sendMessage:async(_id,message)=>message.type==='studio.captureCall'?{ok:true,text,pageInstance:'page-last-call',conversationKey:'chat-1'}:{ok:true,supported:true,conversationKey:'chat-1'}},{bridgeAuto:{enabled:true,consent:true,agentId:'agent-1',toolNames:['list_directory']}});
+  await h.status();assert.equal((await h.message({type:'bridge.runFromReply'})).ok,true);assert.equal(h.createCount,1);
+  assert.equal(h.calls.find(call=>call.method==='POST').body.arguments.path,'W:\\_python');
+  assert.equal((await h.message({type:'bridge.runFromReply'})).ok,false,'an unfinished operation cannot be repeated');assert.equal(h.createCount,1);
 });

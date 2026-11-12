@@ -96,7 +96,7 @@
     const roots=protocol.findJSONValues(candidate);
     if(roots.length!==1)return '';
     const value=roots[0];
-    return value&&typeof value==='object'&&!Array.isArray(value)&&value.type==='webcodex-result'&&typeof value.operation_id==='string'&&value.operation_id?value.operation_id:'';
+    return value&&typeof value==='object'&&!Array.isArray(value)&&protocol.isResult(value)&&typeof value.operation_id==='string'&&value.operation_id?value.operation_id:'';
   };
   const stripUserHeader = (raw) => {
     const value=String(raw).trim(),start=value.indexOf('{');
@@ -121,7 +121,7 @@
     if (typeof expectedText !== 'string') return '';
     try {
       const expected = JSON.parse(expectedText);
-      return expected?.type === 'webcodex-result' && expected.operation_id === operationId ? expectedText : '';
+      return protocol.isResult(expected) && expected.operation_id === operationId ? expectedText : '';
     } catch { return ''; }
   };
   const matchesExpectedDelivery = (raw, expectedText) => {
@@ -158,9 +158,7 @@
     return {
       conversationKey: conversationKey(), generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
-      supported: !error, error, latestModel: model ? { element: model, sourceText:modelSource, text:parsedModel.kind==='call'?'```webcodex-call\n'+parsedModel.raw+'\n```':modelSource } : null,
-      historyAnchor: recognized[0] || null,
-      historyStart: recognized[0] ? finalText(recognized[0]).slice(0,2048) : '',
+      supported: !error, error, latestModel: model ? { element: model, sourceText:modelSource, text:parsedModel.kind==='call'?'```helper-call\n'+parsedModel.raw+'\n```':modelSource } : null,
       latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,
       modelAfterUser: !user || recognized.indexOf(model) > recognized.indexOf(user),
     };
@@ -225,7 +223,9 @@
     };
     const controls = (panel) => elements('button', panel);
     const wait = () => new Promise(resolve => (document.defaultView?.setTimeout || setTimeout)(resolve, 50));
-    const presetName = 'WebCodex MCP';
+    const presetName = 'Helper',legacyPresetName='WebCodex MCP';
+    const presetNames=[presetName,legacyPresetName];
+    const preferredPreset=items=>{const current=items.filter(el=>text(el)===presetName);return current.length?current:items.filter(el=>text(el)===legacyPresetName);};
     let panel = null, openedByUs = false;
     const alreadyOpen = panels();
     if (alreadyOpen.length === 1) panel = alreadyOpen[0];
@@ -246,13 +246,13 @@
       const textareas = elements('textarea');
       return fail(`System instructions pane not found (exact-placeholder=${textareas.filter(el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model').length}, textareas=${textareas.length})`);
     }
-    const namedPresets = (scope) => allElements('option', scope).filter(option => text(option) === presetName);
+    const namedPresets = (scope) => preferredPreset(allElements('option',scope));
     const selects = elements('select', panel);
     let presetManaged = false;
     if (selects.length) {
       if (selects.length !== 1) return fail(`System preset selector ambiguous (count=${selects.length})`);
       const options = namedPresets(selects[0]);
-      if (options.length > 1) return fail(`System preset WebCodex MCP not unique (count=${options.length})`);
+      if (options.length > 1) return fail(`System preset Helper not unique (count=${options.length})`);
       if (!options.length) {
         const selected = allElements('option', selects[0]).find(option => option.value === selects[0].value);
         if (!selected) return fail('Current system preset is not selected');
@@ -271,20 +271,20 @@
     } else {
       const selectorText = el => text(el).toLowerCase().replace(/^\+\s*/, '');
       const selectors = elements('button, [role="combobox"], [role="button"]', panel).filter(el =>
-        attr(el,'role')==='combobox'||['create new instruction', 'untitled', presetName.toLowerCase()].includes(selectorText(el)));
-      const named = selectors.filter(el => selectorText(el) === presetName.toLowerCase());
-      if (named.length > 1) return fail(`System preset WebCodex MCP ambiguous (count=${named.length})`);
+        attr(el,'role')==='combobox'||['create new instruction', 'untitled',...presetNames.map(name=>name.toLowerCase())].includes(selectorText(el)));
+      const named = preferredPreset(selectors);
+      if (named.length > 1) return fail(`System preset Helper ambiguous (count=${named.length})`);
       if (!named.length) {
         if (selectors.length > 1) return fail(`System preset selector ambiguous (count=${selectors.length})`);
         if (selectors.length === 1) {
           selectors[0].click();
           await wait();
-          const options = elements('[role="option"], [role="menuitem"]', document).filter(el => text(el) === presetName);
+          const options = preferredPreset(elements('[role="option"], [role="menuitem"]',document));
           if (options.length === 1) { options[0].click(); presetManaged = true; await wait(); }
           else {
             const KeyEvent = document.defaultView?.KeyboardEvent;
             if (KeyEvent) selectors[0].dispatchEvent(new KeyEvent('keydown', { key: 'Escape', bubbles: true }));
-            if (options.length > 1) return fail(`System preset WebCodex MCP ambiguous (count=${options.length})`);
+            if (options.length > 1) return fail(`System preset Helper ambiguous (count=${options.length})`);
             presetManaged = ['create new instruction','untitled'].includes(selectorText(selectors[0]));
           }
         }
@@ -300,21 +300,26 @@
     let editor = writable[0];
     const titles = elements('input', panel).filter(el => attr(el, 'placeholder') === 'Title');
     if (titles.length > 1) return fail(`System preset title ambiguous (count=${titles.length})`);
-    const start = '<!-- WEBCODEX MCP BEGIN -->', end = '<!-- WEBCODEX MCP END -->';
+    const start = '<!-- HELPER BEGIN -->', end = '<!-- HELPER END -->';
     let current = editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
-    const onlyManaged = current.startsWith(`${start}\n`) && current.endsWith(`\n${end}`) && current.split(start).length === 2 && current.split(end).length === 2;
-    const starts = current.split(start).length - 1, ends = current.split(end).length - 1;
-    if (starts !== ends || starts > 1 || (starts === 1 && current.indexOf(start) > current.indexOf(end))) return fail(`System instruction markers invalid (begin=${starts}, end=${ends})`);
-    if (presetManaged && titles.length && ['', 'untitled'].includes(String(titles[0].value || '').trim().toLowerCase()) && (!current.trim() || onlyManaged)) {
+    const normalized=current.replaceAll('<!-- WEBCODEX MCP BEGIN -->',start).replaceAll('<!-- WEBCODEX MCP END -->',end);
+    const onlyManaged = normalized.startsWith(`${start}\n`) && normalized.endsWith(`\n${end}`) && normalized.split(start).length === 2 && normalized.split(end).length === 2;
+    const starts = normalized.split(start).length - 1, ends = normalized.split(end).length - 1;
+    if (starts !== ends || starts > 1 || (starts === 1 && normalized.indexOf(start) > normalized.indexOf(end))) return fail(`System instruction markers invalid (begin=${starts}, end=${ends})`);
+    let titleChanged=false;
+    const oldTitle=titles.length?String(titles[0].value||'').trim():'';
+    const ownedTitle=presetManaged||oldTitle===legacyPresetName&&starts===1;
+    if (ownedTitle && titles.length && (oldTitle===legacyPresetName||['', 'untitled'].includes(oldTitle.toLowerCase())&&(!current.trim()||onlyManaged))) {
       const title = titles[0], proto = Object.getPrototypeOf(title), setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
       if (setter) setter.call(title, presetName); else title.value = presetName;
       const EventCtor = document.defaultView?.InputEvent || document.defaultView?.Event;
       if (EventCtor) title.dispatchEvent(new EventCtor('input', { bubbles: true }));
       if (document.defaultView?.Event) title.dispatchEvent(new document.defaultView.Event('change', { bubbles: true }));
       if (String(title.value || '') !== presetName) return fail('System preset title write mismatch');
+      titleChanged=true;
     }
     const block = `${start}\n${String(value)}\n${end}`;
-    const next = starts ? current.replace(new RegExp(`${start}[\\s\\S]*?${end}`), () => block) : `${current}${current && !current.endsWith('\n') ? '\n' : ''}${block}`;
+    const next = starts ? normalized.replace(new RegExp(`${start}[\\s\\S]*?${end}`), () => block) : `${current}${current && !current.endsWith('\n') ? '\n' : ''}${block}`;
     const setValue = (target, content) => {
       if ('value' in target) {
         const proto = Object.getPrototypeOf(target);
@@ -329,7 +334,7 @@
     if (!unchanged) setValue(editor, next);
     const valueNow = () => editor.isContentEditable || attr(editor, 'contenteditable') === 'true' ? text(editor) : String(editor.value || '');
     if (valueNow() !== next) { setValue(editor, current); return fail('System instruction write mismatch'); }
-    if (!unchanged) {
+    if (!unchanged||titleChanged) {
       for (let attempt = 0; attempt <= 60; attempt++) {
         const save = controls(panel).filter(el => exactLabel(el, ['save', 'done']));
         if (!save.length) break;

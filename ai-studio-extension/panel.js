@@ -98,6 +98,7 @@
     $('pause').disabled = !session.phase || ['idle', 'stopped'].includes(session.phase) || session.paused;
     $('resume').disabled = !session.phase || !session.paused || session.resumeBlocked;
     $('save-from-reply').disabled = !next.connected || !$('consent').checked || !session.toolNames?.includes('write_file') || !['waiting_model','ready','paused'].includes(session.phase) || !!session.resumeBlocked || !!(session.pendingCall||session.operationId||session.operationKey||session.resultText);
+    $('run-from-reply').disabled = !next.connected || !$('consent').checked || !session.toolNames?.length || !['waiting_model','ready','paused'].includes(session.phase) || !!session.resumeBlocked || !!(session.pendingCall||session.operationId||session.operationKey||session.resultText);
     $('stop').disabled = !session.phase || ['idle', 'stopped'].includes(session.phase);
   }
   async function act(type, payload = {}) {
@@ -136,6 +137,7 @@
   $('pause').addEventListener('click', () => act('bridge.pause'));
   $('resume').addEventListener('click', () => act('bridge.resume'));
   $('save-from-reply').addEventListener('click', () => act('bridge.saveFromReply'));
+  $('run-from-reply').addEventListener('click', () => act('bridge.runFromReply'));
   $('stop').addEventListener('click', () => act('bridge.stop'));
   function savePreferences(field) {
     editedPreferences.add(field);

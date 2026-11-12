@@ -27,7 +27,7 @@ function harness({manualClock=false,tools=[tool]}={}) {
     inspect: () => ({ supported, generating, controlsPending: false, editorEmpty, conversationKey, latestModel: model, latestUser, modelAfterUser,historyAnchor,historyStart, error: supported ? '' : 'editor unavailable' }),
     stageSystemInstructions: async text => { if (systemStageFails-- > 0) return false; staged.push({ kind: 'system', text }); return true; },
     getSystemStageError: () => 'transient system editor', stage: text => { staged.push({ kind: 'turn', text }); editorEmpty = false; return true; },
-    restoreCleanup() {}, hasDelivery: operationId => !legacyProofMissing&&latestUser?.operationId===operationId, submit: async draft => { const text=draft.replace(/^```webcodex-result\n/,'').replace(/\n```$/,''); if(saveOnSubmit){currentPath='/prompts/saved-chat';saveOnSubmit=false;}latestUser={text:legacyProofMissing?'User\n11:49 PM\n'+text:text,operationId:JSON.parse(text).operation_id};modelAfterUser=false;if(autoReplies.length){model={text:autoReplies.shift(),element:{}};modelAfterUser=true;observerCallback();}return true; }
+    restoreCleanup() {}, hasDelivery: operationId => !legacyProofMissing&&latestUser?.operationId===operationId, submit: async draft => { const text=draft.replace(/^```helper-result\n/,'').replace(/\n```$/,''); if(saveOnSubmit){currentPath='/prompts/saved-chat';saveOnSubmit=false;}latestUser={text:legacyProofMissing?'User\n11:49 PM\n'+text:text,operationId:JSON.parse(text).operation_id};modelAfterUser=false;if(autoReplies.length){model={text:autoReplies.shift(),element:{}};modelAfterUser=true;observerCallback();}return true; }
   }) };
   class TestDate extends Date { static now() { return now; } }
   const context = { chrome, window: null, document: { documentElement: {}, addEventListener(type, fn) { this[type] = fn; } }, location: { origin: 'https://aistudio.google.com', get pathname() { return currentPath; } }, WebCodexStudio: adapters, WebCodexProtocol, URL, URLSearchParams, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, JSON, Promise, Set, Map, Date: TestDate, AbortSignal, Math, Error, String, Object, Number, RegExp, console: { error() {}, warn() {}, log() {} }, crypto: {randomUUID:require('node:crypto').randomUUID,subtle:{digest:async(_algorithm,data)=>require('node:crypto').createHash('sha256').update(data).digest()}}, btoa: s => Buffer.from(s, 'binary').toString('base64'), setTimeout: (fn,ms=0) => { timers.set(++timerId, {fn,at:now+ms}); return timerId; }, clearTimeout: id => timers.delete(id), setInterval: fn => { intervals.set(++timerId, fn); return timerId; }, clearInterval: id => intervals.delete(id), MutationObserver: class { constructor(fn) { observerCallback = fn; } observe() {} disconnect() {} }, importScripts() {}, WebCodexMCP: { createClient: () => ({ initialize: async () => ({}), listAgents: async () => [{ id: 'agent-1', name: 'test', online: true }], createOperation: async operation => { operations.push(operation); return {status:'completed',operation_id:'op-'+operations.length,result:{content:[{type:'text',text:'file contents'}]}}; }, listTools: async () => { if (refreshFails-- > 0) throw Error('temporary Gate refresh failure'); return tools; } }) } };
@@ -37,9 +37,9 @@ function harness({manualClock=false,tools=[tool]}={}) {
   context.chrome.runtime.onMessage.addListener = fn => contentListeners.push(fn);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const clearChatWithoutClick=()=>{model=null;latestUser=null;modelAfterUser=false;editorEmpty=true;historyAnchor=null;historyStart='';};
-  const openSavedChat=(userText,modelText)=>{historyAnchor={};historyStart=userText;latestUser={text:userText};model={text:modelText,element:{}};modelAfterUser=true;};
+  const openSavedChat=(userText,modelText)=>{context.document.click({target:{closest:()=>({getAttribute:name=>name==='href'?'/prompts/saved-chat':null})}});historyAnchor={};historyStart=userText;latestUser={text:userText};model={text:modelText,element:{}};modelAfterUser=true;};
   const setSupported=value=>{supported=value;};
-  return { chrome, local, messages, staged, db, operations, clearChatWithoutClick, openSavedChat, setSupported, replyImmediatelyAfterDelivery: text => autoReplies.push(text), renderModelFragment: text => {model={text,element:{}};modelAfterUser=true;observerCallback();}, missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() {
+  return { chrome, local, messages, staged, db, operations, rerenderHistory: text=>{historyAnchor={};historyStart=text;observerCallback();}, clearChatWithoutClick, openSavedChat, setSupported, replyImmediatelyAfterDelivery: text => autoReplies.push(text), renderModelFragment: text => {model={text,element:{}};modelAfterUser=true;observerCallback();}, missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() {
     for(const fn of intervals.values())fn();await this.flush();
     for(let round=0;round<20&&timers.size;round++){
       if(!manualClock)now=Math.max(now,Math.min(...[...timers.values()].map(timer=>timer.at)));
@@ -81,7 +81,7 @@ test('a cleared chat recovers from an unavailable editor, stages system instruct
   assert.notEqual(h.state.sessionId,'old-session');
   assert.ok(h.staged.some(item=>item.kind==='system'&&item.text.includes('Available tools')));
   assert.equal(h.operations.length,0,'clearing the old chat never replays history');
-  h.userMessage('Read safe.txt');h.modelMessage('```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
+  h.userMessage('Read safe.txt');h.modelMessage('```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
   await h.tick();await h.tick();
   assert.equal(h.operations.length,1);
   assert.equal(h.operations[0].name,'read_file');
@@ -91,7 +91,7 @@ test('a new chat runs repeated calls without inserting an ID or replaying an old
   const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
   assert.equal(h.state.turnless,true);assert.equal(h.staged.some(item=>item.kind==='turn'),false);
-  const call='```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
+  const call='```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```';
   h.userMessage('Read the file');await h.tick();h.modelMessage(call);await h.tick();
   assert.equal(h.operations.length,1);
   await h.tick();assert.equal(h.operations.length,1,'the old model response before its result never replays');
@@ -167,7 +167,7 @@ test('selecting a saved chat stages only system instructions and never dispatche
   const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
   const sessionId=h.state.sessionId,stagedBefore=h.staged.filter(item=>item.kind==='system').length;
-  const call=path=>'```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path}})+'\n```';
+  const call=path=>'```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path}})+'\n```';
   h.openSavedChat('historical request',call('old.txt'));
   await h.tick();await h.tick();await h.tick();
   assert.equal(h.state.sessionId,sessionId);
@@ -184,7 +184,7 @@ test('saving the current chat during its first response does not pause or lose t
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
   const sessionId=h.state.sessionId;
   h.userMessage('Read the file');h.saveChat();
-  h.modelMessage('Проверю файл.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
+  h.modelMessage('Проверю файл.\n```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
   await h.tick();await h.tick();
   assert.equal(h.state.sessionId,sessionId);assert.equal(h.state.conversationKey,'active-chat');
   assert.equal(h.state.phase,'waiting_model');assert.equal(h.operations.length,1);
@@ -196,11 +196,11 @@ test('saving during result submission preserves the operation and allows the cor
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
   const sessionId=h.state.sessionId;
   h.userMessage('Read the file');h.saveDuringDelivery();
-  h.modelMessage('Проверю файл.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'first.txt'}})+'\n```');
+  h.modelMessage('Проверю файл.\n```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'first.txt'}})+'\n```');
   await h.tick();await h.tick();
   assert.equal(h.state.sessionId,sessionId);assert.equal(h.state.conversationKey,'active-chat');
   assert.equal(h.state.phase,'waiting_model');assert.equal(h.operations.length,1);
-  h.modelMessage('Исправлю путь.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'corrected.txt'}})+'\n```');
+  h.modelMessage('Исправлю путь.\n```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'corrected.txt'}})+'\n```');
   await h.tick();await h.tick();
   assert.equal(h.state.phase,'waiting_model');assert.equal(h.operations.length,2);
   assert.equal(h.operations[0].arguments.path,'first.txt');assert.equal(h.operations[1].arguments.path,'corrected.txt');
@@ -213,7 +213,7 @@ test('the active tab keeps working across arbitrary chat URL changes', async () 
   const sessionId=h.state.sessionId;
   for(const path of ['/prompts/new_chat','/prompts/first-saved','/prompts/other-saved','/app/prompts/changed-again']){
     h.navigate(path);h.userMessage('Read '+path);
-    h.modelMessage('```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
+    h.modelMessage('```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
     await h.tick();await h.tick();
     assert.equal(h.state.sessionId,sessionId);assert.equal(h.state.phase,'waiting_model');
   }
@@ -225,12 +225,26 @@ test('an immediate automatic follow-up is executed once even before the previous
   const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
   h.userMessage('Read the files');h.missLegacyDeliveryProof();
-  h.replyImmediatelyAfterDelivery('Второй файл.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'second.txt'}})+'\n```');
-  h.modelMessage('Первый файл.\n```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'first.txt'}})+'\n```');
+  h.replyImmediatelyAfterDelivery('Второй файл.\n```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'second.txt'}})+'\n```');
+  h.modelMessage('Первый файл.\n```helper-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'first.txt'}})+'\n```');
   for(let tick=0;tick<5;tick++)await h.tick();
   assert.equal(h.operations.length,2);
   assert.equal(h.operations[0].arguments.path,'first.txt');assert.equal(h.operations[1].arguments.path,'second.txt');
   assert.equal(h.state.phase,'waiting_model');
   assert.equal(h.messages.filter(msg=>msg.type==='studio.deliver').length,2);
   await h.tick();assert.equal(h.operations.length,2,'no repeat after both results are submitted');
+});
+
+test('a directory result followed by rerendered history preserves the next automatic call and system instructions',async()=>{
+ const h=harness({tools:[{...tool,name:'list_directory'}]});await h.flush();await h.armExisting();h.clickNewChat();
+ await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+ const session=h.state.sessionId,systemStages=h.staged.filter(item=>item.kind==='system').length;
+ h.userMessage('Create the game');h.modelMessage(JSON.stringify({v:1,name:'list_directory',arguments:{path:'W:\\'}}));
+ await h.tick();await h.tick();assert.equal(h.operations.length,1);
+ h.rerenderHistory('first visible turn is now the directory result');
+ h.renderModelFragment(JSON.stringify({v:1,name:'list_directory',arguments:{path:'W:\\_python'}}));
+ await h.tick();await h.tick();await h.tick();
+ assert.equal(h.operations.length,2);assert.equal(h.operations[1].arguments.path,'W:\\_python');
+ assert.equal(h.state.sessionId,session);assert.equal(h.staged.filter(item=>item.kind==='system').length,systemStages);
+ assert.equal(h.messages.filter(item=>item.type==='studio.ensureInstructions').length,0);
 });

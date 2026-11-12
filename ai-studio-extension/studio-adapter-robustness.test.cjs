@@ -83,7 +83,7 @@ test('visible duplicates, broken JSON and nested call data are never promoted to
 });
 
 test('delivery proof in generic markup requires the full expected result and rejects duplicate or nested envelopes',()=>{
-  const expected={type:'webcodex-result',operation_id:'op-new',result:{text:'W:\\a { b }\\file.txt'}};
+  const expected={type:'helper-result',operation_id:'op-new',result:{text:'W:\\a { b }\\file.txt'}};
   const payload=JSON.stringify(expected);
   for(const [value,accepted] of [[JSON.stringify(expected,null,2),true],[payload.replace('file.txt','other.txt'),false],[payload+'\n'+payload,false],[payload+'\n{"broken":',false],[JSON.stringify({example:expected}),false]]){
     const state=setup();state.user.children=[];state.user._text='';state.user.attrs['data-turn-role']='User';

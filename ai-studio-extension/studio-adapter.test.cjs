@@ -29,7 +29,7 @@ function systemSetup({ original = 'Keep these user instructions.', saveDelay = f
     for (let i = 0; i < (duplicatePanels ? 2 : 1); i++) {
       const panel = new Node('section', { role: 'dialog', 'aria-label': 'System instructions' });
       panel.add(new Node('h2', {}, 'System instructions'));
-      const editor = panel.add(new Textarea(malformed ? `${original}\n<!-- WEBCODEX MCP BEGIN --> duplicate` : original));
+      const editor = panel.add(new Textarea(malformed ? `${original}\n<!-- HELPER BEGIN --> duplicate` : original));
       const save = panel.add(new Node('button', { 'aria-label': 'Save' }));
       if (saveCloses) save.click = () => { save.clicked = true; state.root.children = state.root.children.filter(child => child !== panel); panel.isConnected = false; };
       if (saveDelay) {
@@ -47,7 +47,7 @@ function systemSetup({ original = 'Keep these user instructions.', saveDelay = f
 test('stages a bounded system instruction block and preserves surrounding user text', async () => {
   const state = systemSetup();
   assert.equal(await state.system('managed instructions'), true);
-  assert.equal(state.dialogs[0].editor.value, 'Keep these user instructions.\n<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->');
+  assert.equal(state.dialogs[0].editor.value, 'Keep these user instructions.\n<!-- HELPER BEGIN -->\nmanaged instructions\n<!-- HELPER END -->');
   assert.equal(state.dialogs[0].save.clicked, true);
   assert.equal(state.dialogs[0].panel.isConnected, false, 'closes only the panel it opened');
   assert.equal(state.editor.value, 'chat draft');
@@ -55,7 +55,7 @@ test('stages a bounded system instruction block and preserves surrounding user t
 });
 
 test('skips input and Save when the managed block is already current, then closes its panel', async () => {
-  const original = 'Keep these user instructions.\n<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->';
+  const original = 'Keep these user instructions.\n<!-- HELPER BEGIN -->\nmanaged instructions\n<!-- HELPER END -->';
   const state = systemSetup({ original });
   assert.equal(await state.system('managed instructions'), true);
   assert.equal(state.dialogs[0].editor.value, original);
@@ -64,13 +64,28 @@ test('skips input and Save when the managed block is already current, then close
   assert.equal(state.dialogs[0].panel.isConnected, false);
 });
 
+test('migrates the legacy preset name and managed block once without duplicating personal instructions',async()=>{
+  const original='Keep personal rules.\n<!-- WEBCODEX MCP BEGIN -->\nold tools\n<!-- WEBCODEX MCP END -->';
+  const state=systemSetup({original});const open=state.opener.click;
+  let saves=0,title;
+  state.opener.click=()=>{open();const dialog=state.dialogs.at(-1);title=dialog.panel.add(new Node('input',{placeholder:'Title'}));title.value='WebCodex MCP';dialog.save.click=()=>{saves++;};};
+  assert.equal(await state.system('Helper tools'),true);
+  const migrated=state.dialogs[0].editor.value;
+  assert.equal(title.value,'Helper');assert.doesNotMatch(migrated,/webcodex/i);
+  assert.equal(migrated,'Keep personal rules.\n<!-- HELPER BEGIN -->\nHelper tools\n<!-- HELPER END -->');assert.equal(saves,1);
+  const unchanged=systemSetup({original:migrated});assert.equal(await unchanged.system('Helper tools'),true);
+  assert.deepEqual(unchanged.dialogs[0].editor.events,[]);assert.equal(unchanged.dialogs[0].save.clicked,undefined);
+  const mixed=systemSetup({original:original+'\n<!-- HELPER BEGIN -->\nother\n<!-- HELPER END -->'});
+  assert.equal(await mixed.system('Helper tools'),false,'two managed blocks are rejected rather than silently duplicated');
+});
+
 test('updates only its existing bounded block, waits for Save, and rejects malformed or ambiguous panels', async () => {
-  const state = systemSetup({ original: 'User text $&\n<!-- WEBCODEX MCP BEGIN -->\nold\n<!-- WEBCODEX MCP END -->', saveDelay: true });
+  const state = systemSetup({ original: 'User text $&\n<!-- HELPER BEGIN -->\nold\n<!-- HELPER END -->', saveDelay: true });
   assert.equal(await state.system('$&'), true);
-  assert.equal(state.dialogs[0].editor.value, 'User text $&\n<!-- WEBCODEX MCP BEGIN -->\n$&\n<!-- WEBCODEX MCP END -->');
+  assert.equal(state.dialogs[0].editor.value, 'User text $&\n<!-- HELPER BEGIN -->\n$&\n<!-- HELPER END -->');
   assert.equal(state.dialogs[0].save.clicked, true);
   assert.equal(await systemSetup({ malformed: true }).system('new'), false);
-  assert.equal(await systemSetup({ original: '<!-- WEBCODEX MCP END -->\n<!-- WEBCODEX MCP BEGIN -->' }).system('new'), false);
+  assert.equal(await systemSetup({ original: '<!-- HELPER END -->\n<!-- HELPER BEGIN -->' }).system('new'), false);
   assert.equal(await systemSetup({ duplicatePanels: true }).system('new'), false);
   const closesOnSave = systemSetup({ saveCloses: true });
   assert.equal(await closesOnSave.system('saved'), true);
@@ -91,7 +106,7 @@ test('stages the observed system editor without a dialog or Save button and leav
   };
   assert.equal(await state.adapter.stageSystemInstructions('managed instructions'), true);
   assert.equal(title.value, 'My title');
-  assert.equal(editor.value, 'Keep these user instructions.\n<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->');
+  assert.equal(editor.value, 'Keep these user instructions.\n<!-- HELPER BEGIN -->\nmanaged instructions\n<!-- HELPER END -->');
   assert.equal(state.editor.value, 'chat draft');
   assert.equal(state.adapter.inspect().supported, true, 'system textarea stays excluded from chat editor discovery');
 });
@@ -145,7 +160,7 @@ test('reuses the exact named native preset, requeries its editor, and names only
     panel.add(new Node('h2', {}, 'System instructions'));
     select = panel.add(new Node('select'));
     const untitled = select.add(new Node('option', { value: 'untitled' }, 'Untitled'));
-    const named = select.add(new Node('option', { value: 'webcodex' }, 'WebCodex MCP'));
+    const named = select.add(new Node('option', { value: 'webcodex' }, 'Helper'));
     untitled.value = 'untitled'; named.value = 'webcodex';
     select.value = untitled.attrs.value;
     title = panel.add(new Node('input', { placeholder: 'Title' })); title.value = 'Untitled';
@@ -164,8 +179,8 @@ test('reuses the exact named native preset, requeries its editor, and names only
   };
   assert.equal(await state.adapter.stageSystemInstructions('managed instructions'), true);
   assert.equal(select.value, 'webcodex');
-  assert.equal(title.value, 'WebCodex MCP');
-  assert.equal(editor.value, '<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->');
+  assert.equal(title.value, 'Helper');
+  assert.equal(editor.value, '<!-- HELPER BEGIN -->\nmanaged instructions\n<!-- HELPER END -->');
   assert.equal(oldEditor.value, '', 'writes only to editor after preset selection');
   assert.equal(state.editor.value, 'chat draft');
 });
@@ -177,12 +192,12 @@ test('fails safely on duplicate named presets and never chooses among duplicate 
     const panel = duplicate.root.add(new Node('section', { role: 'dialog', 'aria-label': 'System instructions' }));
     panel.add(new Node('h2', {}, 'System instructions'));
     const select = panel.add(new Node('select'));
-    select.add(new Node('option', { value: 'one' }, 'WebCodex MCP'));
-    select.add(new Node('option', { value: 'two' }, 'WebCodex MCP'));
+    select.add(new Node('option', { value: 'one' }, 'Helper'));
+    select.add(new Node('option', { value: 'two' }, 'Helper'));
     const editor = panel.add(new Textarea('')); editor.attrs.placeholder = 'Optional tone and style instructions for the model';
   };
   assert.equal(await duplicate.adapter.stageSystemInstructions('managed'), false);
-  assert.match(duplicate.adapter.getSystemStageError(), /preset WebCodex MCP not unique/);
+  assert.match(duplicate.adapter.getSystemStageError(), /preset Helper not unique/);
 
   const untitled = setup();
   const untitledOpener = untitled.root.add(new Node('button', { 'aria-label': 'System instructions' }));
@@ -206,11 +221,11 @@ test('installs missing WebCodex instructions in a saved personal preset and leav
   const custom=select.add(new Node('option',{value:'personal'},'Personal rules'));custom.value='personal';select.value='personal';
   const title=panel.add(new Node('input',{placeholder:'Title'}));title.value='Personal rules';
   const editor=panel.add(new Textarea('Keep personal instructions.'));editor.attrs.placeholder='Optional tone and style instructions for the model';
-  assert.equal(await state.adapter.stageSystemInstructions('WebCodex tools'),true);
-  assert.equal(editor.value,'Keep personal instructions.\n<!-- WEBCODEX MCP BEGIN -->\nWebCodex tools\n<!-- WEBCODEX MCP END -->');
+  assert.equal(await state.adapter.stageSystemInstructions('Helper tools'),true);
+  assert.equal(editor.value,'Keep personal instructions.\n<!-- HELPER BEGIN -->\nHelper tools\n<!-- HELPER END -->');
   assert.equal(title.value,'Personal rules');assert.equal(select.value,'personal');assert.equal(state.editor.value,'keep my draft');
   const eventCount=editor.events.length;
-  assert.equal(await state.adapter.stageSystemInstructions('WebCodex tools'),true);
+  assert.equal(await state.adapter.stageSystemInstructions('Helper tools'),true);
   assert.equal(editor.events.length,eventCount,'an installed matching block is not rewritten');
 });
 
@@ -222,13 +237,13 @@ test('selects an existing WebCodex preset when a saved chat has another named co
   const previous=panel.add(new Textarea('Personal preset contents'));previous.attrs.placeholder='Optional tone and style instructions for the model';
   let selectedEditor;
   selector.click=()=>{
-    const named=state.root.add(new Node('div',{role:'option'},'WebCodex MCP'));
-    named.click=()=>{named.remove();previous.remove();selector._text='WebCodex MCP';selectedEditor=panel.add(new Textarea(''));selectedEditor.attrs.placeholder='Optional tone and style instructions for the model';};
+    const named=state.root.add(new Node('div',{role:'option'},'Helper'));
+    named.click=()=>{named.remove();previous.remove();selector._text='Helper';selectedEditor=panel.add(new Textarea(''));selectedEditor.attrs.placeholder='Optional tone and style instructions for the model';};
   };
-  assert.equal(await state.adapter.stageSystemInstructions('WebCodex tools'),true);
-  assert.equal(selector._text,'WebCodex MCP');
+  assert.equal(await state.adapter.stageSystemInstructions('Helper tools'),true);
+  assert.equal(selector._text,'Helper');
   assert.equal(previous.value,'Personal preset contents');
-  assert.match(selectedEditor.value,/WebCodex tools/);
+  assert.match(selectedEditor.value,/Helper tools/);
   assert.equal(state.editor.value,'preserve this draft');
 });
 
@@ -248,8 +263,8 @@ test('creates the named preset from the explicit Create new instruction control 
   };
   assert.equal(await state.adapter.stageSystemInstructions('managed instructions'), true);
   assert.equal(closed, true, 'dismisses the menu after finding no named entry');
-  assert.equal(title.value, 'WebCodex MCP');
-  assert.equal(editor.value, '<!-- WEBCODEX MCP BEGIN -->\nmanaged instructions\n<!-- WEBCODEX MCP END -->');
+  assert.equal(title.value, 'Helper');
+  assert.equal(editor.value, '<!-- HELPER BEGIN -->\nmanaged instructions\n<!-- HELPER END -->');
   assert.equal(state.root.querySelectorAll('[role="menuitem"]').filter(item => item.clicked).length, 0);
 });
 
@@ -341,34 +356,34 @@ test('normalizes a sole complete legacy envelope with or without prose', () => {
   const codeBlock = new Node('ms-code-block'), pre = codeBlock.add(new Node('pre'));
   pre.add(new Node('code', { class: 'language-json' }, '{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}'));
   valid.chunk.add(codeBlock);
-  assert.equal(valid.adapter.inspect().latestModel.text, '```webcodex-call\n{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}\n```');
+  assert.equal(valid.adapter.inspect().latestModel.text, '```helper-call\n{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}\n```');
 
   const prose = setup(); prose.chunk.children = []; prose.chunk._text = 'Please run this: ';
   const proseBlock = new Node('ms-code-block'), prosePre = proseBlock.add(new Node('pre'));
   prosePre.add(new Node('code', { class: 'language-json' }, '{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}'));
   prose.chunk.add(proseBlock);
-  assert.match(prose.adapter.inspect().latestModel.text, /^```webcodex-call/);
+  assert.match(prose.adapter.inspect().latestModel.text, /^```helper-call/);
   assert.equal(prose.chunk._text,'Please run this: ','the visible explanation is preserved in the original DOM');
 });
 test('reconstructs the current three-field call envelope', () => {
   const state = setup(); state.chunk.children = []; state.chunk._text = '';
   state.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
-  assert.equal(state.adapter.inspect().latestModel.text, '```webcodex-call\n{"v":1,"name":"read","arguments":{}}\n```');
+  assert.equal(state.adapter.inspect().latestModel.text, '```helper-call\n{"v":1,"name":"read","arguments":{}}\n```');
 });
 test('reconstructs a current call alongside prose, including across chunks', () => {
   const state = setup(); state.chunk.children = []; state.chunk._text = 'I will read that now.';
-  state.chunk.add(new Node('ms-code-block', { 'data-test-language': 'webcodex-call' })).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
-  assert.equal(state.adapter.inspect().latestModel.text, '```webcodex-call\n{"v":1,"name":"read","arguments":{}}\n```');
+  state.chunk.add(new Node('ms-code-block', { 'data-test-language': 'helper-call' })).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
+  assert.equal(state.adapter.inspect().latestModel.text, '```helper-call\n{"v":1,"name":"read","arguments":{}}\n```');
 
   const multi = setup(); multi.chunk._text = 'I will read that now.';
   multi.model.children[0].add(new Node('ms-text-chunk', {}, 'One more note.'))
-    .add(new Node('ms-code-block', { 'data-test-language': 'webcodex-call' })).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
-  assert.equal(multi.adapter.inspect().latestModel.text, '```webcodex-call\n{"v":1,"name":"read","arguments":{}}\n```');
+    .add(new Node('ms-code-block', { 'data-test-language': 'helper-call' })).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
+  assert.equal(multi.adapter.inspect().latestModel.text, '```helper-call\n{"v":1,"name":"read","arguments":{}}\n```');
 });
 test('does not promote ordinary JSON without the explicit v1 tool envelope in prose', () => {
   const state = setup(); state.chunk.children = []; state.chunk._text = 'Example payload:';
   state.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"name":"read","arguments":{}}'));
-  assert.doesNotMatch(state.adapter.inspect().latestModel.text, /^```webcodex-call/);
+  assert.doesNotMatch(state.adapter.inspect().latestModel.text, /^```helper-call/);
 });
 
 test('reconstructs the screenshot read_file call from the visible code language header after prose', () => {
@@ -390,13 +405,13 @@ test('reconstructs the screenshot read_file call from the visible code language 
 });
 
 test('ordinary JSON does not become a tool call because a language label or button mentions the marker', () => {
-  for (const label of ['json', 'webcodex-call example', 'not-webcodex-call']) {
+  for (const label of ['json', 'helper-call example', 'not-helper-call']) {
     const state = setup(); state.chunk.children = []; state.chunk._text = 'Example payload:';
     const block = state.chunk.add(new Node('ms-code-block'));
     block.add(new Node('span', {}, label));
-    block.add(new Node('button', {}, 'webcodex-call'));
-    block.add(new Node('pre')).add(new Node('code', {}, '{"example":"webcodex-call","path":"notes.txt"}'));
-    assert.doesNotMatch(state.adapter.inspect().latestModel.text, /```webcodex-call/);
+    block.add(new Node('button', {}, 'helper-call'));
+    block.add(new Node('pre')).add(new Node('code', {}, '{"example":"helper-call","path":"notes.txt"}'));
+    assert.doesNotMatch(state.adapter.inspect().latestModel.text, /```helper-call/);
   }
 });
 
@@ -420,7 +435,7 @@ test('rejects non-v1 envelopes, extra fields and multiple JSON calls instead of 
   for(const payload of ['{"v":2,"name":"read","arguments":{}}','{"v":1,"name":"read","arguments":{},"extra":true}','{"v":1,"name":"read","arguments":[]}','{"v":1,"name":"read","arguments":{}} {"v":1,"name":"read","arguments":{}}']){
     const state=setup();state.chunk.children=[];state.chunk._text='Explanation.';
     state.chunk.add(new Node('ms-code-block')).add(new Node('pre',{},payload));
-    assert.doesNotMatch(state.adapter.inspect().latestModel.text,/```webcodex-call/);
+    assert.doesNotMatch(state.adapter.inspect().latestModel.text,/```helper-call/);
   }
 });
 
@@ -448,11 +463,11 @@ test('finds a single call outside paragraph chunks or inside nested chunks witho
 test('rejects duplicate call envelopes and accepts a single valid legacy call alongside prose', () => {
   const duplicate = setup(); duplicate.chunk.children = []; duplicate.chunk._text = '';
   for (let i = 0; i < 2; i++) duplicate.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
-  assert.doesNotMatch(duplicate.adapter.inspect().latestModel.text, /^```webcodex-call/);
+  assert.doesNotMatch(duplicate.adapter.inspect().latestModel.text, /^```helper-call/);
 
   const legacy = setup(); legacy.chunk.children = []; legacy.chunk._text = 'Please run this: ';
   legacy.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}'));
-  assert.match(legacy.adapter.inspect().latestModel.text, /^```webcodex-call/);
+  assert.match(legacy.adapter.inspect().latestModel.text, /^```helper-call/);
 });
 test('inspect exposes the latest user message without turn headers or other role text', () => {
   const state = setup();
@@ -494,7 +509,7 @@ test('normalizes a later call without modifying the original prose and rendered 
   const block = next.add(new Node('ms-code-block'));
   block.add(new Node('button', {}, 'Copy'));
   block.add(new Node('pre')).add(new Node('code', {}, '{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}'));
-  assert.equal(state.adapter.inspect().latestModel.text, '```webcodex-call\n{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}\n```');
+  assert.equal(state.adapter.inspect().latestModel.text, '```helper-call\n{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}\n```');
   assert.equal(state.chunk._text,'Before call');
 });
 test('accepts a sole exact call JSON block without a language class and ignores its copy button', () => {
@@ -502,13 +517,13 @@ test('accepts a sole exact call JSON block without a language class and ignores 
   const block = state.chunk.add(new Node('ms-code-block'));
   block.add(new Node('button', {}, 'Copy'));
   block.add(new Node('pre')).add(new Node('code', {}, '{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}'));
-  assert.equal(state.adapter.inspect().latestModel.text, '```webcodex-call\n{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}\n```');
+  assert.equal(state.adapter.inspect().latestModel.text, '```helper-call\n{"v":1,"turn":"legacy-turn","name":"read","arguments":{}}\n```');
 });
 test('removes thought content from detached clones and accepts only the exact AI Studio host', () => {
   const { adapter, chunk } = setup();
-  const thought = chunk.add(new Node('ms-thought-chunk', {}, '```webcodex-call\n{"v":1}\n``` hidden thought'));
+  const thought = chunk.add(new Node('ms-thought-chunk', {}, '```helper-call\n{"v":1}\n``` hidden thought'));
   chunk._text = 'answer';
-  assert.doesNotMatch(adapter.inspect().latestModel.text, /hidden thought|webcodex-call/);
+  assert.doesNotMatch(adapter.inspect().latestModel.text, /hidden thought|helper-call/);
   thought.isConnected = false;
   assert.equal(setup({ hostname: 'preview.aistudio.google.com' }).adapter.inspect().supported, false);
   assert.equal(setup({ hostname: 'aistudio.google.com' }).adapter.inspect().supported, true);
@@ -521,7 +536,7 @@ test('submits only after staging and does not claim delivery until the marker ap
 });
 
 test('confirms only an exact result envelope in the submitted user turn', () => {
-  const payload = '{"type":"webcodex-result","operation_id":"op-1","result":42}';
+  const payload = '{"type":"helper-result","operation_id":"op-1","result":42}';
   const turnContent = setup();
   turnContent.user.attrs['data-turn-role'] = 'User';
   turnContent.user.children = [];
@@ -545,8 +560,8 @@ test('confirms only an exact result envelope in the submitted user turn', () => 
 
   for (const invalid of [
     '{"type":"other","operation_id":"op-1"}',
-    'partial {"type":"webcodex-result","operation_id":"op-1"',
-    'Here is the result: {"type":"webcodex-result","operation_id":"op-1"}',
+    'partial {"type":"helper-result","operation_id":"op-1"',
+    'Here is the result: {"type":"helper-result","operation_id":"op-1"}',
   ]) {
     const state = setup();
     state.user.attrs['data-turn-role'] = 'User';
@@ -566,7 +581,7 @@ test('confirms only an exact result envelope in the submitted user turn', () => 
 
 test('proves legacy Markdown-rendered delivery against the exact expected envelope', () => {
   const payload = JSON.stringify({
-    type: 'webcodex-result', v: 1, operation_id: 'op-legacy', name: 'browser',
+    type: 'helper-result', v: 1, operation_id: 'op-legacy', name: 'browser',
     result: { content: [{ type: 'text', text: JSON.stringify({ path: 'C:\\Users\\alice\\file.txt', quote: 'say "hello"' }) }] },
   });
   const rendered = payload.replace(/\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
@@ -588,7 +603,7 @@ test('proves legacy Markdown-rendered delivery against the exact expected envelo
 });
 
 test('exposes the latest user result operation id from wrapped text and nested result nodes only', () => {
-  const payload = '{"type":"webcodex-result","operation_id":"op-latest"}';
+  const payload = '{"type":"helper-result","operation_id":"op-latest"}';
   const header = setup();
   header.user.attrs['data-turn-role'] = 'User';
   header.user.children = [];
@@ -606,8 +621,8 @@ test('exposes the latest user result operation id from wrapped text and nested r
 
   for (const invalid of [
     '{"type":"other","operation_id":"op-latest"}',
-    '{"type":"webcodex-result"}',
-    '[{"type":"webcodex-result","operation_id":"op-latest"}]',
+    '{"type":"helper-result"}',
+    '[{"type":"helper-result","operation_id":"op-latest"}]',
   ]) {
     const state = setup();
     state.user.attrs['data-turn-role'] = 'User';

@@ -166,18 +166,20 @@ async function command(m) {
         if(state.session.phase==='ready'&&state.session.pendingCall&&!state.session.operationKey&&!state.session.operationId&&!state.session.resultText)await dispatch();
       }
       break;
-    case 'bridge.saveFromReply': {
-      const s=state.session,tool=state.tools.find(t=>t.name==='write_file');
-      if(!state.connected||state.autoSettings?.consent!==true||!s.toolNames?.includes('write_file')||!tool)throw Error('Выберите write_file и разрешите операции с локальным агентом');
+    case 'bridge.saveFromReply':
+    case 'bridge.runFromReply': {
+      const s=state.session,writeOnly=m.type==='bridge.saveFromReply';
+      const selected=state.tools.filter(t=>s.toolNames?.includes(t.name)&&(!writeOnly||t.name==='write_file'));
+      if(!state.connected||state.autoSettings?.consent!==true||!selected.length)throw Error('Выберите нужные инструменты и разрешите операции с локальным агентом');
       if(!['waiting_model','ready','paused'].includes(s.phase)||s.resumeBlocked||s.pendingCall||s.operationId||s.operationKey||s.resultText||s.error?.includes('outcome is unknown'))throw Error('Сначала завершите проверку предыдущей операции');
-      const captured=await chrome.tabs.sendMessage(s.tabId,{type:'studio.captureWrite',sessionId:s.sessionId,tool});
+      const captured=await chrome.tabs.sendMessage(s.tabId,{type:writeOnly?'studio.captureWrite':'studio.captureCall',sessionId:s.sessionId,...(writeOnly?{tool:selected[0]}:{tools:selected})});
       if(!captured?.ok||captured.conversationKey!==s.conversationKey)throw Error(captured?.error||'Не удалось прочитать последний ответ в текущем чате');
-      const call=WebCodexProtocol.parseCall(captured.text,null,[tool]);
-      if(call?.name!=='write_file')throw Error('В последнем ответе нет корректного write_file');
+      const call=WebCodexProtocol.parseCall(captured.text,null,selected);
+      if(!call||writeOnly&&call.name!=='write_file')throw Error('В последнем ответе нет корректного выбранного вызова');
       const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(captured.text));
       const recoveryId=captured.pageInstance+':'+Array.from(new Uint8Array(digest),n=>n.toString(16).padStart(2,'0')).join('');
-      if(s.lastRecoveredFile===recoveryId)break;
-      s.lastRecoveredFile=recoveryId;s.paused=false;s.userPaused=false;s.pausedPhase='';s.error='';s.pendingCall={...call,turn:s.turn};
+      if((s.lastRecoveredCall||s.lastRecoveredFile)===recoveryId)break;
+      s.lastRecoveredCall=recoveryId;s.paused=false;s.userPaused=false;s.pausedPhase='';s.error='';s.pendingCall={...call,turn:s.turn};
       await dispatch();break;
     }
     case 'bridge.stop': await disableAuto();await stop();break;
@@ -391,7 +393,7 @@ async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);if(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED')localClient=null;await save();}
 }
 async function finishResult(result){const s=state.session;s.operationId=result?.operation_id||result?.id||s.operationId;if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:toolResult,error:transportError});s.phase='result_ready';await save();if(s.automatic&&!s.paused)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}
-async function deliver(submit){const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a webcodex-result can be delivered');}if(envelope.type!=='webcodex-result')throw Error('Only a webcodex-result can be delivered');if(s.phase==='delivery_uncertain')throw Error('Delivery status is unknown; check AI Studio before taking action');if(submit){s.phase='delivery_uncertain';await save();}let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit});}catch(e){throw Error('Delivery status is unknown; do not send again');}if(!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('AI Studio session is unavailable; delivery is blocked');}if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered');}if(!submit){s.phase='result_ready';await save();return;}if(r.confirmed){completeDelivery();await save();}}
+async function deliver(submit){const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a helper-result can be delivered');}if(!WebCodexProtocol.isResult(envelope))throw Error('Only a helper-result can be delivered');if(s.phase==='delivery_uncertain')throw Error('Delivery status is unknown; check AI Studio before taking action');if(submit){s.phase='delivery_uncertain';await save();}let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit});}catch(e){throw Error('Delivery status is unknown; do not send again');}if(!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('AI Studio session is unavailable; delivery is blocked');}if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered');}if(!submit){s.phase='result_ready';await save();return;}if(r.confirmed){completeDelivery();await save();}}
 function completeDelivery(){const s=state.session;if(s.operationId||s.operationKey)(s.completedOperationIds||=[]).push(s.operationId||s.operationKey);s.error='';s.phase='waiting_model';s.turn=s.nextTurn;s.pendingCall=null;s.resultText='';s.operationKey='';s.operationId='';s.dispatchArgs=null;s.count++;}
 async function stop(){
   const s=state.session;

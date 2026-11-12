@@ -10,10 +10,17 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.3.8)
+## AI Studio Bridge (alpha 0.3.9)
 
-Version `0.3.8` and agent/Gate `1.5.0-ai-studio-alpha.5` remove fixed file, request
-and result size ceilings throughout the local and Gate paths. Large session state
+Version `0.3.9` no longer restages instructions or consumes the next call when
+AI Studio rerenders or virtualizes history. Instructions and their preset use
+**Helper**; legacy blocks migrate in place. **Execute last call** lets the user
+continue from a complete selected call without generating it again. Update only
+the extension and reload a saved AI Studio tab for this fix; agent and Gate need
+no replacement or restart.
+
+Since extension `0.3.8` and agent/Gate `1.5.0-ai-studio-alpha.5`, fixed file, request
+and result size ceilings have been removed throughout the local and Gate paths. Large session state
 uses extension-local storage with unlimitedStorage. **Save file from reply** recovers
 the last complete selected `write_file` without generating it again.
 The extension waits for idle generation controls and one second of unchanged
@@ -41,7 +48,7 @@ An uncertain command is not automatically replayed. The live AI Studio page has
 not been verified; its DOM selectors remain alpha.
 
 The ready-to-use kit is in
-[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.8`
+[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.9`
 and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.5`. No local
 build is required. Direct local mode does not need Gate. Replace the agent and extension, reload it in
 `chrome://extensions`, and reload an already saved AI Studio tab. Do not reload

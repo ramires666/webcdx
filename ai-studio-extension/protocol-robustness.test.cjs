@@ -2,11 +2,11 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const {analyzeReply,parseCall,findJSONValues}=require('./protocol.js');
 const tools=[{name:'exec_command',inputSchema:{type:'object',properties:{cwd:{type:'string'},argv:{type:'array',items:{type:'string'}},text:{type:'string'},config:{type:'object'}},required:['cwd','argv'],additionalProperties:false}}];
-const args={cwd:'W:\\projects\\игра',argv:['cmd.exe','/c','echo braces { [ ] } and "quotes"'],text:'```webcodex-call\n{"v":1,"name":"nested","arguments":{}}\n```\r\n\\end',config:{nested:[{name:'not a call',text:'} ] \\"'},42,true,null]}};
+const args={cwd:'W:\\projects\\игра',argv:['cmd.exe','/c','echo braces { [ ] } and "quotes"'],text:'```helper-call\n{"v":1,"name":"nested","arguments":{}}\n```\r\n\\end',config:{nested:[{name:'not a call',text:'} ] \\"'},42,true,null]}};
 const call={v:1,name:'exec_command',arguments:args};
 
 test('one scanner preserves strings and arguments across framing, whitespace and formatting combinations',t=>{
-  const prefixes=['','Проверю файл.\n','Model · 9:56 PM\n','v\n','json','```webcodex-call\n','```JSON\r\n','~~~json\n','<header>Code</header>\n','Use [read_file](https://example.test), path {root}.\n'];
+  const prefixes=['','Проверю файл.\n','Model · 9:56 PM\n','v\n','json','```helper-call\n','```JSON\r\n','~~~json\n','<header>Code</header>\n','Use [read_file](https://example.test), path {root}.\n'];
   const suffixes=['','\n```','\n~~~','\nПосле выполнения сообщу результат.','\nCopy Download'];
   let cases=0;
   for(const prefix of prefixes)for(const suffix of suffixes)for(const indent of [undefined,2,4]){
@@ -24,7 +24,7 @@ test('rendered Unicode spaces are normalized only outside JSON string values',()
 });
 
 test('nested call-shaped data, arrays, escaped JSON strings and tool results are never interpreted as a new call',()=>{
-  for(const raw of [JSON.stringify({type:'webcodex-result',result:call}),JSON.stringify({example:call}),JSON.stringify([call]),JSON.stringify(JSON.stringify(call))])assert.equal(analyzeReply(raw).kind,'none',raw);
+  for(const raw of [JSON.stringify({type:'helper-result',result:call}),JSON.stringify({example:call}),JSON.stringify([call]),JSON.stringify(JSON.stringify(call))])assert.equal(analyzeReply(raw).kind,'none',raw);
 });
 
 test('ambiguity, duplicate decoded keys and broken call JSON fail without guessing',()=>{
@@ -47,8 +47,8 @@ test('unknown tools, injected arguments, invalid versions and excessive nesting 
 });
 
 test('result extraction returns only complete unambiguous top-level values',()=>{
-  const result={type:'webcodex-result',operation_id:'op-one',result:{text:JSON.stringify(call)}};
+  const result={type:'helper-result',operation_id:'op-one',result:{text:JSON.stringify(call)}};
   assert.deepEqual(findJSONValues('User · now\nJSON\n'+JSON.stringify(result)),[result]);
-  assert.equal(findJSONValues('{"type":"webcodex-result","operation_id":"one","operation_id":"two"}').length,0);
+  assert.equal(findJSONValues('{"type":"helper-result","operation_id":"one","operation_id":"two"}').length,0);
   assert.equal(findJSONValues(JSON.stringify(result).slice(0,-1)).length,0);
 });

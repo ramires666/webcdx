@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const WebCodexProtocol = require('./protocol.js');
 const unwrapResult = text => {
-  const match = /^```webcodex-result\n([\s\S]*)\n```$/.exec(text);
+  const match = /^```helper-result\n([\s\S]*)\n```$/.exec(text);
   return match ? match[1] : text;
 };
 
@@ -29,7 +29,7 @@ function harness({manualClock=false}={}) {
   const document = { addEventListener(type, fn) { documentListeners[type] = fn; }, documentElement: {} };
   const window = {}; window.top = window;
   class MutationObserver { constructor(callback) { observerCallback = callback; } observe() {} disconnect() { disconnected = true; } }
-  const context = { window, location: new URL('https://aistudio.google.com/app/prompts/one'), document, chrome, WebCodexStudio: { createAdapter: () => adapter }, MutationObserver,
+  const context = { window, location: new URL('https://aistudio.google.com/app/prompts/one'), URL, document, chrome, WebCodexStudio: { createAdapter: () => adapter }, MutationObserver,
     setTimeout: (fn,ms=0) => { const id = ++timerId; timers.set(id, {fn,at:now+ms}); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, Date:TestDate, TextEncoder, structuredClone, crypto:{subtle:{digest:async(_algorithm,data)=>require('node:crypto').createHash('sha256').update(data).digest()}}, WebCodexProtocol };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const send = message => new Promise(resolve => listeners.message(message, {}, response => resolve(structuredClone(response))));
@@ -50,7 +50,7 @@ test('delivery waits for async Run readiness and aborts after disarm', async () 
   const h = harness();await h.send({type:'studio.arm',sessionId:'s1'});
   let finish;
   h.setSubmitHandler((_text,isCurrent)=>new Promise(resolve=>{finish=()=>resolve(isCurrent());}));
-  const text=JSON.stringify({type:'webcodex-result',operation_id:'op-async'});
+  const text=JSON.stringify({type:'helper-result',operation_id:'op-async'});
   let replied=false;
   const delivery=h.send({type:'studio.deliver',sessionId:'s1',text,submit:true}).then(reply=>{replied=true;return reply;});
   await h.flush();assert.equal(replied,false);
@@ -122,7 +122,8 @@ test('selecting saved history checks system instructions once without executing 
   h.state.historyAnchor={};h.state.historyStart='original first message';h.state.latestUser={text:'old user'};
   await h.send({type:'studio.arm',sessionId:'saved-session',turnless:true});
   h.state.historyAnchor={};h.state.historyStart='saved chat first message';
-  const oldCall='```webcodex-call\n{"v":1,"name":"read_file","arguments":{"path":"old.txt"}}\n```';
+  h.click({target:{closest:()=>({getAttribute:name=>name==='href'?'/prompts/saved-chat':null})}});
+  const oldCall='```helper-call\n{"v":1,"name":"read_file","arguments":{"path":"old.txt"}}\n```';
   h.state.latestModel={text:oldCall};h.state.latestUser={text:'saved user'};
   h.mutate();await h.flush();h.tick();await h.flush();
   assert.equal(h.sent.filter(message=>message.type==='studio.ensureInstructions').length,1);
@@ -133,6 +134,91 @@ test('selecting saved history checks system instructions once without executing 
   h.mutate();await h.flush();
   assert.equal(h.sent.filter(message=>message.type==='studio.call').length,1);
   assert.equal(h.sent.find(message=>message.type==='studio.call').text,'fresh model answer');
+});
+
+test('rerendered and virtualized history after delivery cannot restage instructions or consume the next call',async()=>{
+  const h=harness();h.state.historyAnchor={};h.state.historyStart='original task';
+  await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  const result={type:'helper-result',operation_id:'op-directory',result:{path:'W:\\',entries:[]}};
+  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify(result),submit:true});
+  h.state.historyAnchor={};h.state.historyStart='a different first visible turn after virtualization';
+  h.state.latestUser={text:JSON.stringify(result)};h.state.modelAfterUser=true;
+  const call=JSON.stringify({v:1,name:'list_directory',arguments:{path:'W:\\_python'}});
+  h.state.latestModel={text:call,element:{}};
+  h.mutate();await h.flush();h.tick();await h.flush();h.mutate();await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.ensureInstructions').length,0,'DOM node identity and first visible text are not chat-navigation evidence');
+  assert.deepEqual(h.sent.filter(m=>m.type==='studio.call').map(m=>m.text),[call]);
+});
+
+test('ordinary links, fragment links and saved chats opened in another tab do not reinitialize the active run',async()=>{
+  for(const [href,attrs,modifiers]of [['https://example.test/docs',{},{}],['#section',{},{}],['/prompts/other',{target:'_blank'},{}],['/prompts/other',{}, {ctrlKey:true}]]){
+    const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+    h.run();h.state.latestUser={text:'read'};h.state.modelAfterUser=true;h.state.latestModel={text:'new answer'};
+    const link={getAttribute:name=>name==='href'?href:attrs[name]??null};
+    h.click({...modifiers,target:{closest:()=>link}});h.mutate();await h.flush();h.tick();await h.flush();
+    assert.equal(h.sent.filter(m=>m.type==='studio.ensureInstructions').length,0,href);
+    assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1,href);
+  }
+});
+
+test('temporary empty virtualization while awaiting an automatic followup never announces a new chat',async()=>{
+  const h=harness();h.state.latestUser={text:'request'};
+  await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  const result={type:'helper-result',operation_id:'op-virtualized'};
+  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify(result),submit:true});
+  h.state.latestUser=null;h.state.latestModel=null;h.mutate();await h.flush();h.tick();await h.flush();h.tick();await h.flush();
+  assert.equal(h.sent.some(m=>m.conversationReplaced),false);
+  h.state.latestUser={text:JSON.stringify(result)};h.state.latestModel={text:'next reply'};h.state.modelAfterUser=true;
+  h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+});
+
+test('a new Run during an instruction check retains its response gate',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  let finish;
+  h.setSendHandler(message=>message.type==='studio.ensureInstructions'?new Promise(resolve=>{finish=resolve;}):{accepted:true});
+  h.click({target:{closest:()=>({getAttribute:name=>name==='href'?'/prompts/saved':null})}});
+  h.state.latestUser={text:'historical user'};h.state.latestModel={text:'historical reply'};h.mutate();await h.flush();h.tick();await h.flush();
+  assert.equal(typeof finish,'function');
+  h.run();h.state.latestUser={text:'new task'};h.state.latestModel={text:'new answer'};h.state.modelAfterUser=true;
+  finish({accepted:true});h.setSendHandler(null);await h.flush();h.tick();await h.flush();h.tick();await h.flush();
+  assert.deepEqual(h.sent.filter(m=>m.type==='studio.call').map(m=>m.text),['new answer']);
+});
+
+test('navigation cancels an in-progress result submit before its click',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  let finish;
+  h.setSubmitHandler((_text,isCurrent)=>new Promise(resolve=>{finish=()=>resolve(isCurrent());}));
+  const delivery=h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'helper-result',operation_id:'op-before-nav'}),submit:true});
+  await h.flush();h.click({target:{closest:()=>({getAttribute:name=>name==='href'?'/prompts/another':null})}});
+  finish();assert.equal((await delivery).ok,false);
+  assert.equal(h.submitted.length,0);
+});
+
+test('an icon-only new-chat link starts the blank-chat flow without a saved-history check',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.click({target:{closest:()=>({getAttribute:name=>name==='href'?'/prompts/new_chat':null})}});
+  h.state.latestUser=null;h.state.latestModel=null;h.mutate();await h.flush();
+  assert.equal(h.sent.filter(m=>m.conversationReplaced).length,1);
+  assert.equal(h.sent.filter(m=>m.type==='studio.ensureInstructions').length,0);
+});
+
+test('a legacy result still anchors one fresh response after migration to Helper',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  const result={type:'webcodex-result',operation_id:'legacy-operation'};
+  assert.equal((await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify(result),submit:true})).ok,true);
+  h.state.latestUser={text:JSON.stringify(result)};h.state.modelAfterUser=true;
+  h.state.latestModel={text:'```webcodex-call\n{"v":1,"name":"list_directory","arguments":{"path":"W:\\\\_python"}}\n```'};
+  h.mutate();await h.flush();
+  const calls=h.sent.filter(m=>m.type==='studio.call');assert.equal(calls.length,1);assert.equal(calls[0].precedingResultId,'legacy-operation');
+});
+
+test('explicit capture accepts only the latest selected call and consumes its automatic observation',async()=>{
+  const h=harness(),tool={name:'list_directory',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}};
+  await h.send({type:'studio.arm',sessionId:'s1',turnless:true});h.run();
+  h.state.latestModel={text:JSON.stringify({v:1,name:'list_directory',arguments:{path:'W:\\_python'}})};
+  const captured=await h.send({type:'studio.captureCall',sessionId:'s1',tools:[tool]});assert.equal(captured.ok,true);
+  h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0,'explicit dispatch must not race automatic observation');
+  assert.equal((await h.send({type:'studio.captureCall',sessionId:'s1',tools:[]})).ok,false);
 });
 
 test('ignores history and sends one completed new reply as a call', async () => {
@@ -210,22 +296,22 @@ test('disarm and Stop cancel pending reply timers without submitting the candida
 
 test('safe draft, submitted result, delivery confirmation and disarm', async () => {
   const h = harness(); await h.send({ type: 'studio.arm', sessionId: 's1' });
-  const text = JSON.stringify({ type: 'webcodex-result', v: 1, turn: 't1', next_turn: 't2', operation_id: 'op-7', name: 'read_file', result: {} });
+  const text = JSON.stringify({ type: 'helper-result', v: 1, turn: 't1', next_turn: 't2', operation_id: 'op-7', name: 'read_file', result: {} });
   const draft = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: false });
   assert.equal(draft.ok, true); assert.equal(draft.attempted, false); assert.equal(h.submitted.length, 0);
   const delivered = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true });
   assert.equal(delivered.ok, true); assert.equal(delivered.attempted, true); assert.equal(delivered.confirmed, true); assert.equal(h.submitted.length, 1);
   const duplicate = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true });
   assert.equal(duplicate.attempted, true); assert.equal(h.submitted.length, 1);
-  assert.equal(h.submitted[0], `\`\`\`webcodex-result\n${text}\n\`\`\``);
+  assert.equal(h.submitted[0], `\`\`\`helper-result\n${text}\n\`\`\``);
   assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: true });
   assert.deepEqual(await h.send({ type: 'studio.disarm', sessionId: 's1' }), { ok: true });
 });
 
 test('result payload stays raw inside the submitted and staged code fence', async () => {
   const h = harness(); await h.send({ type: 'studio.arm', sessionId: 's1' });
-  const text = JSON.stringify({ type: 'webcodex-result', operation_id: 'op-escaped', path: 'C:\\Users\\thunder\\file.json', innercontent: 'He said "hello"\\nthen left', code: '```html\n<div>sample</div>\n```' });
-  const expected = `\`\`\`webcodex-result\n${text}\n\`\`\``;
+  const text = JSON.stringify({ type: 'helper-result', operation_id: 'op-escaped', path: 'C:\\Users\\thunder\\file.json', innercontent: 'He said "hello"\\nthen left', code: '```html\n<div>sample</div>\n```' });
+  const expected = `\`\`\`helper-result\n${text}\n\`\`\``;
   assert.equal((await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: false })).ok, true);
   assert.equal(h.staged[0], expected);
   const delivered = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true });
@@ -268,19 +354,19 @@ test('recovery observes only the advertised valid turn and retries until accepte
   const h=harness();h.state.latestModel={text:'old rendered call'};
   await h.send({type:'studio.arm',sessionId:'s1',recover:true,recoverTurn:'turn-2',toolNames:[{name:'read_file',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}],expectedConversationKey:'chat-1'});
   await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
-  const valid='```webcodex-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'read_file',arguments:{path:'x'}})+'\n```';
+  const valid='```helper-call\n'+JSON.stringify({v:1,turn:'turn-2',name:'read_file',arguments:{path:'x'}})+'\n```';
   h.state.latestModel={text:valid};h.setAccepted(false);h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
   h.setAccepted(true);h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,2);
 });
 
 test('delivered recovery snapshot keeps an already rendered next turn observable',async()=>{
   const h=harness(),tools=[{name:'read_file',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}];
-  const old='```webcodex-call\n'+JSON.stringify({v:1,turn:'old-turn',name:'read_file',arguments:{path:'old'}})+'\n```';
-  const next='```webcodex-call\n'+JSON.stringify({v:1,turn:'next-turn',name:'read_file',arguments:{path:'new'}})+'\n```';
+  const old='```helper-call\n'+JSON.stringify({v:1,turn:'old-turn',name:'read_file',arguments:{path:'old'}})+'\n```';
+  const next='```helper-call\n'+JSON.stringify({v:1,turn:'next-turn',name:'read_file',arguments:{path:'new'}})+'\n```';
   h.state.latestModel={text:old};
   await h.send({type:'studio.arm',sessionId:'s1',recover:true,recoverTurn:'next-turn',toolNames:tools,expectedConversationKey:'chat-1'});
   await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
-  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'webcodex-result',operation_id:'op-recover'}),submit:true});
+  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'helper-result',operation_id:'op-recover'}),submit:true});
   h.state.latestModel={text:next};
   assert.equal((await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-recover'})).delivered,true);
   await h.flush();
@@ -383,7 +469,7 @@ test('reports a clicked blank New chat through hello when the prior session is u
 test('cleanup annotates final answers, hides accepted service turns, and leaves context visible when hiding is off', async () => {
   const h=harness();const turn={};
   await h.send({type:'studio.arm',sessionId:'s1',hideServiceMessages:true});
-  h.state.latestModel={text:'```webcodex-call\n{}\n```',element:turn};h.setAccepted(false);h.mutate();await h.flush();
+  h.state.latestModel={text:'```helper-call\n{}\n```',element:turn};h.setAccepted(false);h.mutate();await h.flush();
   await h.send({type:'studio.cleanup',sessionId:'s1',enabled:true,final:false,operationIds:[]});
   assert.equal(h.cleanups.length,0);assert.equal(h.annotations,0);
   await h.send({type:'studio.cleanup',sessionId:'s1',enabled:true,final:true,operationIds:['op-1']});
@@ -406,7 +492,7 @@ test('active tab binding stays stable while a chat is saved and the response arr
   await h.send({type:'studio.arm',sessionId:'s1',turnless:true});h.run();
   h.state.generating=true;h.mutate();await h.flush();
   h.state.generating=false;h.state.modelAfterUser=true;
-  h.state.latestModel={text:'```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```',element:{}};
+  h.state.latestModel={text:'```helper-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```',element:{}};
   h.mutate();await h.flush();h.mutate();await h.flush();
   const calls=h.sent.filter(msg=>msg.type==='studio.call');
   assert.equal(calls.length,1);assert.equal(calls[0].conversationKey,'active-chat');
@@ -414,7 +500,7 @@ test('active tab binding stays stable while a chat is saved and the response arr
 
 test('turnless accepts the same call once for each user and deduplicates rerenders', async () => {
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
-  const call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
+  const call='```helper-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
   h.state.latestUser={text:'first'};h.state.modelAfterUser=true;h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();h.mutate();await h.flush();
   h.state.latestUser={text:'second'};h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();
   const calls=h.sent.filter(m=>m.type==='studio.call');assert.equal(calls.length,2);assert.notEqual(calls[0].responseKey,calls[1].responseKey);
@@ -422,21 +508,21 @@ test('turnless accepts the same call once for each user and deduplicates rerende
 
 test('turnless anchors identical user prompts to distinct delivered results', async () => {
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
-  const call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
-  h.state.modelAfterUser=true;h.state.latestUser={text:JSON.stringify({type:'webcodex-result',operation_id:'op-1'})};h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();h.mutate();await h.flush();
-  h.state.latestUser={text:JSON.stringify({type:'webcodex-result',operation_id:'op-2'})};h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();h.mutate();await h.flush();
+  const call='```helper-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
+  h.state.modelAfterUser=true;h.state.latestUser={text:JSON.stringify({type:'helper-result',operation_id:'op-1'})};h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();h.mutate();await h.flush();
+  h.state.latestUser={text:JSON.stringify({type:'helper-result',operation_id:'op-2'})};h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();h.mutate();await h.flush();
   const calls=h.sent.filter(m=>m.type==='studio.call');assert.equal(calls.length,2);assert.equal(calls[0].precedingResultId,'op-1');assert.equal(calls[1].precedingResultId,'op-2');assert.notEqual(calls[0].responseKey,calls[1].responseKey);
 });
 
 test('turnless ignores a stale model before the new user result', async () => {
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
-  h.state.latestUser={text:'new request'};h.state.latestModel={text:'```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```'};h.state.modelAfterUser=false;h.mutate();await h.flush();
+  h.state.latestUser={text:'new request'};h.state.latestModel={text:'```helper-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```'};h.state.modelAfterUser=false;h.mutate();await h.flush();
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
 });
 
 test('turnless history rerenders do not dispatch without a new Run', async () => {
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
-  h.state.latestUser={text:'scrolled history'};h.state.latestModel={text:'```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```',element:{}};h.state.modelAfterUser=true;h.mutate();await h.flush();
+  h.state.latestUser={text:'scrolled history'};h.state.latestModel={text:'```helper-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```',element:{}};h.state.modelAfterUser=true;h.mutate();await h.flush();
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
 });
 
@@ -455,22 +541,22 @@ test('stopping a turnless response consumes its Run gate', async () => {
 });
 
 test('turnless recovery waits for delivered snapshot proof', async () => {
-  const h=harness(),call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
+  const h=harness(),call='```helper-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
   h.state.latestUser={text:'request'};h.state.latestModel={text:call};h.state.modelAfterUser=true;
   await h.send({type:'studio.arm',sessionId:'s1',turnless:true,recover:true,recoverTurn:'',toolNames:[{name:'tool',inputSchema:{type:'object',properties:{},additionalProperties:false}}],expectedConversationKey:'chat-1'});
   await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
   await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'unproven'});await h.flush();
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
-  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'webcodex-result',operation_id:'proven'}),submit:true});
+  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'helper-result',operation_id:'proven'}),submit:true});
   await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'proven'});await h.flush();
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
 });
 
 test('turnless recovery proof clears recovery when the new call has not rendered yet', async () => {
-  const h=harness(),call='```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
+  const h=harness(),call='```helper-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```';
   h.state.latestUser={text:'request'};h.state.latestModel={text:'previous prose'};h.state.modelAfterUser=false;
   await h.send({type:'studio.arm',sessionId:'s1',turnless:true,recover:true,recoverTurn:'',toolNames:[{name:'tool',inputSchema:{type:'object',properties:{},additionalProperties:false}}],expectedConversationKey:'chat-1'});
-  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'webcodex-result',operation_id:'proof'}),submit:true});
+  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'helper-result',operation_id:'proof'}),submit:true});
   await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'proof'});
   h.state.latestModel={text:call};h.state.modelAfterUser=true;h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
   h.run();h.state.generating=true;h.mutate();await h.flush();h.state.generating=false;h.state.latestModel={text:call,element:{}};h.mutate();await h.flush();
@@ -479,19 +565,19 @@ test('turnless recovery proof clears recovery when the new call has not rendered
 
 test('snapshot reports only an exactly parsed visible result as delivery proof',async()=>{
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
-  h.state.latestUser={text:'prefix '+JSON.stringify({type:'webcodex-result',operation_id:'op-visible'})};
+  h.state.latestUser={text:'prefix '+JSON.stringify({type:'helper-result',operation_id:'op-visible'})};
   let snap=await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-visible'});assert.equal(snap.delivered,false);assert.equal(snap.deliveredOperationId,'');
-  h.state.latestUser={text:JSON.stringify({type:'webcodex-result',operation_id:'op-visible'})};
+  h.state.latestUser={text:JSON.stringify({type:'helper-result',operation_id:'op-visible'})};
   snap=await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-visible'});assert.equal(snap.delivered,true);assert.equal(snap.deliveredOperationId,'op-visible');
   h.state.latestUser={text:'User timestamp wrapper',operationId:'op-visible'};
   snap=await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-visible'});assert.equal(snap.delivered,true);assert.equal(snap.deliveredOperationId,'op-visible');
-  h.state.latestUser={text:'{"type":"webcodex-result","operation_id":'};
+  h.state.latestUser={text:'{"type":"helper-result","operation_id":'};
   snap=await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-visible'});assert.equal(snap.delivered,false);assert.equal(snap.deliveredOperationId,'');
 });
 
 test('snapshot delivery fallback requires the exact expected result text',async()=>{
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1'});
-  const text=JSON.stringify({type:'webcodex-result',operation_id:'op-exact',result:'expected'});
+  const text=JSON.stringify({type:'helper-result',operation_id:'op-exact',result:'expected'});
   await h.send({type:'studio.deliver',sessionId:'s1',text,submit:true});
   assert.equal((await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-exact',expectedResultText:text})).delivered,true);
   assert.equal((await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-exact',expectedResultText:text.replace('expected','different')})).delivered,false);
@@ -511,9 +597,9 @@ test('an old call acknowledgement cannot consume a newer Run gate',async()=>{
 
 test('a delivered result anchors one fast automatic followup without replaying history',async()=>{
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
-  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'webcodex-result',operation_id:'op-follow'}),submit:true});
-  h.state.latestUser={text:JSON.stringify({type:'webcodex-result',operation_id:'op-follow'})};h.state.modelAfterUser=true;
-  h.state.latestModel={text:'```webcodex-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```'};h.mutate();await h.flush();h.mutate();await h.flush();
+  await h.send({type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'helper-result',operation_id:'op-follow'}),submit:true});
+  h.state.latestUser={text:JSON.stringify({type:'helper-result',operation_id:'op-follow'})};h.state.modelAfterUser=true;
+  h.state.latestModel={text:'```helper-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```'};h.mutate();await h.flush();h.mutate();await h.flush();
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
   h.state.latestModel={text:'historical call'};h.mutate();await h.flush();
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
