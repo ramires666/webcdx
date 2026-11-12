@@ -90,7 +90,18 @@ chrome.alarms.create('webcodex-recover',{periodInMinutes:0.5});
 chrome.alarms.onAlarm.addListener(a=>{if(a.name==='webcodex-recover') enqueue(async()=>{await ready;await recover();});});
 chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
   if(connecting&&msg?.type==='bridge.status'&&sender.url===chrome.runtime.getURL('panel.html')){ready.then(()=>reply({ok:true,state:publicState()})).catch(()=>reply({ok:false,error:'Не удалось загрузить состояние'}));return true;}
-  if(msg?.type?.startsWith('studio.')) { enqueue(async()=>{await ready;if(sender.frameId!==0||!Number.isInteger(sender.tab?.id)||new URL(sender.url||'').origin!=='https://aistudio.google.com')throw Error('Untrusted Studio sender');if(msg.type==='studio.hello')return autoStart(sender,msg);if(sender.tab.id!==state.session.tabId)throw Error('Untrusted Studio sender');return studioMessage(msg,sender);}).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted,...(value?.conversationKey?{conversationKey:value.conversationKey}:{})})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)})); return true; }
+  if(msg?.type?.startsWith('studio.')) {
+    enqueue(async()=>{
+      await ready;
+      if(sender.frameId!==0||!Number.isInteger(sender.tab?.id)||new URL(sender.url||'').origin!=='https://aistudio.google.com')throw Error('Untrusted Studio sender');
+      let result;
+      if(msg.type==='studio.hello')result=await autoStart(sender,msg);
+      else {if(sender.tab.id!==state.session.tabId)throw Error('Untrusted Studio sender');result=await studioMessage(msg,sender);}
+      if(state.session.tabId===sender.tab.id||state.session.tabId===null)state.pageScript={version:typeof msg.contentVersion==='string'?msg.contentVersion:'',tabId:sender.tab.id,lastSeen:Date.now()};
+      return result;
+    }).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted,...(value?.conversationKey?{conversationKey:value.conversationKey}:{})})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)}));
+    return true;
+  }
   const connectRequest=msg?.type==='bridge.connect'&&sender.url===chrome.runtime.getURL('panel.html');
   if(connectRequest&&connecting){reply({ok:false,error:'Вход в Gate уже выполняется. Завершите или закройте окно входа.'});return;}
   if(connectRequest)connecting=true;
@@ -234,6 +245,7 @@ async function autoStart(sender,m){
   await migrateAutoSetup();settings=(await chrome.storage.local.get('bridgeAuto')).bridgeAuto||settings;state.autoSettings=settings;if(settings)settings.autoApprove=!!settings.autoApprove;
   const status=updateAutoStatus(settings);
   if(!settings?.enabled||!settings.consent||!state.connected||demo||!refreshed||status!=='Готово')return {accepted:false};
+  const freshBlank=m.blankChat===true&&m.supported===true&&m.editorEmpty===true&&s.tabId===sender.tab.id&&m.pageInstance&&s.pageInstance!==m.pageInstance;
   if(m.pageInstance&&s.pageInstance===m.pageInstance&&s.tabId===sender.tab.id&&!m.conversationReplaced)return {accepted:true};
   if(s.tabId===sender.tab.id&&m.pageInstance&&s.pageInstance!==m.pageInstance&&recoverableDelivery(s))return reattachDelivery(sender,m);
   if(s.pendingCall||s.operationKey||s.phase==='delivery_uncertain'||s.resultText||s.operationId){
@@ -242,10 +254,10 @@ async function autoStart(sender,m){
   }
   if(s.tabId!==null&&s.tabId!==sender.tab.id&&!['idle','stopped'].includes(s.phase)){
     const existing=await chrome.tabs.get(s.tabId).catch(()=>null);
-    if(existing)return {accepted:false};
+    if(existing&&!(m.blankChat===true&&m.supported===true&&m.editorEmpty===true&&sender.tab.active===true&&sender.tab.windowId===existing.windowId))return {accepted:false};
   }
   const changedWithoutPending=s.tabId===sender.tab.id&&s.error==='Conversation changed'&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId;
-  if((s.paused&&s.phase!=='stopped'&&!changedWithoutPending&&!(m.conversationReplaced&&!s.userPaused&&['Conversation changed','Conversation was replaced'].includes(s.error)))||s.userPaused)return {accepted:false};
+  if((s.paused&&s.phase!=='stopped'&&!changedWithoutPending&&!((m.conversationReplaced||freshBlank)&&!s.userPaused))||s.userPaused)return {accepted:false};
   await clearSession();
   try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
   catch(e){return {accepted:false};}

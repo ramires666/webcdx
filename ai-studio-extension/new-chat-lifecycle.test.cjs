@@ -35,7 +35,9 @@ function harness() {
   // Content owns its listener on runtime.onMessage; separate the background listener installed first.
   context.chrome.runtime.onMessage.addListener = fn => contentListeners.push(fn);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
-  return { chrome, local, messages, staged, db, operations, replyImmediatelyAfterDelivery: text => autoReplies.push(text), missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() { const pending = [...timers.values()]; timers.clear(); for (const fn of [...pending, ...intervals.values()]) fn(); await this.flush(); }, advance(ms) { now += ms; }, get state() { return db[KEY].session; } };
+  const clearChatWithoutClick=()=>{model=null;latestUser=null;modelAfterUser=false;editorEmpty=true;};
+  const setSupported=value=>{supported=value;};
+  return { chrome, local, messages, staged, db, operations, clearChatWithoutClick, setSupported, replyImmediatelyAfterDelivery: text => autoReplies.push(text), missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() { const pending = [...timers.values()]; timers.clear(); for (const fn of [...pending, ...intervals.values()]) fn(); await this.flush(); }, advance(ms) { now += ms; }, get state() { return db[KEY].session; } };
 }
 
 test('New chat retries startup after Gate refresh and system instruction staging failures', async () => {
@@ -58,6 +60,22 @@ test('New chat retries startup after Gate refresh and system instruction staging
   await h.tick();
   assert.equal(h.messages.filter(message => message.type === 'studio.stage').length, 2, 'successful session is not armed again');
   assert.equal(h.messages.some(message => message.type === 'studio.call'), false, 'New chat never submits a tool command');
+});
+
+test('a cleared chat recovers from an unavailable editor, stages system instructions and executes the next call once',async()=>{
+  const h=harness();await h.flush();h.userMessage('previous request');await h.armExisting();
+  h.setSupported(false);await h.tick();
+  assert.equal(h.state.phase,'paused');
+  h.setSupported(true);h.clearChatWithoutClick();h.advance(6000);
+  await h.tick();await h.tick();h.advance(6000);await h.tick();await h.tick();
+  assert.equal(h.state.phase,'waiting_model');
+  assert.notEqual(h.state.sessionId,'old-session');
+  assert.ok(h.staged.some(item=>item.kind==='system'&&item.text.includes('Available tools')));
+  assert.equal(h.operations.length,0,'clearing the old chat never replays history');
+  h.userMessage('Read safe.txt');h.modelMessage('```webcodex-call\n'+JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})+'\n```');
+  await h.tick();await h.tick();
+  assert.equal(h.operations.length,1);
+  assert.equal(h.operations[0].name,'read_file');
 });
 
 test('a new chat runs repeated calls without inserting an ID or replaying an older response', async () => {

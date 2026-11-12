@@ -71,6 +71,42 @@ test('reinjection does not reset a live session or duplicate observers', async (
   assert.equal(h.sent.filter(m => m.type === 'studio.call').length, 1);
 });
 
+test('a retired extension context can be reinjected and arm a working session', async () => {
+  const h = harness();
+  await h.send({ type: 'studio.arm', sessionId: 'old-session' });
+  h.setSendHandler(() => { throw Error('Extension context invalidated.'); });
+  h.tick(); await h.flush();
+  h.setSendHandler(() => ({ ok: true, accepted: true }));
+  h.reload(); await h.flush();
+  assert.equal(h.sent.filter(message => message.type === 'studio.hello').length, 2, 'the new context must install its listener and announce itself');
+  await h.send({ type: 'studio.arm', sessionId: 'new-session' });
+  h.state.latestModel = { text: 'a fresh reply' }; h.mutate(); await h.flush();
+  assert.equal(h.sent.filter(message => message.type === 'studio.call' && message.sessionId === 'new-session').length, 1);
+});
+
+test('detects a stable empty new chat from cleared user and model turns without a labelled click', async () => {
+  const h = harness();
+  h.state.latestUser = { text: 'previous user message' };
+  await h.send({ type: 'studio.arm', sessionId: 'old-session' });
+  h.state.latestModel = null;
+  h.mutate(); await h.flush();
+  h.tick(); await h.flush();
+  assert.equal(h.sent.some(message => message.conversationReplaced), false, 'a virtualized model with its user turn still present is not a new chat');
+  h.state.latestUser = null;
+  h.mutate(); await h.flush();
+  assert.equal(h.sent.some(message => message.conversationReplaced), false, 'one transient empty render must not reset the session');
+  h.tick(); await h.flush();
+  assert.equal(h.sent.filter(message => message.conversationReplaced).length, 1);
+});
+
+test('recognizes an icon-bearing New chat control without an aria label even before any conversation',async()=>{
+  const h=harness();h.state.latestModel=null;
+  await h.send({type:'studio.arm',sessionId:'s1'});
+  const button={getAttribute:()=>null,innerText:'add\nNew chat',textContent:'addNew chat',cloneNode:()=>({innerText:'New chat',querySelectorAll:()=>[]})};
+  h.click({target:{closest:()=>button}});h.mutate();await h.flush();
+  assert.equal(h.sent.filter(message=>message.conversationReplaced).length,1);
+});
+
 test('ignores history and sends one completed new reply as a call', async () => {
   const h = harness();
   assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: undefined });

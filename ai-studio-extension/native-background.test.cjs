@@ -62,3 +62,33 @@ test('a saved Gate session without credentials never switches to local',async()=
   const h=harness({session:{session:{phase:'recovering',transport:'gate',agentId:'remote',toolNames:['read_file'],paused:false,tabId:1,sessionId:'legacy',pendingCall:{name:'read_file',arguments:{path:'x'}},operationKey:'key'}}});await new Promise(r=>setTimeout(r,0));
   assert.equal(h.calls.local,0);assert.equal(h.sessionStore.webcodexState.transport,'gate');assert.match(h.sessionStore.webcodexState.session.error,/credentials are unavailable/);
 });
+
+test('a confirmed empty new chat recovers an automatic editor pause and stages instructions',async()=>{
+  const h=harness({bridgeAuto:{enabled:true,consent:true,agentId:'local',toolNames:['read_file'],automatic:true},session:{session:{phase:'paused',transport:'local',localEndpoint:'http://127.0.0.1:47831',localAgentIdentity:'agent-one',agentId:'local',toolNames:['read_file'],automatic:true,paused:true,userPaused:false,resumeBlocked:true,error:'editor unavailable',tabId:1,sessionId:'old-session',pageInstance:'same-page',pendingCall:null,resultText:'',count:0}}});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const response=await new Promise(resolve=>h.listeners.message({type:'studio.hello',pageInstance:'same-page',conversationReplaced:true,supported:true,editorEmpty:true,generating:false},{url:'https://aistudio.google.com/app/prompts/new',frameId:0,tab:{id:1}},resolve));
+  assert.equal(response.accepted,true);
+  assert.equal(h.sessionStore.webcodexState.session.phase,'waiting_model');
+  assert.notEqual(h.sessionStore.webcodexState.session.sessionId,'old-session');
+  assert.match(h.sessionStore.webcodexState.session.instructions,/Available tools/);
+});
+
+test('a newly loaded empty chat recovers an automatic pause without a prior New chat click',async()=>{
+  const h=harness({bridgeAuto:{enabled:true,consent:true,agentId:'local',toolNames:['read_file'],automatic:true},session:{session:{phase:'paused',transport:'local',agentId:'local',toolNames:['read_file'],paused:true,userPaused:false,error:'editor unavailable',tabId:1,sessionId:'old-session',pageInstance:'old-page',pendingCall:null,resultText:'',count:0}}});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const response=await new Promise(resolve=>h.listeners.message({type:'studio.hello',pageInstance:'new-page',blankChat:true,supported:true,editorEmpty:true,generating:false},{url:'https://aistudio.google.com/app/prompts/new',frameId:0,tab:{id:1}},resolve));
+  assert.equal(response.accepted,true);
+  assert.equal(h.sessionStore.webcodexState.session.phase,'waiting_model');
+});
+
+test('a selected empty tab in the same window can take over an idle chat without switching pending work',async()=>{
+  const auto={enabled:true,consent:true,agentId:'local',toolNames:['read_file'],automatic:true};
+  for(const pending of [false,true]){
+    const h=harness({bridgeAuto:auto,session:{session:{phase:'waiting_model',transport:'local',agentId:'local',toolNames:['read_file'],paused:false,error:'',tabId:1,sessionId:'old-session',pageInstance:'old-page',pendingCall:pending?{name:'read_file',arguments:{path:'safe.txt'}}:null,resultText:'',count:0}}});
+    h.chrome.tabs.get=async()=>({windowId:5,url:'https://aistudio.google.com/app/prompts/old'});
+    await new Promise(resolve=>setTimeout(resolve,0));
+    const response=await new Promise(resolve=>h.listeners.message({type:'studio.hello',pageInstance:'new-page',blankChat:true,supported:true,editorEmpty:true,generating:false},{url:'https://aistudio.google.com/app/prompts/new',frameId:0,tab:{id:2,active:true,windowId:5}},resolve));
+    assert.equal(response.accepted,!pending);
+    assert.equal(h.sessionStore.webcodexState.session.tabId,pending?1:2);
+  }
+});

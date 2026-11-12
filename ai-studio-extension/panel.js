@@ -2,6 +2,8 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const stateEl = $('status'), errorEl = $('error');
+  const installedVersion = chrome.runtime.getManifest?.().version || '';
+  if(installedVersion)$('extension-version').textContent='AI Studio · alpha '+installedVersion;
   let state = null, toolSignature = '', agentSignature = '', toolsInitialized = false;
   let connecting = false;
   const edited = new Set();
@@ -55,6 +57,13 @@
       ? `Прямое соединение · агент ${next.agentVersion || 'версия не передана'} · Gate не используется`
       : next.localError ? `Локальный агент недоступен: ${next.localError}` : '';
     $('transport-info').hidden = !$('transport-info').textContent;
+    const page=next.pageScript;
+    $('page-script').textContent=page
+      ? page.version&&(!installedVersion||page.version===installedVersion)&&(!page.lastSeen||Date.now()-page.lastSeen<10000)
+        ? `Скрипт вкладки AI Studio: ${page.version}`
+        : `Скрипт вкладки AI Studio: ${page.version||'прежняя версия'}. Перезагрузите сохранённую вкладку AI Studio.`
+      : next.connected?'Нет связи со скриптом вкладки AI Studio. Откройте AI Studio или перезагрузите сохранённую вкладку.':'';
+    $('page-script').hidden=!$('page-script').textContent;
     const saved = next.autoSettings || {};
     renderChoices($('agents'), next.agents || [], 'agent');
     const availableTools = next.tools || [];

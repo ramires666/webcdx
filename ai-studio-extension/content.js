@@ -1,25 +1,29 @@
 (() => {
   'use strict';
   if (window.top !== window || location.origin !== 'https://aistudio.google.com') return;
-  if (window.__webcodexBridgeLoaded) return;
+  const reattaching = !!window.__webcodexBridgeReattach;
+  if (window.__webcodexBridgeLoaded && !reattaching) return;
+  window.__webcodexBridgeDispose?.();
   window.__webcodexBridgeLoaded = true;
   const adapter=WebCodexStudio.createAdapter(document,location);
+  const contentVersion='0.3.3';
   const pageInstance=Date.now()+'-'+Math.random();
   let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, newChatPending=false, newChatRequestInFlight=false, attempted=new Set(), recoverTurn='', recoverTools=[], turnless=false, turnlessRecovery=false, observedUserText='', observedResultId='', observedContext='';
   let awaitingResponse=false, generationSeen=false, generationCounter=0, baselineModelText='';
   let deliveryPending = false, retired = false, allowedFollowupId = '';
+  let hadConversation = false, emptyObservations = 0;
   const serviceNodes=new Set();
   const send=async(type,data={})=>{
-    try{return await chrome.runtime.sendMessage({type,sessionId,...data});}
-    catch(e){if(/Extension context invalidated/i.test(String(e.message||e))){retired=true;sessionId='';clearTimeout(observerTimer);clearInterval(tickTimer);observer.disconnect();return {accepted:false};}throw e;}
+    try{return await chrome.runtime.sendMessage({type,sessionId,contentVersion,...data});}
+    catch(e){if(/Extension context invalidated/i.test(String(e.message||e))){retire();return {accepted:false};}throw e;}
   };
-  if (!window.__webcodexBridgeReattach) send('studio.hello',{pageInstance}).catch(()=>{});
   delete window.__webcodexBridgeReattach;
   function parsedResult(text){try{const result=JSON.parse(text||'');return result?.type==='webcodex-result'&&typeof result.operation_id==='string'&&result.operation_id?result:null;}catch{return null;}}
   function visibleResultId(user){const parsed=parsedResult(user?.text)?.operation_id,id=typeof user?.operationId==='string'&&user.operationId?user.operationId:'';return id||parsed||'';}
   function snapshot(operationId,conversationReplaced=false,expectedResultText){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser);return {supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered:operationId?resultId===operationId||adapter.hasDelivery(operationId,expectedResultText):undefined};}
+  function hello(){const s=adapter.inspect();return{pageInstance,supported:s.supported,editorEmpty:s.editorEmpty,generating:s.generating,blankChat:s.supported&&s.editorEmpty&&(!s.generating||s.controlsPending)&&!s.latestModel&&!s.latestUser};}
   function trackGeneration(s){if(turnless&&s.generating&&!s.controlsPending){if(!awaitingResponse){awaitingResponse=true;generationCounter++;attempted.clear();lastText='';baselineText='';baselineModelText=s.latestModel?.text||'';}generationSeen=true;}}
-  async function observe(){const s=adapter.inspect(),conversationReplaced=newChatPending&&s.supported&&(!s.generating||s.controlsPending)&&s.editorEmpty&&!s.latestModel;if(conversationReplaced){if(newChatRequestInFlight)return;newChatRequestInFlight=true;try{const transition={...snapshot(undefined,true),error:'Conversation was replaced'};if(sessionId)await send('studio.snapshot',transition);else await send('studio.hello',{pageInstance,...transition});}finally{newChatRequestInFlight=false;}return;}if(!sessionId||newChatPending)return;if(!s.supported){await send('studio.snapshot',snapshot());return;}
+  async function observe(){if(retired)return;const s=adapter.inspect();if(s.supported&&s.latestModel&&s.latestUser){hadConversation=true;emptyObservations=0;}const blank=s.supported&&(!s.generating||s.controlsPending)&&s.editorEmpty&&!s.latestModel&&!s.latestUser;if(!blank)emptyObservations=0;else if(hadConversation&&!newChatPending&&++emptyObservations>=2)newChatPending=true;const conversationReplaced=newChatPending&&blank;if(conversationReplaced){if(newChatRequestInFlight)return;newChatRequestInFlight=true;try{const transition={...snapshot(undefined,true),error:'Conversation was replaced'};if(sessionId)await send('studio.snapshot',transition);else await send('studio.hello',{pageInstance,...transition});}finally{newChatRequestInFlight=false;}return;}if(!sessionId||newChatPending)return;if(!s.supported){await send('studio.snapshot',snapshot());return;}
     if(turnless){const userText=s.latestUser?.text||'',resultId=visibleResultId(s.latestUser);if(resultId)observedResultId=resultId;observedUserText=userText;const context=JSON.stringify([observedResultId,observedUserText]);if(context!==observedContext){observedContext=context;attempted.clear();lastText='';baselineText='';}trackGeneration(s);if(resultId&&resultId===allowedFollowupId&&s.modelAfterUser===true&&!awaitingResponse){generationCounter++;awaitingResponse=true;generationSeen=true;baselineModelText='';}if(s.modelAfterUser===false)return;}
     if(s.generating)return;
     if(stopping){stopping=false;lastText=s.latestModel?.text||'';if(turnless){awaitingResponse=false;allowedFollowupId='';}return;}
@@ -28,16 +32,31 @@
     const recoveringTurn=!!recoverTurn;if(recoveringTurn){try{if(!WebCodexProtocol.parseCall(model.text,recoverTurn,recoverTools))return;}catch{return;}}
     const marker=sessionId+'\0'+(turnless?observedResultId+'\0'+observedUserText+'\0':'')+model.text;if(attempted.has(model.text)||inFlight===marker)return;const callSession=sessionId,callGeneration=generationCounter,callContext=observedContext;inFlight=marker;try{const response=await send('studio.call',{text:model.text,conversationKey,generating:s.generating,...(turnless?{responseKey:JSON.stringify([pageInstance,generationCounter,observedResultId,observedUserText,model.text]),precedingResultId:observedResultId}:{})});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```webcodex-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
   }
-  const schedule=()=>{if(turnless)trackGeneration(adapter.inspect());clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(()=>{}),250);};
-  document.addEventListener('click',event=>{const button=event.target?.closest?.('button,a,[role="button"],[role="link"]');const labels=[button?.getAttribute('aria-label'),button?.getAttribute('title'),button?.innerText,button?.textContent].map(value=>String(value||'').trim().toLowerCase());const label=labels.join(' ');if(labels.some(value=>/^(new chat|новый чат)$/.test(value)))newChatPending=true;if(turnless&&labels.some(value=>/^(run|send|запустить|отправить)$/.test(value.replace(/\s*keyboard_return\s*$/i,'').trim()))){const s=adapter.inspect();awaitingResponse=true;generationSeen=false;generationCounter++;attempted.clear();lastText='';baselineText='';baselineModelText=s.latestModel?.text||'';}if(adapter.inspect().generating&&(/\b(stop|cancel)\b|остановить|отмена/.test(label)||button?.querySelector?.('.stoppable-spinner, ms-stoppable-spinner')))stopping=true;},true);
-  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&adapter.inspect().generating)stopping=true;},true);
+  const schedule=()=>{if(retired)return;if(turnless)trackGeneration(adapter.inspect());clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(()=>{}),250);};
+  document.addEventListener('click',event=>{
+    if(retired)return;
+    const button=event.target?.closest?.('button,a,[role="button"],[role="link"]');
+    const copy=button?.cloneNode?.(true);
+    if(copy)for(const icon of copy.querySelectorAll('[aria-hidden="true"], .material-symbols-outlined, .material-icons, mat-icon, svg'))icon.remove();
+    const labels=[button?.getAttribute('aria-label'),button?.getAttribute('title'),button?.innerText,button?.textContent,copy?.innerText||copy?.textContent]
+      .map(value=>String(value||'').trim().toLowerCase().replace(/\s*keyboard_return\s*$/i,'').replace(/\s*\(?\s*(?:ctrl|control)\s*\+\s*enter\s*\)?$/i,'').trim());
+    const label=labels.join(' ');
+    if(labels.some(value=>/^(new chat|new prompt|create (?:a )?new (?:chat|prompt)|новый чат|новый запрос)$/.test(value)))newChatPending=true;
+    if(turnless&&labels.some(value=>/^(run|send|запустить|отправить)$/.test(value))){const s=adapter.inspect();awaitingResponse=true;generationSeen=false;generationCounter++;attempted.clear();lastText='';baselineText='';baselineModelText=s.latestModel?.text||'';}
+    if(adapter.inspect().generating&&(/\b(stop|cancel)\b|остановить|отмена/.test(label)||button?.querySelector?.('.stoppable-spinner, ms-stoppable-spinner')))stopping=true;
+  },true);
+  document.addEventListener('keydown',event=>{if(retired)return;if(event.key==='Escape'&&adapter.inspect().generating)stopping=true;},true);
   const observer=new MutationObserver(schedule);observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true});
-  const tickTimer=setInterval(()=>{if(retired)return;if(newChatPending)observe().catch(()=>{});else if(sessionId){send('studio.tick',snapshot()).catch(()=>{});observe().catch(()=>{});}else{send('studio.hello',{pageInstance}).catch(()=>{});}},2000);
+  const tickTimer=setInterval(()=>{if(retired)return;if(newChatPending)observe().catch(()=>{});else if(sessionId){send('studio.tick',snapshot()).catch(()=>{});observe().catch(()=>{});}else{send('studio.hello',hello()).catch(()=>{});}},2000);
+  function retire(){if(retired)return;retired=true;sessionId='';clearTimeout(observerTimer);clearInterval(tickTimer);observer.disconnect();if(window.__webcodexBridgeDispose===retire){window.__webcodexBridgeLoaded=false;delete window.__webcodexBridgeDispose;}}
+  window.__webcodexBridgeDispose=retire;
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
+    if(retired)return;
     if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup'].includes(m.type)){reply({ok:false});return;}
     if(m.type==='studio.arm'){
       const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
       if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
+      hadConversation=!!s.latestModel&&!!s.latestUser;emptyObservations=0;
       sessionId=m.sessionId;conversationKey=s.conversationKey;turnless=!!m.turnless;turnlessRecovery=turnless&&!!m.recover;awaitingResponse=false;generationSeen=false;generationCounter=0;allowedFollowupId='';baselineModelText=s.latestModel?.text||'';observedUserText=s.latestUser?.text||'';observedResultId='';observedContext=JSON.stringify([observedResultId,observedUserText]);recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;newChatRequestInFlight=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
     }
     if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
@@ -77,4 +96,5 @@
       return true;
     }
   });
+  if(!reattaching)send('studio.hello',hello()).catch(()=>{});
 })();

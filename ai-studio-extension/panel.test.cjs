@@ -21,7 +21,7 @@ function createPanel(store = {}, options = {}) {
   const document = { activeElement: null, getElementById(id) { if (!els.has(id)) els.set(id, new Element(id)); return els.get(id); }, createElement() { return new Element(); } };
   let snapshot = { connected: false, session: { phase: 'idle', paused: false }, tools: [], agents: [], autoSettings: store.autoSettings }, failAction = false, poll, connectCount = 0;
   const messages = [];
-  const chrome = { runtime: { id: 'test', lastError: null, sendMessage(msg, cb) {
+  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.3'}), lastError: null, sendMessage(msg, cb) {
     messages.push(msg);
     if (msg.type === 'bridge.status') return cb({ ok: true, state: snapshot });
     if (msg.type === 'bridge.preferences') { store.autoSettings = msg; snapshot.autoSettings = msg; return cb({ ok: true, state: snapshot }); }
@@ -42,6 +42,16 @@ test('service JSON preference reflects state and sends both checkbox values', as
   await p.change('hide-service', false);
   await p.change('hide-service', true);
   assert.deepEqual(p.messages.filter(x => x.type === 'bridge.cleanupPreference').map(x => x.enabled), [false, true]);
+});
+
+test('shows the actual installed version and identifies an older script still running in the tab',async()=>{
+  const p=createPanel({}, {manifestVersion:'0.3.2'});
+  await p.update({connected:true,session:{phase:'waiting_model'},pageScript:{version:'0.3.1'},tools:[],agents:[]});
+  assert.match(p.get('extension-version').textContent,/0\.3\.2/);
+  assert.match(p.get('page-script').textContent,/0\.3\.1.*Перезагрузите/);
+  await p.update({connected:true,session:{phase:'waiting_model'},pageScript:{version:'0.3.2'},tools:[],agents:[]});
+  assert.match(p.get('page-script').textContent,/0\.3\.2/);
+  assert.doesNotMatch(p.get('page-script').textContent,/Перезагрузите/);
 });
 
 test('resuming clears a resolved session error from the panel', async () => {
