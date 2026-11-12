@@ -1,5 +1,7 @@
 (function (root) {
   'use strict';
+  const jsonTools=typeof module!=='undefined'&&module.exports?require('./vendor/json-tools.js'):root.HelperJSON;
+  const {createScanner,visit,SyntaxKind:K,ScanError,jsonrepair}=jsonTools;
   const dangerous = new Set(['__proto__', 'prototype', 'constructor']);
   const injected = new Set(['agent_id', 'request_key']);
   const supported = new Set(['type','properties','required','additionalProperties','items','enum','const','minimum','maximum','minLength','maxLength','minItems','maxItems','pattern','oneOf','anyOf','not','description','title','default','examples']);
@@ -82,49 +84,79 @@
     }
     return out;
   }
-  function stringEnd(text,start){let escaped=false;for(let i=start+1;i<text.length;i++){if(escaped)escaped=false;else if(text[i]==='\\')escaped=true;else if(text[i]==='"')return i+1;}return text.length;}
-  function jsonSegments(text){
-    // Consume a whole outer value before scanning again: nested data is never a call.
-    const segments=[],quoted=[];
-    for(let i=0;i<text.length;i++){
-      if(text[i]==='"'){const end=stringEnd(text,i);quoted.push([i,end]);i=end-1;continue;}
-      if(text[i]!=='{'&&text[i]!=='[')continue;
-      const start=i,stack=[];let inside=false,escaped=false,end=text.length,error='incomplete JSON';
-      for(let j=i;j<text.length;j++){
-        const char=text[j];
-        if(inside){if(escaped)escaped=false;else if(char==='\\')escaped=true;else if(char==='"')inside=false;continue;}
-        if(char==='"'){inside=true;continue;}
-        if(char==='{'||char==='['){stack.push(char);}
-        else if(char==='}'||char===']'){
-          if(stack.pop()!==(char==='}'?'{':'[')){error='mismatched JSON brackets';end=j+1;break;}
-          if(!stack.length){end=j+1;error='';break;}
+  function stringTokens(raw){
+    const scanner=createScanner(raw),values=[];let kind;
+    while((kind=scanner.scan())!==K.EOF)if(kind===K.StringLiteral){
+      if(scanner.getTokenError()!==ScanError.None)throw Error('Damaged string escape');
+      values.push(scanner.getTokenValue());
+    }
+    return values;
+  }
+  function repairedJSON(raw){
+    const preserved=stringTokens(raw),fixed=jsonrepair(raw),after=stringTokens(fixed);
+    // Repair framing and punctuation, never silently merge or rewrite existing
+    // string values (file contents, commands, argument values and property names).
+    let next=0;for(const value of after)if(value===preserved[next])next++;
+    if(next!==preserved.length)throw Error('Repair would change string data');
+    return fixed;
+  }
+  function jsonSegments(text,repair=false){
+    const scanner=createScanner(text),segments=[],quoted=[],stack=[];
+    let kind,start=0;
+    while((kind=scanner.scan())!==K.EOF){
+      const offset=scanner.getTokenOffset(),end=offset+scanner.getTokenLength();
+      // Outside an envelope, a URL's // is prose rather than a JSON comment.
+      if(!stack.length&&(kind===K.LineCommentTrivia||kind===K.BlockCommentTrivia)){scanner.setPosition(offset+2);continue;}
+      if(kind===K.StringLiteral&&!stack.length)quoted.push([offset,end]);
+      if(kind===K.OpenBraceToken||kind===K.OpenBracketToken){if(!stack.length)start=offset;stack.push(kind);}
+      else if((kind===K.CloseBraceToken||kind===K.CloseBracketToken)&&stack.length){
+        const expected=kind===K.CloseBraceToken?K.OpenBraceToken:K.OpenBracketToken;
+        if(stack.pop()!==expected){segments.push({start,end,raw:jsonWhitespace(text.slice(start,end)),error:'mismatched JSON brackets'});stack.length=0;continue;}
+        if(!stack.length){
+          let raw=jsonWhitespace(text.slice(start,end)),value,error='';
+          try{value=JSON.parse(raw);}catch(cause){
+            try{if(!repair||!/(?:["']v["']|\bv)\s*:/.test(raw)||!/(?:["'](?:name|arguments)["']|\b(?:name|arguments))\s*:/.test(raw))throw cause;raw=repairedJSON(raw);value=JSON.parse(raw);}catch{
+              const position=/\bposition (\d+)\b/.exec(cause.message);
+              error='invalid JSON'+(position?' at character '+(Number(position[1])+1):'');
+            }
+          }
+          segments.push({start,end,raw,value,error});
         }
       }
-      const raw=jsonWhitespace(text.slice(start,end));let value;
-      if(!error)try{value=JSON.parse(raw);}catch(cause){
-        const position=/\bposition (\d+)\b/.exec(cause.message);
-        error='invalid JSON'+(position?' at character '+(Number(position[1])+1):'');
-      }
-      segments.push({start,end,raw,value,error});i=end-1;
     }
+    if(stack.length)segments.push({start,end:text.length,raw:jsonWhitespace(text.slice(start)),error:'incomplete JSON'});
     return {segments,quoted};
   }
   function uniqueJSONKeys(raw){
-    const stack=[];
-    for(let i=0;i<raw.length;i++){
-      const char=raw[i];
-      if(char==='{'||char==='['){stack.push(char==='{'?new Set():null);continue;}
-      if(char==='}'||char===']'){stack.pop();continue;}
-      if(char!=='"')continue;
-      const end=stringEnd(raw,i);let next=end;while(/\s/.test(raw[next]||'')&&next<raw.length)next++;
-      if(raw[next]===':'){
-        const key=JSON.parse(raw.slice(i,end)),keys=stack[stack.length-1];
-        if(keys?.has(key))return false;
-        keys?.add(key);
+    const stack=[];let unique=true;
+    visit(raw,{onObjectBegin(){stack.push(new Set());},onArrayBegin(){stack.push(null);},onObjectProperty(key){const keys=stack[stack.length-1];if(keys?.has(key))unique=false;keys?.add(key);},onObjectEnd(){stack.pop();},onArrayEnd(){stack.pop();}});
+    return unique;
+  }
+  function windowsPathNotation(text){
+    // JSON repair libraries remove unknown escapes such as \\a. Preserve a
+    // visibly absolute Windows path BEFORE repair, only in path argument fields.
+    const fields=new Set(['path','cwd','root','source','destination','source_path','destination_path','old_path','new_path','working_directory']);
+    const scanner=createScanner(text),changes=[];let kind,previous='',field='';
+    const absolute=value=>/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(value)&&!/[\x00-\x1f"]/.test(value);
+    while((kind=scanner.scan())!==K.EOF){
+      if(kind===K.Trivia||kind===K.LineBreakTrivia||kind===K.LineCommentTrivia||kind===K.BlockCommentTrivia)continue;
+      if(kind===K.ColonToken){field=previous;previous='';continue;}
+      if(kind===K.StringLiteral&&fields.has(field)){
+        const start=scanner.getTokenOffset(),end=text.indexOf('"',start+1);
+        if(end>start&&/^[\s,}\]]*$/.test(text.slice(end+1,scanner.getPosition()))){
+          const raw=text.slice(start,end+1),literal=raw.slice(1,-1);let decoded;
+          try{decoded=JSON.parse(raw);}catch{}
+          const drive=/^[A-Za-z]:\\/.test(literal),unc=/^\\\\[^\\]+\\[^\\]/.test(literal);
+          const consistent=drive?!literal.includes('\\\\'):unc&&!literal.slice(2).includes('\\\\');
+          if((drive||unc)&&consistent&&absolute(literal)&&!(typeof decoded==='string'&&absolute(decoded))){
+            changes.push([start,end+1,JSON.stringify(literal)]);scanner.setPosition(end+1);
+          }
+        }
       }
-      i=end-1;
+      previous=kind===K.StringLiteral?scanner.getTokenValue():'';field='';
     }
-    return true;
+    for(let i=changes.length-1;i>=0;i--){const [start,end,value]=changes[i];text=text.slice(0,start)+value+text.slice(end);}
+    return text;
   }
   function findJSONValues(text){
     const {segments}=jsonSegments(String(text));
@@ -161,8 +193,8 @@
     }
     const outsideFiles=outsideRanges(text,files.map(file=>[file.start,file.end]));
     if(files.length>1||/^<<<HELPER_FILE_(?:BEGIN|END):/m.test(outsideFiles))return{kind:'error',error:'Ambiguous or damaged Helper file delimiters'};
-    text=outsideFiles;
-    const {segments,quoted}=jsonSegments(text);
+    text=windowsPathNotation(outsideFiles);
+    const {segments,quoted}=jsonSegments(text,true);
     const callLike=part=>part.error
       ? /"v"\s*:/.test(part.raw)&&/"(?:name|arguments)"\s*:/.test(part.raw)
       : part.value&&typeof part.value==='object'&&!Array.isArray(part.value)&&Object.hasOwn(part.value,'v')&&(Object.hasOwn(part.value,'name')||Object.hasOwn(part.value,'arguments'));
@@ -226,6 +258,7 @@
     };
     const available = tools.map(({name,description,inputSchema}) => ({name,description:helperName(description),inputSchema:helperSchema(inputSchema)}));
     instructions=helperName(instructions);
+    instructions=[instructions,'In tool arguments, write Windows paths using forward slashes, for example W:/algo or C:/Users/name/file.txt. These are Windows paths, not Linux paths. This avoids JSON and Markdown backslash escaping. If a tool result returns Windows backslashes, change only those path separators to forward slashes in the next call. Never modify backslashes inside file contents or command strings.'].filter(Boolean).join('\n\n');
     if(turnless&&available.some(tool=>tool.name==='write_file'))instructions=[instructions,
       'For write_file, send file content as raw text in a separate helper-file block, not as a large JSON string. In the single helper-call JSON, omit arguments.content and add top-level "content_source":"file_1". Keep the other arguments required by its schema. Then emit a helper-file code fence containing an opening line <<<HELPER_FILE_BEGIN:file_1>>>, the exact raw file text, and a closing line <<<HELPER_FILE_END:file_1>>>. Choose an ID using letters, digits, underscore or hyphen that does not occur in delimiter lines in the file; use that same ID in all three places. Do not JSON-escape the raw text or indent/change it. The newline after BEGIN and one newline immediately before END are separators, not file content; add a blank line before END if the file must end with a newline. Include exactly one file block and one call. The extension adds arguments.content and validates the complete tool schema before execution.'
     ].filter(Boolean).join('\n\n');

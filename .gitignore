@@ -13,6 +13,7 @@ third_party/codex/**/node_modules/
 data/
 dev-data/
 /tmp/
+/ai-studio-extension/node_modules/
 /.kilo/
 *.db
 *.sqlite

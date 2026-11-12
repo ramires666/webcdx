@@ -21,7 +21,7 @@ function createPanel(store = {}, options = {}) {
   const document = { activeElement: null, getElementById(id) { if (!els.has(id)) els.set(id, new Element(id)); return els.get(id); }, createElement() { return new Element(); } };
   let snapshot = { connected: false, session: { phase: 'idle', paused: false }, tools: [], agents: [], autoSettings: store.autoSettings }, failAction = false, poll, connectCount = 0;
   const messages = [];
-  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.11'}), lastError: null, sendMessage(msg, cb) {
+  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.12'}), lastError: null, sendMessage(msg, cb) {
     messages.push(msg);
     if (msg.type === 'bridge.status') return cb({ ok: true, state: snapshot });
     if (msg.type === 'bridge.preferences') { store.autoSettings = msg; snapshot.autoSettings = msg; return cb({ ok: true, state: snapshot }); }
@@ -106,6 +106,15 @@ test('paused or failed sessions never also claim readiness',async()=>{
     await p.update({connected:true,autoStatus:'Готово',session,tools:[],agents:[]});
     assert.doesNotMatch(p.get('state').textContent,/Готово/);
   }
+});
+
+test('the panel exposes observer failures and correction progress instead of readiness',async()=>{
+  const p=createPanel();
+  await p.update({connected:true,autoStatus:'Готово',session:{phase:'waiting_model'},pageScript:{observerStatus:'error',observerError:'DOM failure'}});
+  assert.equal(p.get('error').textContent,'DOM failure');assert.doesNotMatch(p.get('status').textContent,/Готово/);
+  await p.update({connected:true,autoStatus:'Готово',session:{phase:'waiting_model',notice:'Ожидается исправление'},pageScript:{observerStatus:'waiting_model'}});
+  assert.equal(p.get('error').hidden,true);assert.equal(p.get('observer-status').textContent,'Ожидается исправление');
+  assert.doesNotMatch(p.get('status').textContent,/Готово/);
 });
 
 test('connection inputs persist across panel reopen and a failed connection', async () => {

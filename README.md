@@ -10,7 +10,28 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.3.11)
+## AI Studio Bridge (alpha 0.3.12)
+
+Version `0.3.12` replaces the handwritten JSON token scanner and duplicate-key
+reader with Microsoft's [jsonc-parser](https://github.com/microsoft/node-jsonc-parser)
+`3.3.1`, and uses [jsonrepair](https://github.com/josdejong/jsonrepair) `3.15.0`
+for recoverable punctuation errors. The libraries ship locally inside the extension;
+installation requires no npm, CDN, API key or additional permissions. Explicit
+Windows path notation such as `W:\algo`, drive roots and UNC paths preserves its
+backslashes before recovery. Prompts now request `W:/algo` notation to avoid
+Markdown/JSON escaping. Complete framing, unchanged existing string values,
+unique keys and the selected tool schema are still required before execution.
+
+In automatic mode with consent, a call rejected before execution sends a validation
+result back to the model so it can correct the call. Repeating the same rejected
+call is detected as a loop. Uncertain operations and delivery are never resent.
+Keyboard submission, rendered result headers and observer diagnostics are covered.
+Update only the extension, reload a saved AI Studio tab and use **Execute last
+call** in the extension panel for an already completed paused call. Agent and Gate
+require no replacement or restart for this change; the alpha.5 agent is already
+compiled at `bin/ai-studio-bridge/webcodex-agent.exe`, with no local build required.
+Live-account operation remains unverified; automated checks include installed
+Chrome and actual local/Gate EXEs with temporary data.
 
 Version `0.3.11` preserves rendered code-block boundaries when reading raw files.
 AI Studio's DOM can concatenate a language header with the opening file delimiter
@@ -72,7 +93,7 @@ An uncertain command is not automatically replayed. The live AI Studio page has
 not been verified; its DOM selectors remain alpha.
 
 The ready-to-use kit is in
-[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.11`
+[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.12`
 and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.5`. No local
 build is required. Direct local mode does not need Gate. Replace the agent and extension, reload it in
 `chrome://extensions`, and reload an already saved AI Studio tab. Do not reload

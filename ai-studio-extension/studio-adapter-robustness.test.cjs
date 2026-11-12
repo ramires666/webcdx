@@ -6,6 +6,14 @@ const {parseCall,analyzeReply}=require('./protocol.js');
 const tools=[{name:'read_file',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}];
 const args={path:'W:\\projects\\Игра { [test] }\\"quoted"\\file 😀.txt'};
 const raw=JSON.stringify({v:1,name:'read_file',arguments:args});
+
+test('a rendered Helper-result header preserves the operation id that arms an automatic followup',()=>{
+  const state=setup();state.user.children=[];state.user._text='';state.user.attrs['data-turn-role']='User';
+  const widget=state.user.add(new Node('ms-code-block'));
+  widget.add(new Node('header',{},'Helper-result'));
+  widget.add(new Node('pre',{},JSON.stringify({type:'helper-result',operation_id:'op-rendered',result:{ok:true}})));
+  assert.equal(state.adapter.inspect().latestUser.operationId,'op-rendered');
+});
 function body(state){state.chunk.remove();return state.model.children[0];}
 function fragmented(parent,value,width){for(let i=0;i<value.length;i+=width)parent.add(new Node('span',{'class':'syntax-'+i},value.slice(i,i+width)));}
 

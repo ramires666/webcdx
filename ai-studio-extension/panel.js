@@ -47,10 +47,10 @@
   }
   function render(next) {
     if (!next) return;
-    const previousError = state?.session?.error;
+    const previousError = state?.session?.error||state?.pageScript?.observerError;
     state = next;
     const session = next.session || {};
-    const phaseNames = { idle: 'ожидает запуска', ready: 'готов', active: 'выполняется', running: 'выполняется', waiting_approval: 'ожидает подтверждения', paused: 'на паузе', stopped: 'остановлен', delivery_uncertain: 'передача результата не подтверждена', error: 'ошибка' };
+    const phaseNames = { idle: 'ожидает запуска', ready: 'готов', arming: 'подготовка', waiting_model: 'ожидается ответ модели', recovering: 'проверяется результат операции', result_ready: 'результат готов к передаче', active: 'выполняется', running: 'выполняется', waiting_approval: 'ожидает подтверждения', paused: 'на паузе', stopped: 'остановлен', delivery_uncertain: 'передача результата не подтверждена', error: 'ошибка' };
     const connectionName = next.transport === 'gate' ? 'Gate' : 'Локальный агент';
     stateEl.textContent = `${session.demo || next.demoMode ? 'Демо режим · ' : ''}${connectionName} ${next.connected ? 'подключён' : 'не подключён'}${session.phase ? ` · сеанс: ${phaseNames[session.phase] || session.phase}` : ''}`;
     $('transport-info').textContent = next.transport === 'local'
@@ -80,12 +80,15 @@
     if (next.clientId && !$('client-id').value) $('client-id').value = next.clientId;
     $('pending').textContent = session.pendingCall ? JSON.stringify(session.pendingCall, null, 2) : 'Нет ожидающего вызова';
     if (session.instructions !== undefined && document.activeElement !== $('instructions')) $('instructions').value = session.instructions;
-    if (session.error || previousError) showError(session.error);
+    if (session.error || page?.observerError || previousError) showError(session.error||page?.observerError);
     $('result').value = session.resultText || '';
     $('hide-service').checked = !!next.hideServiceMessages;
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;
     const autoStatus=typeof next.autoStatus==='string'?next.autoStatus:next.autoStatus?.message||'';
-    if(autoStatus&&(autoStatus!=='Готово'||!session.paused&&!session.error))stateEl.textContent+=' · '+autoStatus;
+    if(autoStatus&&(autoStatus!=='Готово'||!session.paused&&!session.error&&!session.notice&&!page?.observerError))stateEl.textContent+=' · '+autoStatus;
+    const observerLabels={unsupported:'Не удалось прочитать страницу',checking:'Проверяются инструкции чата',generating:'Модель формирует ответ',waiting_model:'Ожидается ответ модели',waiting_request:'Ожидается новый запрос; готовый вызов можно запустить кнопкой «Выполнить последний вызов»',settling:'Проверяется завершённость ответа',observing:'Проверяется готовый ответ',error:'Ошибка чтения ответа'};
+    $('observer-status').textContent=session.notice||observerLabels[page?.observerStatus]||'';
+    $('observer-status').hidden=!$('observer-status').textContent;
     const busy = connecting || next.connecting;
     $('connect').disabled = busy || (!!next.connected && next.transport !== 'local');
     $('connect').textContent = busy ? 'Ожидается вход…' : next.transport === 'local' ? 'Настроить резерв Gate' : 'Подключить';

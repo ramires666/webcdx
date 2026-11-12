@@ -69,6 +69,29 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
 }
 function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
 
+test('uncertain validation feedback is checked without a resend or any agent operation',async()=>{
+  const initial=saved();Object.assign(initial.session,{turnless:true,automatic:true});
+  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.deliver'?{ok:true,attempted:true,confirmed:false,supported:true}:msg.type==='studio.snapshot'?{supported:true,delivered:false}:{ok:true,supported:true}}, {bridgeAuto:{enabled:true,consent:true,agentId:'agent-1',toolNames:['read_file'],automatic:true}});
+  await h.status();
+  const result=await h.message({type:'studio.call',sessionId:'session-1',responseKey:'invalid-one',text:'{"v":1,"name":"read_file","arguments":',generating:false},h.page);
+  assert.equal(result.accepted,true);
+  await h.alarm();await h.alarm();
+  const state=(await h.status()).state.session;
+  assert.equal(state.phase,'delivery_uncertain');assert.match(state.operationId,/^validation-/);
+  assert.equal(h.createCount,0);assert.equal(h.pageMessages.filter(message=>message.type==='studio.deliver').length,1);
+});
+
+test('validation feedback cannot bypass automatic mode or revoked consent',async()=>{
+  for(const [automatic,consent]of [[false,true],[true,false]]){
+    const initial=saved();Object.assign(initial.session,{turnless:true,automatic});
+    const h=harness(initial,{}, {bridgeAuto:{enabled:true,consent,agentId:'agent-1',toolNames:['read_file'],automatic}});
+    await h.status();
+    const result=await h.message({type:'studio.call',sessionId:'session-1',responseKey:'invalid-one',text:'{"v":1,"name":"read_file","arguments":',generating:false},h.page);
+    assert.equal(result.accepted,false);assert.equal(h.createCount,0);
+    assert.equal(h.pageMessages.some(message=>message.type==='studio.deliver'),false);
+  }
+});
+
 test('sessions continue beyond ten operations and five minutes', async () => {
   const h = harness(); await h.status(); h.advanceTime(6 * 60 * 1000);
   let turn = 'turn-1';
@@ -315,7 +338,7 @@ test('arming injects a missing content receiver only into a verified AI Studio t
   assert.equal(response.state.session.phase, 'waiting_model');
   assert.equal(injections.length, 2);
   assert.equal(injections[1].target.tabId, 7);
-  assert.deepEqual(Array.from(injections[1].files), ['protocol.js', 'studio-adapter.js', 'content.js']);
+  assert.deepEqual(Array.from(injections[1].files), ['vendor/json-tools.js', 'protocol.js', 'studio-adapter.js', 'content.js']);
 });
 
 test('expired authorization pauses a pending operation without retrying or losing its key', async () => {

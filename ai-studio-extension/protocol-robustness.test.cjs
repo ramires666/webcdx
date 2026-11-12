@@ -33,7 +33,7 @@ test('ambiguity, duplicate decoded keys and broken call JSON fail without guessi
     assert.notEqual(analyzeReply(value).kind,'call','a malformed outer container must not expose a nested command');
   }
   assert.equal(analyzeReply(valid+'}').kind,'error');
-  for(const raw of [valid+'\n'+valid,'{"v":1,"name":"exec_command","name":"exec_command","arguments":{"cwd":"x","argv":["echo"]}}','{"v":1,"na\\u006de":"exec_command","name":"exec_command","arguments":{}}','{"v":1,"name":"exec_command","arguments":{"cwd":"x","argv":["echo"],"config":{"x":1,"x":2}}}',valid.slice(0,-1),valid.replace('"name":','"name" '),'"v":1,"name":"exec_command","arguments":{}',valid+'\n{"other":"JSON"}']){
+  for(const raw of [valid+'\n'+valid,'{"v":1,"name":"exec_command","name":"exec_command","arguments":{"cwd":"x","argv":["echo"]}}','{"v":1,"na\\u006de":"exec_command","name":"exec_command","arguments":{}}','{"v":1,"name":"exec_command","arguments":{"cwd":"x","argv":["echo"],"config":{"x":1,"x":2}}}',valid.slice(0,-1),'"v":1,"name":"exec_command","arguments":{}',valid+'\n{"other":"JSON"}']){
     assert.equal(analyzeReply(raw).kind,'error',raw);assert.throws(()=>parseCall(raw,null,tools));
   }
 });

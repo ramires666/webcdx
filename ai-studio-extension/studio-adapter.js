@@ -110,7 +110,7 @@
     return bodies.length===1?bodies[0]:el;
   };
   const parseResultOperationId = (raw) => {
-    const candidate=stripUserHeader(raw);
+    const candidate=stripUserHeader(raw).replace(/^(?:helper-result|webcodex-result|json|code)\s*(?=\{)/i,'');
     try{JSON.parse(candidate);}catch{return '';}
     const roots=protocol.findJSONValues(candidate);
     if(roots.length!==1)return '';

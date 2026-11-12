@@ -129,14 +129,40 @@ test('a new chat runs repeated calls without inserting an ID or replaying an old
   }
 });
 
-test('a damaged tool envelope shows an error instead of silently becoming a completed prose answer',async()=>{
+test('a damaged tool envelope asks the model to correct the unsent call instead of stalling',async()=>{
   const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
   h.userMessage('Read a file');h.modelMessage('Проверю файл.\n{"v":1,"name":"read_file","arguments":{"path":"safe.txt"}');
   await h.tick();
-  assert.equal(h.state.phase,'paused');
-  assert.match(h.state.error,/JSON/);
+  assert.equal(h.state.phase,'waiting_model');
+  const feedback=h.messages.find(message=>message.type==='studio.deliver');
+  assert.match(JSON.parse(feedback.text).transport_error,/BEFORE execution/);
   assert.equal(h.operations.length,0);
+});
+
+test('invalid call feedback accepts an immediate corrected Windows-path followup exactly once',async()=>{
+  const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  const stages=h.staged.length;
+  h.replyImmediatelyAfterDelivery(String.raw`Просмотрим папку. `+'```helper-call\n'+String.raw`{"v":1,"name":"read_file","arguments":{"path":"W:\algo\agents.py"}}`);
+  h.userMessage('Read rules');h.modelMessage('{"v":1,"name":"read_file","arguments":{"path":');
+  await h.tick();await h.tick();await h.tick();
+  assert.equal(h.operations.length,1);assert.equal(h.operations[0].arguments.path,'W:\\algo\\agents.py');
+  assert.equal(h.state.phase,'waiting_model');assert.equal(h.state.error,'');
+  assert.equal(h.staged.length,stages,'correction never reinitializes the chat');
+  const deliveries=h.messages.filter(message=>message.type==='studio.deliver');
+  assert.equal(deliveries.length,2);assert.equal(JSON.parse(deliveries[0].text).name,'call_validation');
+  assert.equal(JSON.parse(deliveries[1].text).name,'read_file');
+});
+
+test('an identical invalid correction is detected as a loop without running or resending anything',async()=>{
+  const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  const broken='{"v":1,"name":"read_file","arguments":{"path":';
+  h.replyImmediatelyAfterDelivery(broken);h.userMessage('Read');h.modelMessage(broken);
+  await h.tick();await h.tick();await h.tick();
+  assert.equal(h.operations.length,0);assert.equal(h.messages.filter(message=>message.type==='studio.deliver').length,1);
+  assert.equal(h.state.phase,'paused');assert.match(h.state.error,/повторила/);
 });
 
 test('an automatic followup waits for a fully rendered path even if generation controls report idle',async()=>{
@@ -184,7 +210,8 @@ test('malformed, duplicated and injected calls extracted from generic DOM never 
     await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
     const state=setup();state.chunk.remove();state.model.children[0].add(new Node('future-renderer',{},raw));
     h.userMessage('Read file');h.modelMessage(state.adapter.inspect().latestModel.text);await h.tick();await h.tick();
-    assert.equal(h.operations.length,0);assert.equal(h.state.phase,'paused');assert.ok(h.state.error);
+    assert.equal(h.operations.length,0);assert.equal(h.state.phase,'waiting_model');
+    assert.ok(h.messages.some(message=>message.type==='studio.deliver'&&JSON.parse(message.text).name==='call_validation'));
   }
 });
 

@@ -1,4 +1,4 @@
-importScripts('protocol.js', 'mcp-client.js', 'local-client.js');
+importScripts('vendor/json-tools.js', 'protocol.js', 'mcp-client.js', 'local-client.js');
 const KEY = 'webcodexState', LARGE_KEY='webcodexLargeSessionState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
 let state = {connected:false,transport:'',localError:'',gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',transport:'',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
 let token = '', client = null, localClient = null, gateClient = null, serial = Promise.resolve(), demo = false, connecting = false, lastAutoRefresh = 0, lastAutoRefreshOK = false, autoToolsAvailable = true;
@@ -108,7 +108,7 @@ chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
       let result;
       if(msg.type==='studio.hello')result=await autoStart(sender,msg);
       else {if(sender.tab.id!==state.session.tabId)throw Error('Untrusted Studio sender');result=await studioMessage(msg,sender);}
-      if(state.session.tabId===sender.tab.id||state.session.tabId===null)state.pageScript={version:typeof msg.contentVersion==='string'?msg.contentVersion:'',tabId:sender.tab.id,lastSeen:Date.now()};
+      if(state.session.tabId===sender.tab.id||state.session.tabId===null)state.pageScript={version:typeof msg.contentVersion==='string'?msg.contentVersion:'',tabId:sender.tab.id,lastSeen:Date.now(),observerStatus:msg.observerStatus||state.pageScript?.observerStatus||'',observerError:msg.observerStatus?msg.observerError||'':state.pageScript?.observerError||''};
       return result;
     }).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted,...(value?.conversationKey?{conversationKey:value.conversationKey}:{})})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)}));
     return true;
@@ -314,7 +314,7 @@ async function armPage(tabId,message){
     const tab=await chrome.tabs.get(tabId);
     if(!tab.url?.startsWith('https://aistudio.google.com/'))throw Error('Active tab must be AI Studio');
     await chrome.scripting.executeScript({target:{tabId},func:()=>{window.__webcodexBridgeReattach=true;}});
-    await chrome.scripting.executeScript({target:{tabId},files:['protocol.js','studio-adapter.js','content.js']});
+    await chrome.scripting.executeScript({target:{tabId},files:['vendor/json-tools.js','protocol.js','studio-adapter.js','content.js']});
     return chrome.tabs.sendMessage(tabId,message);
   }
 }
@@ -338,6 +338,7 @@ async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)awa
 async function stageInstructions({ensureOnly=false}={}){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=ensureOnly||s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text,...(ensureOnly?{ensureOnly:true}:{})});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
+  if(m.type==='studio.observerError')return {accepted:true};
   if(m.type==='studio.ensureInstructions'){
     const {bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');
     if(!settings.enabled||!settings.consent||s.userPaused||!state.connected||demo)return {accepted:false};
@@ -364,8 +365,13 @@ async function studioMessage(m,sender) {
     if(!['waiting_model','ready'].includes(s.phase))return {accepted:false};
     if(m.generating){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='Generation still active';}
     else if(s.phase==='waiting_model'||s.phase==='ready'){
-      try {const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const call=WebCodexProtocol.parseCall(m.text,s.turnless?null:s.turn,tools);
+      let call;
+      try{const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);call=WebCodexProtocol.parseCall(m.text,s.turnless?null:s.turn,tools);}
+      catch(e){await rejectUnsentCall(m,e);await save();return {accepted:!s.paused};}
+      try {
         if(s.turnless)s.lastResponseKey=m.responseKey;
+        delete s.rejectedCallFingerprint;
+        s.notice='';
         if(!call){s.resultText='';s.finalText=m.text;s.phase='ready';await chrome.tabs.sendMessage(s.tabId,{type:'studio.cleanup',sessionId:s.sessionId,enabled:!!state.hideServiceMessages,final:true,operationIds:s.completedOperationIds||[]}).catch(()=>{});}
         else {s.pendingCall={...call,turn:s.turn};s.phase=SAFE.has(call.name)?'ready':s.autoApprove?'ready':'waiting_approval';s.error='';if(s.phase==='ready'){await save();await dispatch();}}
       } catch(e){s.paused=true;s.phase='paused';s.error=String(e.message||e);}
@@ -374,6 +380,18 @@ async function studioMessage(m,sender) {
   }
   if(m.type==='studio.tick'){await recover();return {accepted:true,conversationKey:s.conversationKey};}
   throw Error('Unknown Studio message');
+}
+async function rejectUnsentCall(m,error){
+  const s=state.session,message=String(error.message||error);
+  const canCorrect=s.turnless&&s.automatic&&state.autoSettings?.consent===true&&state.connected&&!s.pendingCall&&!s.operationKey&&!s.operationId&&!s.resultText&&!s.resumeBlocked;
+  if(!canCorrect){s.paused=true;s.phase='paused';s.error=message;return;}
+  const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(m.text));
+  const fingerprint=Array.from(new Uint8Array(hash),byte=>byte.toString(16).padStart(2,'0')).join('');
+  if(s.rejectedCallFingerprint===fingerprint){s.paused=true;s.phase='paused';s.error='Модель повторила тот же повреждённый вызов после сообщения об ошибке. Ничего не выполнено: '+message;return;}
+  s.rejectedCallFingerprint=fingerprint;s.lastResponseKey=m.responseKey;s.nextTurn=uuid();s.operationId='validation-'+uuid();
+  s.resultText=WebCodexProtocol.buildResult({turnless:true,operationId:s.operationId,name:'call_validation',error:'The call was rejected BEFORE execution. No operation was sent to the agent. '+message+'. Resend exactly one complete corrected call using the selected tool schema. Use forward slashes in Windows paths, for example W:/algo. Use a raw helper-file block for file contents. Do not repeat any previous successful operation.'});
+  s.phase='result_ready';s.error='';s.notice='Вызов не выполнен; модели отправлен запрос исправления.';await save();
+  try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}
 }
 async function approve(){const s=state.session;if(s.phase!=='waiting_approval'||!s.pendingCall||s.paused)throw Error('No pending approval');await dispatch();}
 async function expireAuth(e){if(e?.status!==401) return false;await chrome.storage.local.remove('bridgeAuth');state.connected=false;client=null;token='';state.accessToken='';state.session.pausedPhase=state.session.phase;state.session.phase='paused';state.session.paused=true;state.session.resumeBlocked=true;state.session.error='Gate authorization expired; stop this session, reconnect, then re-arm this chat';await save();return true;}

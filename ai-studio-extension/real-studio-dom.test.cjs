@@ -13,7 +13,7 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   const executable=process.env.WEBCODEX_TEST_CHROME_PATH||'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   assert.ok(fs.existsSync(executable),'installed Chrome is required for this explicit browser test');
   const fixture=path.join(temp,'fixture.html');
-  const scripts=['protocol.js','studio-adapter.js'].map(name=>'<script src="'+pathToFileURL(path.join(__dirname,name)).href+'"></script>').join('');
+  const scripts=['vendor/json-tools.js','protocol.js','studio-adapter.js'].map(name=>'<script src="'+pathToFileURL(path.join(__dirname,name)).href+'"></script>').join('');
   fs.writeFileSync(fixture,`<!doctype html><meta charset="utf-8"><title>Helper DOM regression</title>
 <style>.widget {display:grid} .language {display:block} pre {white-space:pre-wrap}</style>
 <ms-prompt-input-wrapper><textarea></textarea></ms-prompt-input-wrapper>
@@ -49,6 +49,16 @@ try {
     if(call?.arguments.content!==content||answer.innerHTML!==before)throw Error('source mismatch '+JSON.stringify({widgetTag,headerTag,codeTag,br}));
     cases++;
   }
+  const user=document.querySelector('ms-chat-turn[data-turn-role="User"]');user.replaceChildren();
+  const resultWidget=document.createElement('ms-code-block'),resultHeader=document.createElement('header'),resultBody=document.createElement('pre');
+  resultHeader.textContent='Helper-result';resultBody.textContent=JSON.stringify({type:'helper-result',operation_id:'op-visible',result:{ok:true}});
+  resultWidget.append(resultHeader,resultBody);user.append(resultWidget);
+  if(adapter.inspect().latestUser.operationId!=='op-visible')throw Error('result header hid the operation id');cases++;
+  answer.replaceChildren();const prose=document.createElement('p');
+  prose.textContent='Просмотрим папки. '+String.fromCharCode(96).repeat(3)+'helper-call\\n'+ '{"v":1,"name":"list_directory","arguments":{"path":"W:'+String.fromCharCode(92)+'algo"}}';
+  answer.append(prose);const emptyWidget=document.createElement('ms-code-block');emptyWidget.textContent='Code';answer.append(emptyWidget);
+  const recovered=WebCodexProtocol.parseCall(adapter.inspect().latestModel.text,null,[{name:'list_directory',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}]);
+  if(recovered?.arguments.path!=='W:'+String.fromCharCode(92)+'algo')throw Error('inline Markdown Windows path changed');cases++;
   document.getElementById('check').textContent='PASS:'+cases;
 } catch(error) {document.getElementById('check').textContent='FAIL:'+error.message;}
 </script>`,'utf8');
@@ -62,5 +72,5 @@ try {
   const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});
   assert.equal(code,0);
   const result=/<output id="check">([^<]*)<\/output>/.exec(output)?.[1];
-  assert.equal(result,'PASS:54');t.diagnostic('54 combinations passed in installed Chrome with an isolated temporary profile');
+  assert.equal(result,'PASS:56');t.diagnostic('56 scenarios passed in installed Chrome with an isolated temporary profile');
 });

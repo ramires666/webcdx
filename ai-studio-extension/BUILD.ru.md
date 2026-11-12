@@ -46,8 +46,9 @@ Remove-Item Env:WEBCODEX_BROWSER_REAL_TEST
 `C:\Program Files\Google\Chrome\Application\chrome.exe`. Если он установлен иначе,
 перед тестом задайте переменную `WEBCODEX_TEST_CHROME_PATH` с полным путём к своему
 `chrome.exe`. Тест создаёт отдельный временный профиль внутри `tmp`, проверяет
-54 сочетания элементов DOM без искусственных текстовых переносов между блоками
-и удаляет временные файлы. Параметры `--headless` и `--disable-gpu` запускают браузер
+56 сценариев: сочетания элементов DOM без искусственных текстовых переносов между блоками,
+разбор Windows-пути и чтение идентификатора отрисованного результата. После проверки
+он удаляет временные файлы. Параметры `--headless` и `--disable-gpu` запускают браузер
 без интерфейса и GPU; `--no-first-run` и `--no-default-browser-check` выключают
 первый запуск и проверку браузера по умолчанию; `--disable-background-networking`
 отключает фоновую сетевую активность. `--user-data-dir` указывает на временный профиль,
@@ -149,6 +150,28 @@ go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.
 
 ## Архив Chrome-расширения
 
+Готовый комплект уже содержит локальные JavaScript-библиотеки `jsonc-parser 3.3.1`
+и `jsonrepair 3.15.0` в `vendor/json-tools.js`. Для установки готового ZIP npm
+не нужен. Следующие команды нужны только разработчику для воспроизводимого
+обновления этого файла из зависимостей с зафиксированными версиями:
+
+```powershell
+npm.cmd --prefix ai-studio-extension ci --ignore-scripts --no-audit --no-fund
+npm.cmd --prefix ai-studio-extension run build:vendor
+```
+
+`npm.cmd` запускает установленный npm без PowerShell-обёртки. `--prefix` выбирает
+папку проекта `ai-studio-extension` относительно корня репозитория. `ci` ставит
+точные зависимости из `package-lock.json`; `--ignore-scripts` отключает lifecycle
+скрипты пакетов, `--no-audit` отключает сетевую проверку аудита, `--no-fund` скрывает
+сообщения о финансировании. `run build:vendor` запускает задачу из `package.json`:
+esbuild версии `0.28.2` объединяет библиотеки в локальный модуль без `eval` и копирует
+лицензии в `vendor/LICENSES.txt`. Папка `node_modules` не добавляется в Git или ZIP.
+Эти команды не обновляют и не перезапускают рабочие агент, Gate или расширение.
+Агент alpha.5 уже скомпилирован в `bin/ai-studio-bridge/webcodex-agent.exe`; для
+изменений JavaScript-библиотек его пересобирать не нужно. После изменения исходников
+расширения упакуйте ZIP следующей командой; установка готового ZIP описана в README.
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File ./ai-studio-extension/package.ps1
 ```
@@ -158,5 +181,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./ai-studio-extension/packag
 только в этом процессе, не меняя системную политику. `-File` задаёт путь скрипта
 относительно корня проекта. Упаковщик без дополнительных аргументов создаёт
 `bin/ai-studio-bridge/webcodex-ai-studio-bridge.zip` только с файлами расширения;
-Go-бинарники, тесты и секреты в ZIP не добавляются. Само расширение не требует
+Go-бинарники, тесты и секреты в ZIP не добавляются. Локальный модуль библиотек
+и их лицензии включаются в ZIP с сохранением папки `vendor`. Само расширение не требует
 компиляции. Перед установкой распакуйте архив в постоянную папку.

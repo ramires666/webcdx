@@ -43,7 +43,7 @@ function harness({manualClock=false}={}) {
     }
     throw Error('timers did not settle');
   };
-  return { state, sent, staged, submitted, send, flush, advance:ms=>{now+=ms;}, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), run: () => { const button={getAttribute:name=>name==='aria-label'?null:'',innerText:'Run\nkeyboard_return',textContent:''};documentListeners.click({target:{closest:()=>button}}); }, setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
+  return { state, sent, staged, submitted, send, flush, advance:ms=>{now+=ms;}, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), key: event => documentListeners.keydown(event), run: () => { const button={getAttribute:name=>name==='aria-label'?null:'',innerText:'Run\nkeyboard_return',textContent:''};documentListeners.click({target:{closest:()=>button}}); }, setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
 }
 
 test('delivery waits for async Run readiness and aborts after disarm', async () => {
@@ -223,7 +223,7 @@ test('explicit capture accepts only the latest selected call and consumes its au
 
 test('ignores history and sends one completed new reply as a call', async () => {
   const h = harness();
-  assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: undefined });
+  assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: undefined });
   h.state.latestModel = { text: 'new answer' }; h.state.generating = true; h.mutate(); await h.flush();
   assert.equal(h.sent.some(m => m.type === 'studio.call'), false);
   h.state.generating = false; h.mutate(); await h.flush();
@@ -304,7 +304,7 @@ test('safe draft, submitted result, delivery confirmation and disarm', async () 
   const duplicate = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true });
   assert.equal(duplicate.attempted, true); assert.equal(h.submitted.length, 1);
   assert.equal(h.submitted[0], `\`\`\`helper-result\n${text}\n\`\`\``);
-  assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: true });
+  assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: true });
   assert.deepEqual(await h.send({ type: 'studio.disarm', sessionId: 's1' }), { ok: true });
 });
 
@@ -524,6 +524,32 @@ test('turnless history rerenders do not dispatch without a new Run', async () =>
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
   h.state.latestUser={text:'scrolled history'};h.state.latestModel={text:'```helper-call\n'+JSON.stringify({v:1,name:'tool',arguments:{}})+'\n```',element:{}};h.state.modelAfterUser=true;h.mutate();await h.flush();
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+});
+
+test('keyboard submit observes a fresh reply even when no spinner or Run click is captured',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  const editor={getAttribute:()=>'',closest:()=>null};
+  h.key({key:'Enter',ctrlKey:true,target:{closest:()=>editor}});
+  h.state.latestUser={text:'Read the folder'};h.state.modelAfterUser=true;
+  h.state.latestModel={text:'{"v":1,"name":"list_allowed_roots","arguments":{}}'};
+  h.mutate();await h.flush();h.mutate();await h.flush();
+  assert.equal(h.sent.filter(message=>message.type==='studio.call').length,1);
+});
+
+test('an observer exception becomes a reported error rather than silent waiting',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  Object.defineProperty(h.state,'latestModel',{get(){throw Error('test DOM failure');}});
+  h.mutate();h.tick();await h.flush();
+  const report=h.sent.find(message=>message.type==='studio.observerError');
+  assert.equal(report.observerError,'test DOM failure');
+  assert.equal(h.sent.filter(message=>message.type==='studio.call').length,0);
+});
+
+test('Enter inside system instructions cannot arm a historical call',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.key({key:'Enter',ctrlKey:true,target:{closest:()=>({getAttribute:()=> 'Optional tone and style instructions for the model',closest:()=>({})})}});
+  h.state.latestModel={text:'{"v":1,"name":"list_allowed_roots","arguments":{}}'};h.mutate();await h.flush();
+  assert.equal(h.sent.filter(message=>message.type==='studio.call').length,0);
 });
 
 test('turnless Run does not replay a cloned copy of the previous model', async () => {
