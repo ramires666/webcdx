@@ -6,7 +6,7 @@
   window.__webcodexBridgeDispose?.();
   window.__webcodexBridgeLoaded = true;
   const adapter=WebCodexStudio.createAdapter(document,location);
-  const contentVersion='0.3.4';
+  const contentVersion='0.3.5';
   const pageInstance=Date.now()+'-'+Math.random();
   let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, newChatPending=false, newChatRequestInFlight=false, attempted=new Set(), recoverTurn='', recoverTools=[], turnless=false, turnlessRecovery=false, observedUserText='', observedResultId='', observedContext='';
   let awaitingResponse=false, generationSeen=false, generationCounter=0, baselineModelText='';

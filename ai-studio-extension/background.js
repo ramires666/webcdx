@@ -340,7 +340,7 @@ async function studioMessage(m,sender) {
     else if(s.phase==='waiting_model'||s.phase==='ready'){
       try {const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const call=WebCodexProtocol.parseCall(m.text,s.turnless?null:s.turn,tools);
         if(s.turnless)s.lastResponseKey=m.responseKey;
-        if(!call){s.resultText='';s.finalText=m.text;s.phase='ready';await chrome.tabs.sendMessage(s.tabId,{type:'studio.cleanup',sessionId:s.sessionId,enabled:!!state.hideServiceMessages,final:true,operationIds:s.completedOperationIds||[]}).catch(()=>{});}
+        if(!call){if(/"v"\s*:\s*1\b/.test(m.text)&&/"name"\s*:/.test(m.text)&&/"arguments"\s*:/.test(m.text))throw Error('В ответе есть JSON вызова, но его блок не распознан. Вызов не отправлен агенту.');s.resultText='';s.finalText=m.text;s.phase='ready';await chrome.tabs.sendMessage(s.tabId,{type:'studio.cleanup',sessionId:s.sessionId,enabled:!!state.hideServiceMessages,final:true,operationIds:s.completedOperationIds||[]}).catch(()=>{});}
         else {s.pendingCall={...call,turn:s.turn};s.phase=SAFE.has(call.name)?'ready':s.autoApprove?'ready':'waiting_approval';s.error='';if(s.phase==='ready'){await save();await dispatch();}}
       } catch(e){s.paused=true;s.phase='paused';s.error=String(e.message||e);}
     }

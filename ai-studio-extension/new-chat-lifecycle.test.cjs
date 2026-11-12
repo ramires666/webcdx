@@ -97,6 +97,16 @@ test('a new chat runs repeated calls without inserting an ID or replaying an old
   }
 });
 
+test('an unrecognized tool envelope shows an error instead of silently becoming a completed prose answer',async()=>{
+  const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  h.userMessage('Read a file');h.modelMessage('Проверю файл.\n{"v":1,"name":"read_file","arguments":{"path":"safe.txt"}}');
+  await h.tick();
+  assert.equal(h.state.phase,'paused');
+  assert.match(h.state.error,/блок не распознан/);
+  assert.equal(h.operations.length,0);
+});
+
 test('selecting a saved chat stages only system instructions and never dispatches its historical call',async()=>{
   const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();

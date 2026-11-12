@@ -71,6 +71,18 @@
     }
     return text(el);
   };
+  const codeBlockPayload = (block) => {
+    const pre = [...block.querySelectorAll('pre')];
+    if (pre.length) return pre.length === 1 ? String(pre[0].textContent || '').trim() : '';
+    const code = [...block.querySelectorAll('code')];
+    if (code.length) return code.length === 1 ? String(code[0].textContent || '').trim() : '';
+    const body = block.cloneNode(true);
+    for (const node of body.querySelectorAll('button, [role="button"], mat-icon, svg, [aria-hidden="true"], .material-icons, .material-symbols-outlined')) node.remove();
+    const raw = String(body.textContent || '').trim(), start = raw.indexOf('{');
+    // Some renderers expose only a language label and highlighted text nodes.
+    if (start < 0 || !/^[\w.+#-]{0,64}$/.test(raw.slice(0,start).trim())) return '';
+    return raw.slice(start);
+  };
   const finalText = (el) => {
     const content = el.cloneNode ? el.cloneNode(true) : el;
     if (content !== el && content.querySelectorAll) {
@@ -78,32 +90,23 @@
       for (const junk of content.querySelectorAll('ms-thought-accordion, ms-thought-chunk, button')) junk.remove();
     }
     const chunks = content.querySelectorAll ? [...content.querySelectorAll('ms-text-chunk')] : [];
-    const scopes = chunks.length ? chunks : [content];
-    const codes = scopes.flatMap(scope => scope.querySelectorAll ? [...scope.querySelectorAll('ms-code-block')] : []);
+    const codes = content.querySelectorAll ? [...content.querySelectorAll('ms-code-block')] : [];
     if (codes.length === 1) {
-      const code = codes[0].querySelectorAll ? codes[0].querySelectorAll('pre code')[0] : null;
-      if (code) {
-        const raw = text(code);
+      const raw = codeBlockPayload(codes[0]);
+      if (raw) {
         let shape = '';
         try {
           const parsed = JSON.parse(raw);
           const keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.keys(parsed).sort().join(',') : '';
-          if (keys === 'arguments,name,v') shape = 'current';
-          else if (keys === 'arguments,name,turn,v') shape = 'legacy';
+          const envelope = parsed?.v === 1 && typeof parsed.name === 'string' && !!parsed.name && parsed.arguments && typeof parsed.arguments === 'object' && !Array.isArray(parsed.arguments);
+          if (envelope && keys === 'arguments,name,v') shape = 'current';
+          else if (envelope && keys === 'arguments,name,turn,v') shape = 'legacy';
         } catch {}
         const prose = content.cloneNode ? content.cloneNode(true) : null;
         if (prose) for (const block of prose.querySelectorAll('ms-code-block')) block.remove();
         const proseChunks = prose && chunks.length ? [...prose.querySelectorAll('ms-text-chunk')] : prose ? [prose] : [];
         const proseText = proseChunks.map(cleanContentText).filter(Boolean).join('\n');
-        const callLanguage = value => String(value || '').trim().toLowerCase() === 'webcodex-call';
-        const header = codes[0].cloneNode ? codes[0].cloneNode(true) : null;
-        if (header) for (const node of header.querySelectorAll('pre, code, button, [role="button"], mat-icon, svg, [aria-hidden="true"], .material-icons, .material-symbols-outlined')) node.remove();
-        const explicitlyMarked = callLanguage(attr(codes[0], 'data-test-language')) ||
-          callLanguage(attr(codes[0], 'data-language')) ||
-          /(?:^|\s)language-webcodex-call(?:\s|$)/i.test(attr(code, 'class') || '') ||
-          !!header && callLanguage(text(header));
-        const hasContext = !!proseText.trim() || chunks.length > 1;
-        if ((shape === 'current' && (!hasContext || explicitlyMarked)) || (shape === 'legacy' && chunks.length <= 1 && !proseText.trim())) {
+        if (shape === 'current' || (shape === 'legacy' && chunks.length <= 1 && !proseText.trim())) {
           const call = `\`\`\`webcodex-call\n${raw}\n\`\`\``;
           return proseText.trim() ? `${proseText}\n${call}` : call;
         }

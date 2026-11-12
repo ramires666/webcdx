@@ -430,9 +430,9 @@ test('reconstructs a current call alongside prose, including across chunks', () 
     .add(new Node('ms-code-block', { 'data-test-language': 'webcodex-call' })).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
   assert.equal(multi.adapter.inspect().latestModel.text, 'I will read that now.\nOne more note.\n```webcodex-call\n{"v":1,"name":"read","arguments":{}}\n```');
 });
-test('does not promote an unmarked three-field JSON example in prose', () => {
+test('does not promote ordinary JSON without the explicit v1 tool envelope in prose', () => {
   const state = setup(); state.chunk.children = []; state.chunk._text = 'Example payload:';
-  state.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
+  state.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"name":"read","arguments":{}}'));
   assert.doesNotMatch(state.adapter.inspect().latestModel.text, /^```webcodex-call/);
 });
 
@@ -454,14 +454,60 @@ test('reconstructs the screenshot read_file call from the visible code language 
   assert.doesNotMatch(extracted, /Expand to view|hidden|content_copy|download/);
 });
 
-test('visible language fallback requires the exact call marker outside the code and action buttons', () => {
+test('ordinary JSON does not become a tool call because a language label or button mentions the marker', () => {
   for (const label of ['json', 'webcodex-call example', 'not-webcodex-call']) {
     const state = setup(); state.chunk.children = []; state.chunk._text = 'Example payload:';
     const block = state.chunk.add(new Node('ms-code-block'));
     block.add(new Node('span', {}, label));
     block.add(new Node('button', {}, 'webcodex-call'));
-    block.add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{"path":"webcodex-call"}}'));
+    block.add(new Node('pre')).add(new Node('code', {}, '{"example":"webcodex-call","path":"notes.txt"}'));
     assert.doesNotMatch(state.adapter.inspect().latestModel.text, /```webcodex-call/);
+  }
+});
+
+test('recognizes the screenshot list_allowed_roots envelope across code renderers and unrelated language labels',()=>{
+  const {parseCall}=require('./protocol.js');
+  const payload='{"v":1,"name":"list_allowed_roots","arguments":{}}';
+  const tools=[{name:'list_allowed_roots',inputSchema:{type:'object',properties:{},additionalProperties:false}}];
+  for(const renderer of ['pre','code','highlighted']){
+    const state=setup();state.chunk.children=[];state.chunk._text='Сначала проверю доступные пути и рабочее окружение.';
+    const block=state.chunk.add(new Node('ms-code-block'));
+    block.add(new Node('mat-icon',{},'code'));block.add(new Node('span',{},'v'));
+    block.add(new Node('button',{},'content_copy'));
+    const body=block.add(new Node(renderer==='highlighted'?'div':renderer,{},payload));
+    Object.defineProperty(body,'innerText',{get:()=>payload.replace('list_allowed_roots','list\n_allowed_roots')});
+    const extracted=state.adapter.inspect().latestModel.text;
+    assert.deepEqual(parseCall(extracted,null,tools),{name:'list_allowed_roots',arguments:{}},renderer);
+  }
+});
+
+test('rejects non-v1 envelopes, extra fields and multiple JSON calls instead of normalizing them',()=>{
+  for(const payload of ['{"v":2,"name":"read","arguments":{}}','{"v":1,"name":"read","arguments":{},"extra":true}','{"v":1,"name":"read","arguments":[]}','{"v":1,"name":"read","arguments":{}} {"v":1,"name":"read","arguments":{}}']){
+    const state=setup();state.chunk.children=[];state.chunk._text='Explanation.';
+    state.chunk.add(new Node('ms-code-block')).add(new Node('pre',{},payload));
+    assert.doesNotMatch(state.adapter.inspect().latestModel.text,/```webcodex-call/);
+  }
+});
+
+test('language-independent v1 recognition still rejects unselected tools and injected arguments',()=>{
+  const {parseCall}=require('./protocol.js');
+  const tools=[{name:'list_allowed_roots',inputSchema:{type:'object',properties:{},additionalProperties:false}}];
+  for(const call of [{v:1,name:'unselected_tool',arguments:{}},{v:1,name:'list_allowed_roots',arguments:{request_key:'not-model-controlled'}}]){
+    const state=setup();state.chunk.children=[];state.chunk._text='Проверю окружение.';
+    state.chunk.add(new Node('ms-code-block')).add(new Node('pre',{},JSON.stringify(call)));
+    assert.throws(()=>parseCall(state.adapter.inspect().latestModel.text,null,tools));
+  }
+});
+
+test('finds a single call outside paragraph chunks or inside nested chunks without double counting',()=>{
+  const {parseCall}=require('./protocol.js');
+  const tools=[{name:'list_allowed_roots',inputSchema:{type:'object',properties:{},additionalProperties:false}}];
+  for(const layout of ['sibling','nested']){
+    const state=setup();state.chunk.children=[];state.chunk._text='Сначала проверю окружение.';
+    const container=layout==='sibling'?state.model.children[0]:state.chunk.add(new Node('ms-text-chunk'));
+    const block=container.add(new Node('ms-code-block'));
+    block.add(new Node('span',{},'v'));block.add(new Node('pre',{},'{"v":1,"name":"list_allowed_roots","arguments":{}}'));
+    assert.deepEqual(parseCall(state.adapter.inspect().latestModel.text,null,tools),{name:'list_allowed_roots',arguments:{}},layout);
   }
 });
 test('does not promote duplicate code blocks or legacy calls with prose', () => {
