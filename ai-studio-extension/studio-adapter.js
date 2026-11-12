@@ -83,12 +83,7 @@
     }
     return copy;
   };
-  const finalText = (el,modelReply=false) => {
-    const raw=String(answerCopy(el).textContent||'').trim();
-    if(!modelReply)return raw;
-    const found=protocol.analyzeReply(raw);
-    return found.kind==='call'?'```webcodex-call\n'+found.raw+'\n```':raw;
-  };
+  const finalText = (el) => String(answerCopy(el).textContent||'').trim();
   const userBody = (el) => {
     const roleContent=allElements('[data-turn-role], .chat-turn-container',el).find(node=>visible(node)&&(roleValue(node)==='user'||node.matches?.('.chat-turn-container.user')));
     if(roleContent)return roleContent;
@@ -155,13 +150,15 @@
     const model = recognized.filter((el) => role(el) === 'model').pop() || null;
     const modelContent = model && [...new Set(allElements('[data-turn-role], .chat-turn-container', model))]
       .find(el => visible(el)&&(roleValue(el) === 'model' || el.matches?.('.chat-turn-container.model')));
+    const modelSource=model?finalText(modelContent||model):'';
+    const parsedModel=model?protocol.analyzeReply(modelSource):null;
     const user = recognized.filter((el) => role(el) === 'user').pop() || null;
     const latestUserText = user ? finalText(userBody(user)) : '';
     const latestUserOperationId = user && parseResultOperationId(latestUserText) || '';
     return {
       conversationKey: conversationKey(), generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
-      supported: !error, error, latestModel: model ? { element: model, text: finalText(modelContent||model,true) } : null,
+      supported: !error, error, latestModel: model ? { element: model, sourceText:modelSource, text:parsedModel.kind==='call'?'```webcodex-call\n'+parsedModel.raw+'\n```':modelSource } : null,
       historyAnchor: recognized[0] || null,
       historyStart: recognized[0] ? finalText(recognized[0]).slice(0,2048) : '',
       latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,

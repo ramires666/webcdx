@@ -8,15 +8,15 @@ const WebCodexProtocol = require('./protocol.js');
 const KEY = 'webcodexState', TOKEN = 'test-token';
 const tool = { name: 'read_file', description: 'test', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false } };
 
-function harness() {
+function harness({manualClock=false,tools=[tool]}={}) {
   let model = { text: 'existing answer' }, latestUser = null, modelAfterUser = true, editorEmpty = true, supported = true;
   let refreshFails = 1, systemStageFails = 1, now = 10000, generating = false, observerCallback, currentPath = '/prompts/new_chat', saveOnSubmit=false, legacyProofMissing=false;
   let historyAnchor=null,historyStart='';
   const conversationKey = 'active-chat';
   const autoReplies = [], operations = [], messages = [], staged = [], bgListeners = [], contentListeners = [], timers = new Map(), intervals = new Map(); let timerId = 0;
-  const session = { phase: 'waiting_model', agentId: 'agent-1', toolNames: ['read_file'], automatic: true, paused: false, turn: 'old-turn', instructions: '', pendingCall: null, resultText: '', error: '', count: 0, tabId: 7, sessionId: 'old-session', conversationKey, pageInstance: 'page-1' };
-  const db = { [KEY]: { connected: true, gateUrl: 'https://gate.example', clientId: 'client', accessToken: TOKEN, agents: [{ id: 'agent-1', name: 'test', online: true }], tools: [tool], session }, };
-  const local = { bridgeAuth: { gateUrl: 'https://gate.example', clientId: 'client', accessToken: TOKEN }, bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: ['read_file'], automatic: true, autoApprove: false }, bridgeAutoSetupV1: true };
+  const session = { phase: 'waiting_model', agentId: 'agent-1', toolNames: tools.map(t=>t.name), automatic: true, paused: false, turn: 'old-turn', instructions: '', pendingCall: null, resultText: '', error: '', count: 0, tabId: 7, sessionId: 'old-session', conversationKey, pageInstance: 'page-1' };
+  const db = { [KEY]: { connected: true, gateUrl: 'https://gate.example', clientId: 'client', accessToken: TOKEN, agents: [{ id: 'agent-1', name: 'test', online: true }], tools, session }, };
+  const local = { bridgeAuth: { gateUrl: 'https://gate.example', clientId: 'client', accessToken: TOKEN }, bridgeAuto: { enabled: true, consent: true, agentId: 'agent-1', toolNames: tools.map(t=>t.name), automatic: true, autoApprove: false }, bridgeAutoSetupV1: true };
   const chrome = {
     runtime: { id: 'test', getURL: p => `chrome-extension://test/${p}`, onMessage: { addListener: fn => bgListeners.push(fn) }, sendMessage: msg => new Promise(resolve => { messages.push(structuredClone(msg)); const async = bgListeners[0](msg, { frameId: 0, url: 'https://aistudio.google.com/app/prompts/chat', tab: { id: 7 } }, resolve); if (async !== true) resolve(undefined); }) },
     storage: { session: { setAccessLevel: async () => {}, get: async key => ({ [key]: structuredClone(db[key]) }), set: async values => Object.assign(db, structuredClone(values)) }, local: { setAccessLevel: async () => {}, get: async key => ({ [key]: structuredClone(local[key]) }), set: async values => Object.assign(local, structuredClone(values)), remove: async key => delete local[key] } },
@@ -30,7 +30,7 @@ function harness() {
     restoreCleanup() {}, hasDelivery: operationId => !legacyProofMissing&&latestUser?.operationId===operationId, submit: async draft => { const text=draft.replace(/^```webcodex-result\n/,'').replace(/\n```$/,''); if(saveOnSubmit){currentPath='/prompts/saved-chat';saveOnSubmit=false;}latestUser={text:legacyProofMissing?'User\n11:49 PM\n'+text:text,operationId:JSON.parse(text).operation_id};modelAfterUser=false;if(autoReplies.length){model={text:autoReplies.shift(),element:{}};modelAfterUser=true;observerCallback();}return true; }
   }) };
   class TestDate extends Date { static now() { return now; } }
-  const context = { chrome, window: null, document: { documentElement: {}, addEventListener(type, fn) { this[type] = fn; } }, location: { origin: 'https://aistudio.google.com', get pathname() { return currentPath; } }, WebCodexStudio: adapters, WebCodexProtocol, URL, URLSearchParams, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, JSON, Promise, Set, Map, Date: TestDate, AbortSignal, Math, Error, String, Object, Number, RegExp, console: { error() {}, warn() {}, log() {} }, crypto: require('node:crypto').webcrypto, btoa: s => Buffer.from(s, 'binary').toString('base64'), setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id), setInterval: fn => { intervals.set(++timerId, fn); return timerId; }, clearInterval: id => intervals.delete(id), MutationObserver: class { constructor(fn) { observerCallback = fn; } observe() {} disconnect() {} }, importScripts() {}, WebCodexMCP: { createClient: () => ({ initialize: async () => ({}), listAgents: async () => [{ id: 'agent-1', name: 'test', online: true }], createOperation: async operation => { operations.push(operation); return {status:'completed',operation_id:'op-'+operations.length,result:{content:[{type:'text',text:'file contents'}]}}; }, listTools: async () => { if (refreshFails-- > 0) throw Error('temporary Gate refresh failure'); return [tool]; } }) } };
+  const context = { chrome, window: null, document: { documentElement: {}, addEventListener(type, fn) { this[type] = fn; } }, location: { origin: 'https://aistudio.google.com', get pathname() { return currentPath; } }, WebCodexStudio: adapters, WebCodexProtocol, URL, URLSearchParams, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, JSON, Promise, Set, Map, Date: TestDate, AbortSignal, Math, Error, String, Object, Number, RegExp, console: { error() {}, warn() {}, log() {} }, crypto: require('node:crypto').webcrypto, btoa: s => Buffer.from(s, 'binary').toString('base64'), setTimeout: (fn,ms=0) => { timers.set(++timerId, {fn,at:now+ms}); return timerId; }, clearTimeout: id => timers.delete(id), setInterval: fn => { intervals.set(++timerId, fn); return timerId; }, clearInterval: id => intervals.delete(id), MutationObserver: class { constructor(fn) { observerCallback = fn; } observe() {} disconnect() {} }, importScripts() {}, WebCodexMCP: { createClient: () => ({ initialize: async () => ({}), listAgents: async () => [{ id: 'agent-1', name: 'test', online: true }], createOperation: async operation => { operations.push(operation); return {status:'completed',operation_id:'op-'+operations.length,result:{content:[{type:'text',text:'file contents'}]}}; }, listTools: async () => { if (refreshFails-- > 0) throw Error('temporary Gate refresh failure'); return tools; } }) } };
   context.window = { top: null, __webcodexBridgeLoaded: false }; context.window.top = context.window;
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'background.js'), 'utf8'), context, { filename: 'background.js' });
   // Content owns its listener on runtime.onMessage; separate the background listener installed first.
@@ -39,7 +39,14 @@ function harness() {
   const clearChatWithoutClick=()=>{model=null;latestUser=null;modelAfterUser=false;editorEmpty=true;historyAnchor=null;historyStart='';};
   const openSavedChat=(userText,modelText)=>{historyAnchor={};historyStart=userText;latestUser={text:userText};model={text:modelText,element:{}};modelAfterUser=true;};
   const setSupported=value=>{supported=value;};
-  return { chrome, local, messages, staged, db, operations, clearChatWithoutClick, openSavedChat, setSupported, replyImmediatelyAfterDelivery: text => autoReplies.push(text), missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() { const pending = [...timers.values()]; timers.clear(); for (const fn of [...pending, ...intervals.values()]) fn(); await this.flush(); }, advance(ms) { now += ms; }, get state() { return db[KEY].session; } };
+  return { chrome, local, messages, staged, db, operations, clearChatWithoutClick, openSavedChat, setSupported, replyImmediatelyAfterDelivery: text => autoReplies.push(text), renderModelFragment: text => {model={text,element:{}};modelAfterUser=true;observerCallback();}, missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() {
+    for(const fn of intervals.values())fn();await this.flush();
+    for(let round=0;round<20&&timers.size;round++){
+      if(!manualClock)now=Math.max(now,Math.min(...[...timers.values()].map(timer=>timer.at)));
+      const due=[...timers].filter(([,timer])=>timer.at<=now);if(!due.length)break;
+      for(const[id,timer]of due){timers.delete(id);timer.fn();}await this.flush();
+    }
+  }, advance(ms) { now += ms; }, get state() { return db[KEY].session; } };
 }
 
 test('New chat retries startup after Gate refresh and system instruction staging failures', async () => {
@@ -105,6 +112,23 @@ test('a damaged tool envelope shows an error instead of silently becoming a comp
   assert.equal(h.state.phase,'paused');
   assert.match(h.state.error,/JSON/);
   assert.equal(h.operations.length,0);
+});
+
+test('an automatic followup waits for a fully rendered path even if generation controls report idle',async()=>{
+  const tools=[{name:'list_allowed_roots',inputSchema:{type:'object',properties:{},additionalProperties:false}},{...tool,name:'list_directory'}];
+  const h=harness({manualClock:true,tools});await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  h.userMessage('Open pacman in Chrome');h.modelMessage(JSON.stringify({v:1,name:'list_allowed_roots',arguments:{}}));
+  h.advance(250);await h.tick();h.advance(1000);await h.tick();await h.tick();
+  assert.equal(h.operations.length,1);
+  const complete='Проверю наличие файла по пути W:\\_python\\pacman\\kimik3-pacman.\n'+JSON.stringify({v:1,name:'list_directory',arguments:{path:'W:\\_python\\pacman\\kimik3-pacman'}});
+  h.renderModelFragment(complete.slice(0,-12));h.advance(250);await h.tick();h.advance(500);await h.tick();
+  assert.equal(h.state.phase,'waiting_model','a transient incomplete JSON frame must never pause the background session');
+  assert.equal(h.operations.length,1);
+  h.renderModelFragment(complete);h.advance(250);await h.tick();h.advance(1000);await h.tick();await h.tick();
+  assert.equal(h.operations.length,2);
+  assert.deepEqual(h.operations.map(op=>op.name),['list_allowed_roots','list_directory']);
+  assert.equal(h.operations[1].arguments.path,'W:\\_python\\pacman\\kimik3-pacman');
 });
 
 test('real DOM extraction reaches operation dispatch exactly once and preserves command arguments',async()=>{

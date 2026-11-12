@@ -7,7 +7,7 @@
   const ENDPOINTS = Array.from({ length: 10 }, (_, i) => `http://127.0.0.1:${47831 + i}`);
   const LIMIT = 4 * 1024 * 1024;
   function unavailable(message) { const error = Error(message); error.code = 'NATIVE_DISCONNECTED'; return error; }
-  function createClient({ fetchImpl = globalThis.fetch, extensionId = globalThis.chrome?.runtime?.id, version = '0.3.6', endpoint = '', agentIdentity = '' } = {}) {
+  function createClient({ fetchImpl = globalThis.fetch, extensionId = globalThis.chrome?.runtime?.id, version = '0.3.7', endpoint = '', agentIdentity = '' } = {}) {
     if (endpoint && !ENDPOINTS.includes(endpoint)) throw Error('Invalid saved local endpoint');
     let selected = endpoint, identity = agentIdentity, nextId = 0, closed = false;
     const active = new Set();

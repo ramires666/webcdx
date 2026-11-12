@@ -9,9 +9,10 @@ const unwrapResult = text => {
   return match ? match[1] : text;
 };
 
-function harness() {
+function harness({manualClock=false}={}) {
   const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', latestModel: { text: 'old answer' }, latestUser: null };
-  let timerId = 0, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false, submitHandler;
+  let timerId = 0, now=10000, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false, submitHandler;
+  class TestDate extends Date {static now(){return now;}}
   const adapter = {
     inspect: () => ({ ...state, latestModel: state.latestModel && { ...state.latestModel }, latestUser: state.latestUser && { ...state.latestUser } }),
     stage: text => { staged.push(text); return state.editorEmpty && !state.generating; }, stageSystemInstructions: async () => true,
@@ -29,11 +30,20 @@ function harness() {
   const window = {}; window.top = window;
   class MutationObserver { constructor(callback) { observerCallback = callback; } observe() {} disconnect() { disconnected = true; } }
   const context = { window, location: new URL('https://aistudio.google.com/app/prompts/one'), document, chrome, WebCodexStudio: { createAdapter: () => adapter }, MutationObserver,
-    setTimeout: fn => { const id = ++timerId; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, TextEncoder, structuredClone, WebCodexProtocol };
+    setTimeout: (fn,ms=0) => { const id = ++timerId; timers.set(id, {fn,at:now+ms}); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, Date:TestDate, TextEncoder, structuredClone, WebCodexProtocol };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const send = message => new Promise(resolve => listeners.message(message, {}, response => resolve(structuredClone(response))));
-  const flush = async () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn(); await new Promise(resolve => setImmediate(resolve)); };
-  return { state, sent, staged, submitted, send, flush, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), run: () => { const button={getAttribute:name=>name==='aria-label'?null:'',innerText:'Run\nkeyboard_return',textContent:''};documentListeners.click({target:{closest:()=>button}}); }, setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
+  const flush = async () => {
+    for(let round=0;round<20;round++){
+      await new Promise(resolve=>setImmediate(resolve));
+      if(!timers.size)return;
+      if(!manualClock)now=Math.max(now,Math.min(...[...timers.values()].map(timer=>timer.at)));
+      const due=[...timers].filter(([,timer])=>timer.at<=now);if(!due.length)return;
+      for(const [id,timer]of due){timers.delete(id);timer.fn();}
+    }
+    throw Error('timers did not settle');
+  };
+  return { state, sent, staged, submitted, send, flush, advance:ms=>{now+=ms;}, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), run: () => { const button={getAttribute:name=>name==='aria-label'?null:'',innerText:'Run\nkeyboard_return',textContent:''};documentListeners.click({target:{closest:()=>button}}); }, setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
 }
 
 test('delivery waits for async Run readiness and aborts after disarm', async () => {
@@ -134,6 +144,68 @@ test('ignores history and sends one completed new reply as a call', async () => 
   const calls = h.sent.filter(m => m.type === 'studio.call');
   assert.equal(calls.length, 1); assert.equal(calls[0].text, 'new answer'); assert.equal(calls[0].generating, false);
   h.mutate(); await h.flush(); assert.equal(h.sent.filter(m => m.type === 'studio.call').length, 1);
+});
+
+test('idle controls cannot submit a transient incomplete JSON frame',async()=>{
+  const h=harness({manualClock:true});await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.state.latestUser={text:'Read the file'};h.state.modelAfterUser=true;h.run();
+  const complete=JSON.stringify({v:1,name:'read_file',arguments:{path:'W:\\_python\\pacman\\kimik3-pacman\\pacman.html'}});
+  h.state.latestModel={text:complete.slice(0,-7)};h.mutate();h.advance(250);await h.flush();
+  h.advance(7999);h.tick();await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0,'no truncated JSON reaches background validation during the render grace period');
+  h.state.latestModel={text:complete};h.mutate();h.advance(250);await h.flush();
+  h.advance(999);await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  h.advance(1);await h.flush();
+  assert.deepEqual(h.sent.filter(m=>m.type==='studio.call').map(m=>m.text),[complete]);
+  h.advance(2000);h.tick();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+});
+
+test('a valid interim command is rechecked after the source text stops changing',async()=>{
+  const h=harness({manualClock:true});await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.state.latestUser={text:'Read'};h.state.modelAfterUser=true;h.run();
+  const call=JSON.stringify({v:1,name:'read_file',arguments:{path:'first.txt'}});
+  h.state.latestModel={text:call,sourceText:'Reading.\n'+call};h.mutate();h.advance(250);await h.flush();
+  h.advance(900);h.state.latestModel.sourceText+='\nOne more note.';h.mutate();h.advance(100);await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0,'the old deadline must inspect the latest source, even before its debounce runs');
+  const final=JSON.stringify({v:1,name:'read_file',arguments:{path:'final.txt'}});
+  h.state.latestModel={text:final,sourceText:'Reading.\n'+final};h.mutate();h.advance(250);await h.flush();
+  h.advance(1000);await h.flush();
+  assert.deepEqual(h.sent.filter(m=>m.type==='studio.call').map(m=>m.text),[final]);
+});
+
+test('resumed generation cancels the idle deadline and starts a new quiet period',async()=>{
+  const h=harness({manualClock:true});await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.state.latestUser={text:'Read'};h.state.modelAfterUser=true;h.run();
+  h.state.latestModel={text:JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})};
+  h.mutate();h.advance(250);await h.flush();h.advance(900);
+  h.state.generating=true;h.mutate();h.advance(5000);await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  h.state.generating=false;h.mutate();h.advance(250);await h.flush();
+  h.advance(999);await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  h.advance(1);await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+});
+
+test('a permanently damaged JSON response is reported once after its quiet grace period',async()=>{
+  const h=harness({manualClock:true});await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.state.latestUser={text:'Read'};h.state.modelAfterUser=true;h.run();
+  h.state.latestModel={text:'{"v":1,"name":"read_file","arguments":{"path":"broken'};
+  h.mutate();h.advance(250);await h.flush();h.advance(7999);await h.flush();
+  assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  h.advance(1);await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+  h.advance(2000);h.tick();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+});
+
+test('disarm and Stop cancel pending reply timers without submitting the candidate',async()=>{
+  for(const stop of [false,true]){
+    const h=harness({manualClock:true});await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+    h.state.latestUser={text:'Read'};h.state.modelAfterUser=true;h.run();
+    h.state.latestModel={text:JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}})};
+    h.mutate();h.advance(250);await h.flush();
+    if(stop){h.state.generating=true;h.click({target:{closest:()=>({getAttribute:()=>'',innerText:'Stop',querySelector:()=>null})}});h.state.generating=false;}
+    else await h.send({type:'studio.disarm',sessionId:'s1'});
+    h.advance(10000);h.tick();await h.flush();
+    assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+  }
 });
 
 test('safe draft, submitted result, delivery confirmation and disarm', async () => {

@@ -33,6 +33,8 @@ test('whole-answer parsing tolerates renderer, nesting, labeling and tokenizatio
     const result=state.adapter.inspect();
     assert.equal(result.supported,true);
     assert.deepEqual(parseCall(result.latestModel.text,null,tools),{name:'read_file',arguments:args});
+    assert.ok(result.latestModel.sourceText.startsWith('Проверю доступные пути.\n'));
+    assert.ok(result.latestModel.sourceText.endsWith('После выполнения сообщу результат.'));
     assert.equal(state.model.textContent,before,'inspection never modifies the original answer');
     assert.equal(state.editor.value,'keep my draft');cases++;
   }

@@ -21,7 +21,7 @@ function createPanel(store = {}, options = {}) {
   const document = { activeElement: null, getElementById(id) { if (!els.has(id)) els.set(id, new Element(id)); return els.get(id); }, createElement() { return new Element(); } };
   let snapshot = { connected: false, session: { phase: 'idle', paused: false }, tools: [], agents: [], autoSettings: store.autoSettings }, failAction = false, poll, connectCount = 0;
   const messages = [];
-  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.6'}), lastError: null, sendMessage(msg, cb) {
+  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.7'}), lastError: null, sendMessage(msg, cb) {
     messages.push(msg);
     if (msg.type === 'bridge.status') return cb({ ok: true, state: snapshot });
     if (msg.type === 'bridge.preferences') { store.autoSettings = msg; snapshot.autoSettings = msg; return cb({ ok: true, state: snapshot }); }

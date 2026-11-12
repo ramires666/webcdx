@@ -10,9 +10,13 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.3.6)
+## AI Studio Bridge (alpha 0.3.7)
 
-Version `0.3.6` uses one JSON scanner for the whole model answer and execution
+Version `0.3.7` waits for idle generation controls and one second of unchanged
+answer text, then re-reads the DOM before dispatch. Malformed JSON gets eight
+seconds of unchanged idle text before it is reported as an error. Resumed
+generation cancels the pending deadline. This fixes premature parsing of automatic
+followups after tool results. One JSON scanner handles the whole model answer and execution
 validation. Code widget names, language labels, nested wrappers and syntax
 highlighting do not control call recognition. Strings and command arguments remain
 exact; ambiguous, duplicate-key and malformed calls show errors. Selected-tool
@@ -33,7 +37,7 @@ An uncertain command is not automatically replayed. The live AI Studio page has
 not been verified; its DOM selectors remain alpha.
 
 The ready-to-use kit is in
-[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.6`
+[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.7`
 and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.4`. No local
 build is required. Gate remains `1.5.0-ai-studio-alpha.4`; local mode does not
 need it. With agent alpha.4 already installed, replace only the extension, reload it in
