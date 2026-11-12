@@ -16,9 +16,16 @@ test('a streamed raw file executes once with exact content and delivers its resu
   const stages=h.staged.filter(item=>item.kind==='system').length;
   const content='ctx.font = `bold ${size}px "Courier New", monospace`;\n'+('const path = String.raw`W:\\Python`;\n'.repeat(4000));
   const metadata=JSON.stringify({v:1,name:'write_file',arguments:{path:'large.html',if_absent:true},content_source:'game'});
+  const {Node,setup}=require('./test-fixtures/studio-dom.cjs');
+  const rendered=setup();rendered.chunk.remove();
+  const callWidget=rendered.model.children[0].add(new Node('ms-code-block'));
+  callWidget.add(new Node('header',{},'Helper-call'));callWidget.add(new Node('pre',{},metadata));
+  const fileWidget=rendered.model.children[0].add(new Node('ms-code-block'));
+  fileWidget.add(new Node('header',{},'Helper-file'));
+  fileWidget.add(new Node('pre',{},'<<<HELPER_FILE_BEGIN:game>>>\n'+content+'\n<<<HELPER_FILE_END:game>>>'));
   h.userMessage('Save the game');h.modelMessage(metadata+'\n<<<HELPER_FILE_BEGIN:game>>>\n'+content);
   h.advance(250);await h.tick();h.advance(1000);await h.tick();assert.equal(h.operations.length,0,'an incomplete file is never dispatched');
-  h.renderModelFragment(metadata+'\n<<<HELPER_FILE_BEGIN:game>>>\n'+content+'\n<<<HELPER_FILE_END:game>>>');
+  h.renderModelFragment(rendered.adapter.inspect().latestModel.text);
   h.advance(250);await h.tick();h.advance(1000);await h.tick();await h.tick();
   assert.equal(h.operations.length,1);assert.equal(h.operations[0].arguments.content,content);
   assert.ok(h.messages.some(message=>message.type==='studio.deliver'));

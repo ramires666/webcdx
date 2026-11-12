@@ -186,7 +186,7 @@
       if(files.length!==1||files[0].id!==call.content_source)return{kind:'error',error:'write_file content_source must match exactly one complete Helper file block'};
       const resolved={...call,arguments:{...call.arguments,content:files[0].content}};
       delete resolved.content_source;
-      return{kind:'call',call:resolved,raw:JSON.stringify(resolved)};
+      return{kind:'call',call:resolved,raw:JSON.stringify(resolved),fileSource:files[0].id};
     }
     if(files.length)return{kind:'error',error:'Helper file block requires write_file content_source'};
     return{kind:'call',call,raw:part.raw};

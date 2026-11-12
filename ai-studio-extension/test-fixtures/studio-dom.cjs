@@ -3,6 +3,7 @@ const createAdapter = require('../studio-adapter.js');
 class Node {
   constructor(tag, attrs = {}, content = '') { this.tag = tag; this.attrs = attrs; this._text = content; this.children = []; this.disabled = false; this.readOnly = false; this.isConnected = true; this.hidden = false; this.events = []; this.style = { values: {}, priorities: {}, getPropertyValue(name) { return this.values[name] || ''; }, getPropertyPriority(name) { return this.priorities[name] || ''; }, setProperty(name, value, priority = '') { this.values[name] = String(value); this.priorities[name] = priority; }, removeProperty(name) { delete this.values[name]; delete this.priorities[name]; } }; }
   get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
+  get childNodes() { return [...(this._text?[{nodeType:3,textContent:this._text,childNodes:[]}]:[]),...this.children]; }
   set textContent(value) { this._text = String(value); this.children = []; }
   get innerText() { return this.textContent; }
   set innerText(value) { this._text = String(value); }

@@ -84,3 +84,51 @@ test('model instructions explain the raw format only when write_file is selected
   assert.match(prompt,/not file content/);assert.doesNotMatch(prompt,/webcodex/i);
   assert.doesNotMatch(buildSystemInstructions({tools:[],turnless:true}),/content_source/);
 });
+
+test('adjacent code widgets without literal layout newlines retain file delimiters',()=>{
+  const state=setup();state.chunk.remove();const body=state.model.children[0];
+  for(const [label,value]of [['Helper-call',JSON.stringify(metadata)],['Helper-file',attachment(code)]]){
+    const widget=body.add(new Node('ms-code-block'));
+    widget.add(new Node('header',{},label));
+    widget.add(new Node('pre',{},value));
+  }
+  const model=state.adapter.inspect().latestModel;
+  assert.equal(analyzeReply(model.text).kind,'call');
+  assert.equal(parseCall(model.text,null,tools).arguments.content,code);
+});
+
+test('raw attachments survive real DOM block boundaries, BR line breaks and highlighted text nodes',t=>{
+  let cases=0;
+  for(const widgetTag of ['ms-code-block','article','future-widget'])
+  for(const headerTag of ['header','div','span'])
+  for(const sourceTag of ['pre','code','div'])
+  for(const width of [1,19,10000])
+  for(const useBR of [false,true]){
+    const state=setup();state.chunk.remove();const body=state.model.children[0];
+    state.document.defaultView.getComputedStyle=node=>({display:node.attrs.class==='source-widget'?'grid':node.attrs.class==='language'?'block':'inline'});
+    for(const [label,value]of [['Helper-call',JSON.stringify(metadata)],['Helper-file',attachment(code)]]){
+      const widget=body.add(new Node(widgetTag,{class:'source-widget'}));
+      widget.add(new Node(headerTag,{class:'language'},label));
+      widget.add(new Node('button',{},'Copy '+value));
+      const source=widget.add(new Node(sourceTag));
+      const lines=useBR?value.split('\n'):[value];
+      lines.forEach((line,index)=>{
+        if(index)source.add(new Node('br'));
+        for(let offset=0;offset<line.length;offset+=width)source.add(new Node('span',{},line.slice(offset,offset+width)));
+      });
+    }
+    const before=state.model.textContent;
+    assert.equal(parseCall(state.adapter.inspect().latestModel.text,null,tools).arguments.content,code,JSON.stringify({widgetTag,headerTag,sourceTag,width,useBR}));
+    assert.equal(state.model.textContent,before);cases++;
+  }
+  t.diagnostic(cases+' raw-file DOM combinations preserve exact content without artificial layout newlines');
+});
+
+test('BR inside a file remains data even when flattened delimiters already form a valid call',()=>{
+  const state=setup();state.chunk.remove();const body=state.model.children[0];
+  body.add(new Node('pre',{},JSON.stringify(metadata)+'\n'));
+  const file=body.add(new Node('pre',{},'<<<HELPER_FILE_BEGIN:file_1>>>\nfirst'));
+  file.add(new Node('br'));file.add(new Node('span',{},'second\n<<<HELPER_FILE_END:file_1>>>'));
+  assert.equal(analyzeReply(body.textContent).kind,'call','the flat representation is syntactically valid but loses BR');
+  assert.equal(parseCall(state.adapter.inspect().latestModel.text,null,tools).arguments.content,'first\nsecond');
+});

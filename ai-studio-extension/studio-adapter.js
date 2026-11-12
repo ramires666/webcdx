@@ -73,6 +73,7 @@
     for(let i=1;i<originals.length;i++){
       const source=originals[i];let style;
       try{style=document.defaultView?.getComputedStyle?.(source);}catch{}
+      if(copies[i])copies[i].helperBlockBoundary=/^(?:block|flex|grid|flow-root|table|list-item)/.test(style?.display||'');
       const inline=attr(source,'style')||'';
       if(source.hidden||attr(source,'hidden')!==null||attr(source,'aria-hidden')==='true'||style?.display==='none'||style?.visibility==='hidden'||/(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b/i.test(inline))copies[i]?.remove();
     }
@@ -82,6 +83,24 @@
       if(attr(node,'open')===null||/^(thoughts|thinking|model thoughts|мысли|размышления)$/i.test(text(summary||{})))node.remove();
     }
     return copy;
+  };
+  const blockTags=new Set(['pre','header','footer','p','article','section','ms-code-block']);
+  const codeText = (node) => {
+    if(node.nodeType===3)return node.textContent||'';
+    if(node.nodeType===8)return '';
+    if(String(node.tagName||node.tag||'').toLowerCase()==='br')return '\n';
+    return node.childNodes?Array.from(node.childNodes,codeText).join(''):String(node.textContent||'');
+  };
+  const modelText = (node) => {
+    if(node.nodeType===3)return node.textContent||'';
+    if(node.nodeType===8)return '';
+    const tag=String(node.tagName||node.tag||'').toLowerCase();
+    if(tag==='br')return '\n';
+    // Code widgets contain the exact source as text nodes. Their layout adds a
+    // boundary around the source, never between syntax-highlighted code tokens.
+    if(tag==='pre'||tag==='code')return '\n'+codeText(node)+'\n';
+    const value=node.childNodes?Array.from(node.childNodes,modelText).join(''):String(node.textContent||'');
+    return blockTags.has(tag)||node.helperBlockBoundary?'\n'+value+'\n':value;
   };
   const finalText = (el) => String(answerCopy(el).textContent||'').trim();
   const userBody = (el) => {
@@ -150,8 +169,16 @@
     const model = recognized.filter((el) => role(el) === 'model').pop() || null;
     const modelContent = model && [...new Set(allElements('[data-turn-role], .chat-turn-container', model))]
       .find(el => visible(el)&&(roleValue(el) === 'model' || el.matches?.('.chat-turn-container.model')));
-    const modelSource=model?finalText(modelContent||model):'';
-    const parsedModel=model?protocol.analyzeReply(modelSource):null;
+    const modelCopy=model?answerCopy(modelContent||model):null;
+    let modelSource=String(modelCopy?.textContent||'').trim();
+    let parsedModel=model?protocol.analyzeReply(modelSource):null;
+    // Preserve already valid JSON byte for byte, including strings spanning DOM
+    // nodes. A raw attachment additionally needs the rendered block boundaries
+    // that textContent drops between the language header and the PRE element.
+    if(model&&(parsedModel.kind!=='call'||parsedModel.fileSource)&&/<<<HELPER_FILE_(?:BEGIN|END):/.test(modelSource)){
+      modelSource=modelText(modelCopy).trim();
+      parsedModel=protocol.analyzeReply(modelSource);
+    }
     const user = recognized.filter((el) => role(el) === 'user').pop() || null;
     const latestUserText = user ? finalText(userBody(user)) : '';
     const latestUserOperationId = user && parseResultOperationId(latestUserText) || '';

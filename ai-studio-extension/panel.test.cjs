@@ -21,7 +21,7 @@ function createPanel(store = {}, options = {}) {
   const document = { activeElement: null, getElementById(id) { if (!els.has(id)) els.set(id, new Element(id)); return els.get(id); }, createElement() { return new Element(); } };
   let snapshot = { connected: false, session: { phase: 'idle', paused: false }, tools: [], agents: [], autoSettings: store.autoSettings }, failAction = false, poll, connectCount = 0;
   const messages = [];
-  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.10'}), lastError: null, sendMessage(msg, cb) {
+  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.11'}), lastError: null, sendMessage(msg, cb) {
     messages.push(msg);
     if (msg.type === 'bridge.status') return cb({ ok: true, state: snapshot });
     if (msg.type === 'bridge.preferences') { store.autoSettings = msg; snapshot.autoSettings = msg; return cb({ ok: true, state: snapshot }); }
@@ -98,6 +98,14 @@ test('action errors remain visible across status renders', async () => {
   assert.equal(p.get('error').textContent, 'Action failed');
   await p.update({ connected: true, session: { phase: 'idle' }, tools: [], agents: [] });
   assert.equal(p.get('error').textContent, 'Action failed');
+});
+
+test('paused or failed sessions never also claim readiness',async()=>{
+  const p=createPanel();
+  for(const session of [{phase:'paused',paused:true,error:'Ambiguous or damaged Helper file delimiters'},{phase:'waiting_model',error:'failed'}]){
+    await p.update({connected:true,autoStatus:'Готово',session,tools:[],agents:[]});
+    assert.doesNotMatch(p.get('state').textContent,/Готово/);
+  }
 });
 
 test('connection inputs persist across panel reopen and a failed connection', async () => {

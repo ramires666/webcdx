@@ -18,7 +18,7 @@ test('discovers the first available local agent without Native Messaging or Gate
   assert.equal(client.endpoint, ENDPOINTS[1]);
   assert.equal(calls[2].request.headers['X-WebCodex-Agent'], 'agent-two');
   assert.equal(calls[2].request.headers['X-WebCodex-Extension'], 'test-extension');
-  assert.equal(JSON.parse(calls[1].request.body).params.clientInfo.version, '0.3.10');
+  assert.equal(JSON.parse(calls[1].request.body).params.clientInfo.version, '0.3.11');
   client.close();
 });
 

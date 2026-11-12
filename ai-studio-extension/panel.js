@@ -84,7 +84,8 @@
     $('result').value = session.resultText || '';
     $('hide-service').checked = !!next.hideServiceMessages;
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;
-    if (next.autoStatus) stateEl.textContent += ` · ${typeof next.autoStatus === 'string' ? next.autoStatus : next.autoStatus.message || ''}`;
+    const autoStatus=typeof next.autoStatus==='string'?next.autoStatus:next.autoStatus?.message||'';
+    if(autoStatus&&(autoStatus!=='Готово'||!session.paused&&!session.error))stateEl.textContent+=' · '+autoStatus;
     const busy = connecting || next.connecting;
     $('connect').disabled = busy || (!!next.connected && next.transport !== 'local');
     $('connect').textContent = busy ? 'Ожидается вход…' : next.transport === 'local' ? 'Настроить резерв Gate' : 'Подключить';
