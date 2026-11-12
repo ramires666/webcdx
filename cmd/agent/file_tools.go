@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -142,12 +141,12 @@ func (e *nativeExecutor) writeFile(args map[string]any, requirePrecondition bool
 		return nil, err
 	}
 	if errors.Is(parentErr, os.ErrNotExist) {
-		log.Printf("✓ Создана папка %s", compactString(filepath.Dir(path), 180))
+		e.logf("✓ Создана папка %s", compactString(filepath.Dir(path), 180))
 	}
 	if previewOK {
-		logFileChange(path, before, data, errors.Is(inspectErr, os.ErrNotExist))
+		e.logFileChange(path, before, data, errors.Is(inspectErr, os.ErrNotExist))
 	} else {
-		log.Printf("✓ Сохранён файл %s; сравнение недоступно", compactString(path, 180))
+		e.logf("✓ Сохранён файл %s; сравнение недоступно", compactString(path, 180))
 	}
 	return map[string]any{"path": path, "bytes_written": len(data), "sha256": hashBytes(data)}, nil
 }
@@ -230,7 +229,7 @@ func (e *nativeExecutor) editFile(args map[string]any) (any, error) {
 	if err := atomicWrite(path, newData, false); err != nil {
 		return nil, err
 	}
-	logFileChange(path, data, newData, false)
+	e.logFileChange(path, data, newData, false)
 	return map[string]any{
 		"path": path, "old_sha256": oldHash, "new_sha256": hashBytes(newData),
 		"replacements": replacements, "bytes_written": len(newData),

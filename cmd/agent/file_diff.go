@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"slices"
 	"strings"
 )
@@ -142,7 +141,7 @@ func formatFileDiff(before, after string) string {
 	return out.String()
 }
 
-func logFileChange(path string, before, after []byte, created bool) {
+func (e *nativeExecutor) logFileChange(path string, before, after []byte, created bool) {
 	action := "Сохранён файл"
 	if created {
 		action = "Создан файл (ранее не существовал)"
@@ -151,5 +150,5 @@ func logFileChange(path string, before, after []byte, created bool) {
 	if created && len(after) == 0 {
 		preview = "Пустой файл"
 	}
-	log.Printf("✓ %s %s\n%s", action, compactString(path, 180), preview)
+	e.logf("✓ %s %s\n%s", action, compactString(path, 180), preview)
 }

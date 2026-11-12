@@ -22,7 +22,7 @@ not been verified; its DOM selectors remain alpha.
 
 The ready-to-use kit is in
 [`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.1`
-and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.3`. No local
+and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.4`. No local
 build is required. Gate remains `1.5.0-ai-studio-alpha.4`; local mode does not
 need it. To update, replace the extension and agent, reload the extension in
 `chrome://extensions`, and reload an already saved AI Studio tab. Do not reload

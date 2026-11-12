@@ -19,6 +19,27 @@ import (
 const studioLocalFirstPort = 47831
 const studioLocalPortCount = 10
 
+func startStudioLocalAccess(ctx context.Context) (func(), error) {
+	roots := studioAllowedRoots()
+	if len(roots) == 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		roots = []string{cwd}
+	}
+	executor, err := newNativeExecutorWithConfig(executorConfig{Source: "local", AllowedRoots: roots, LogDir: filepath.Join(studioConfigDir(), "logs"), BrowserBackend: "disabled"})
+	if err != nil {
+		return nil, err
+	}
+	closeListener, err := startStudioLocal(ctx, executor)
+	if err != nil {
+		executor.Close()
+		return nil, err
+	}
+	return func() { closeListener(); executor.Close() }, nil
+}
+
 // Trust the shipped extension and unpacked copies beside this installation.
 // Reading Chrome's own extension IDs avoids registry entries and manual pairing.
 func studioLocalExtensionIDs(executable string) map[string]bool {

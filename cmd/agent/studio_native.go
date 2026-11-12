@@ -44,7 +44,7 @@ func runStudioNativeHost(origin string) error {
 		return errors.New("no allowed roots configured")
 	}
 	logDir := filepath.Join(studioConfigDir(), "logs")
-	e, err := newNativeExecutorWithConfig(executorConfig{AllowedRoots: roots, LogDir: logDir, ProcessTTL: durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour), MaxLogBytes: int64Env("WEBCODEX_MAX_LOG_BYTES", defaultLogMax), MaxResponseBytes: intEnv("WEBCODEX_MAX_RESPONSE_BYTES", defaultResponseMax), Verbose: env("WEBCODEX_DEBUG", env("WEBCODEX_VERBOSE", "0")) != "0", BrowserBackend: "disabled"})
+	e, err := newNativeExecutorWithConfig(executorConfig{Source: "local", AllowedRoots: roots, LogDir: logDir, ProcessTTL: durationEnv("WEBCODEX_PROCESS_TTL", 24*time.Hour), MaxLogBytes: int64Env("WEBCODEX_MAX_LOG_BYTES", defaultLogMax), MaxResponseBytes: intEnv("WEBCODEX_MAX_RESPONSE_BYTES", defaultResponseMax), Verbose: env("WEBCODEX_DEBUG", env("WEBCODEX_VERBOSE", "0")) != "0", BrowserBackend: "disabled"})
 	if err != nil {
 		return err
 	}

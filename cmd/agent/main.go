@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -68,31 +67,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	localOnly := len(os.Args) > 1 && os.Args[1] == "--local"
-	localRoots := studioAllowedRoots()
-	if len(localRoots) == 0 {
-		cwd, err := os.Getwd()
-		if err != nil {
-			log.Fatal(err)
+	gateConfigured := gateURL != "" && token != ""
+	if !localOnly && !gateConfigured && (gateURL != "" || token != "") {
+		log.Fatal("Gate mode requires both WEBCODEX_GATE_URL and WEBCODEX_AGENT_TOKEN; use --local for local mode")
+	}
+	closeLocal, err := startStudioLocalAccess(ctx)
+	if err != nil {
+		if localOnly || !gateConfigured {
+			log.Fatalf("start local Studio: %v", err)
 		}
-		localRoots = []string{cwd}
+		log.Printf("[source=local] local access unavailable; Gate will continue: %v", err)
+	} else {
+		defer closeLocal()
 	}
-	localExecutor, err := newNativeExecutorWithConfig(executorConfig{AllowedRoots: localRoots, LogDir: filepath.Join(studioConfigDir(), "logs"), BrowserBackend: "disabled"})
-	if err != nil {
-		log.Fatalf("initialize local Studio executor: %v", err)
-	}
-	defer localExecutor.Close()
-	closeLocal, err := startStudioLocal(ctx, localExecutor)
-	if err != nil {
-		log.Fatalf("start local Studio: %v", err)
-	}
-	defer closeLocal()
-	if localOnly || (gateURL == "" && token == "") {
+	if localOnly || !gateConfigured {
 		log.Print("Локальный агент готов. Gate не используется.")
 		<-ctx.Done()
 		return
-	}
-	if gateURL == "" || token == "" {
-		log.Fatal("Gate mode requires both WEBCODEX_GATE_URL and WEBCODEX_AGENT_TOKEN; use --local for local mode")
 	}
 	client := &http.Client{}
 	var roots string

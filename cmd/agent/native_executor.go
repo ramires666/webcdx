@@ -37,6 +37,7 @@ type mcpToolDefinition struct {
 }
 
 type executorConfig struct {
+	Source           string
 	AllowedRoots     []string
 	LogDir           string
 	ProcessTTL       time.Duration
@@ -49,6 +50,7 @@ type executorConfig struct {
 }
 
 type nativeExecutor struct {
+	source           string
 	allowedRoots     []string
 	unavailableRoots []string
 	allowAll         bool
@@ -122,6 +124,7 @@ func newNativeExecutor(roots string) (*nativeExecutor, error) {
 		}
 	}
 	return newNativeExecutorWithConfig(executorConfig{
+		Source:           "gate",
 		BrowserBackend:   backend,
 		RemoteBrowser:    remoteConfig,
 		Browser:          browserConfig,
@@ -135,6 +138,9 @@ func newNativeExecutor(roots string) (*nativeExecutor, error) {
 }
 
 func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error) {
+	if config.Source != "" && config.Source != "local" && config.Source != "gate" {
+		return nil, errors.New("unsupported request source")
+	}
 	if len(config.AllowedRoots) == 0 {
 		return nil, errors.New("at least one allowed root is required")
 	}
@@ -167,6 +173,7 @@ func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error)
 		return nil, fmt.Errorf("create log directory: %w", err)
 	}
 	e := &nativeExecutor{
+		source: config.Source,
 		logDir: filepath.Clean(logDir), processTTL: config.ProcessTTL,
 		maxLogBytes: config.MaxLogBytes, maxResponse: config.MaxResponseBytes,
 		verbose:        config.Verbose,
@@ -213,7 +220,7 @@ func newNativeExecutorWithConfig(config executorConfig) (*nativeExecutor, error)
 	return e, nil
 }
 
-func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (json.RawMessage, error) {
+func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (response json.RawMessage, callErr error) {
 	var message struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -221,6 +228,27 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (jso
 	}
 	if err := json.Unmarshal(request, &message); err != nil {
 		return rpcError(nil, -32700, "invalid JSON"), nil
+	}
+	if e.source != "" && message.Method == "tools/call" {
+		var tool struct {
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(message.Params, &tool)
+		e.logf("request id=%q tool=%q", compactString(string(message.ID), 80), tool.Name)
+		defer func() {
+			var result struct {
+				Error  json.RawMessage `json:"error"`
+				Result struct {
+					IsError bool `json:"isError"`
+				} `json:"result"`
+			}
+			_ = json.Unmarshal(response, &result)
+			status := "ok"
+			if callErr != nil || result.Result.IsError || len(result.Error) != 0 {
+				status = "error"
+			}
+			e.logf("response id=%q tool=%q status=%s", compactString(string(message.ID), 80), tool.Name, status)
+		}()
 	}
 	version := contractVersion(message.Params)
 	switch message.Method {

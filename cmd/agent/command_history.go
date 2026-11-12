@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,6 +58,7 @@ func (e *nativeExecutor) execCommandOnce(ctx context.Context, args map[string]an
 }
 
 type commandEvent struct {
+	Source    string    `json:"source,omitempty"`
 	At        time.Time `json:"at"`
 	Event     string    `json:"event"`
 	SessionID string    `json:"session_id"`
@@ -72,7 +72,7 @@ func (e *nativeExecutor) commandEvent(session *processSession, event string) {
 	session.metadataMu.Lock()
 	defer session.metadataMu.Unlock()
 	e.mu.Lock()
-	entry := commandEvent{time.Now().UTC(), event, session.id, session.requestID, session.status, session.pid, session.exitCode}
+	entry := commandEvent{Source: e.source, At: time.Now().UTC(), Event: event, SessionID: session.id, RequestID: session.requestID, Status: session.status, PID: session.pid, ExitCode: session.exitCode}
 	e.mu.Unlock()
 	path := filepath.Join(session.sessionDir, "events.jsonl")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -84,9 +84,9 @@ func (e *nativeExecutor) commandEvent(session *processSession, event string) {
 	}
 	if err != nil {
 		if e.verbose {
-			log.Printf("[session=%s] EVENT_LOG_FAILED error=%q", session.id, err.Error())
+			e.logf("[session=%s] EVENT_LOG_FAILED error=%q", session.id, err.Error())
 		} else {
-			log.Printf("⚠ Не удалось сохранить события команды: %s", compactString(err.Error(), 180))
+			e.logf("⚠ Не удалось сохранить события команды: %s", compactString(err.Error(), 180))
 		}
 	}
 }
@@ -106,6 +106,8 @@ func (e *nativeExecutor) commandEvents(session *processSession) []commandEvent {
 		if decoder.Decode(&event) != nil {
 			break
 		}
+		// Keep routing metadata on disk without changing the MCP output schema.
+		event.Source = ""
 		entries = append(entries, event)
 	}
 	return entries

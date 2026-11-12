@@ -28,7 +28,7 @@ node --test ai-studio-extension/*.test.cjs
 ### Необязательная проверка локального агента на Windows
 
 Сначала соберите агент командой из раздела Windows ниже. Для локального режима
-нужен только EXE агента версии `1.5.0-ai-studio-alpha.3`; Gate собирать, обновлять
+нужен только EXE агента версии `1.5.0-ai-studio-alpha.4`; Gate собирать, обновлять
 или запускать не нужно. Выполните:
 
 ```powershell
@@ -49,7 +49,7 @@ Remove-Item Env:WEBCODEX_LOCAL_REAL_TEST
 ### Необязательная проверка собранных Gate и агента на Windows
 
 Для этого отдельного теста нужны `webcodex-gate.exe` версии `1.5.0-ai-studio-alpha.4`
-и `webcodex-agent.exe` версии `1.5.0-ai-studio-alpha.3` в `bin/ai-studio-bridge`.
+и `webcodex-agent.exe` версии `1.5.0-ai-studio-alpha.4` в `bin/ai-studio-bridge`.
 В Git готовых EXE нет: если они отсутствуют, сначала выполните Windows-сборку из
 следующего раздела. Для текущего локального исправления собран только агент;
 Gate не обновлялся.
@@ -78,7 +78,7 @@ Remove-Item Env:WEBCODEX_BRIDGE_REAL_TEST
 ```powershell
 New-Item -ItemType Directory -Path bin/ai-studio-bridge -Force
 go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.4' -o bin/ai-studio-bridge/webcodex-gate.exe ./cmd/gate
-go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.3' -o bin/ai-studio-bridge/webcodex-agent.exe ./cmd/agent
+go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.4' -o bin/ai-studio-bridge/webcodex-agent.exe ./cmd/agent
 ```
 
 `New-Item` создаёт папку; `-ItemType Directory` выбирает тип «каталог», `-Path`
@@ -86,7 +86,7 @@ go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.
 уже существующую папку. `go build` компилирует программу. `-ldflags` передаёт
 заключённую в кавычки строку линковщику; `-X` устанавливает строковую переменную
 `webcodex/internal/buildinfo.Version` в указанную версию: Gate —
-`1.5.0-ai-studio-alpha.4`, агент — `1.5.0-ai-studio-alpha.3`.
+`1.5.0-ai-studio-alpha.4`, агент — `1.5.0-ai-studio-alpha.4`.
 `-o` задаёт путь готового EXE: первая команда создаёт Gate, вторая — агент.
 `./cmd/gate` и `./cmd/agent` выбирают соответствующий пакет исходников.
 Команды рассчитаны на Go для Windows x64 без переопределённых GOOS/GOARCH.
