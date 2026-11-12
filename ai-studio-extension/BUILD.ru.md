@@ -5,8 +5,9 @@
 Команды ниже не устанавливают alpha, не меняют работающий комплект 1.4.0
 и не перезапускают рабочие процессы. Для локального режима замените и перезапустите
 агент, обновите расширение и сохранённую вкладку AI Studio; Gate не требуется,
-обновлять или перезапускать его не нужно. Старое
-расширение WebCodex Local Browser обновлять не нужно.
+обновлять или перезапускать его не нужно. Для снятия ограничений размеров
+в маршруте через Gate замените и перезапустите также Gate alpha.5 с прежней базой.
+Старое расширение WebCodex Local Browser обновлять не нужно.
 
 Нужны Go 1.25 или новее и PowerShell; Node.js нужен только для тестов расширения.
 Команды выполняются из корня этого репозитория.
@@ -28,7 +29,7 @@ node --test ai-studio-extension/*.test.cjs
 ### Необязательная проверка локального агента на Windows
 
 Сначала соберите агент командой из раздела Windows ниже. Для локального режима
-нужен только EXE агента версии `1.5.0-ai-studio-alpha.4`; Gate собирать, обновлять
+нужен только EXE агента версии `1.5.0-ai-studio-alpha.5`; Gate собирать, обновлять
 или запускать не нужно. Выполните:
 
 ```powershell
@@ -48,11 +49,11 @@ Remove-Item Env:WEBCODEX_LOCAL_REAL_TEST
 
 ### Необязательная проверка собранных Gate и агента на Windows
 
-Для этого отдельного теста нужны `webcodex-gate.exe` версии `1.5.0-ai-studio-alpha.4`
-и `webcodex-agent.exe` версии `1.5.0-ai-studio-alpha.4` в `bin/ai-studio-bridge`.
+Для этого отдельного теста нужны `webcodex-gate.exe` версии `1.5.0-ai-studio-alpha.5`
+и `webcodex-agent.exe` версии `1.5.0-ai-studio-alpha.5` в `bin/ai-studio-bridge`.
 В Git готовых EXE нет: если они отсутствуют, сначала выполните Windows-сборку из
-следующего раздела. Для текущего локального исправления собран только агент;
-Gate не обновлялся.
+следующего раздела. Для текущего исправления собраны оба EXE; работающая удалённая
+установка Gate автоматически не обновлялась.
 Следующие команды запускают локальный тест
 с временной базой Gate и без AI Studio или ключа модели. Выполните её из корня
 репозитория в PowerShell на Windows:
@@ -77,8 +78,8 @@ Remove-Item Env:WEBCODEX_BRIDGE_REAL_TEST
 
 ```powershell
 New-Item -ItemType Directory -Path bin/ai-studio-bridge -Force
-go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.4' -o bin/ai-studio-bridge/webcodex-gate.exe ./cmd/gate
-go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.4' -o bin/ai-studio-bridge/webcodex-agent.exe ./cmd/agent
+go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.5' -o bin/ai-studio-bridge/webcodex-gate.exe ./cmd/gate
+go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.5' -o bin/ai-studio-bridge/webcodex-agent.exe ./cmd/agent
 ```
 
 `New-Item` создаёт папку; `-ItemType Directory` выбирает тип «каталог», `-Path`
@@ -86,7 +87,7 @@ go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.
 уже существующую папку. `go build` компилирует программу. `-ldflags` передаёт
 заключённую в кавычки строку линковщику; `-X` устанавливает строковую переменную
 `webcodex/internal/buildinfo.Version` в указанную версию: Gate —
-`1.5.0-ai-studio-alpha.4`, агент — `1.5.0-ai-studio-alpha.4`.
+`1.5.0-ai-studio-alpha.5`, агент — `1.5.0-ai-studio-alpha.5`.
 `-o` задаёт путь готового EXE: первая команда создаёт Gate, вторая — агент.
 `./cmd/gate` и `./cmd/agent` выбирают соответствующий пакет исходников.
 Команды рассчитаны на Go для Windows x64 без переопределённых GOOS/GOARCH.
@@ -104,7 +105,7 @@ go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.
 $env:GOOS = 'linux'
 $env:GOARCH = 'amd64'
 $env:CGO_ENABLED = '0'
-go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.4' -o bin/ai-studio-bridge/webcodex-gate-linux-amd64 ./cmd/gate
+go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.5' -o bin/ai-studio-bridge/webcodex-gate-linux-amd64 ./cmd/gate
 ```
 
 Префикс `$env:` задаёт переменную окружения для этого окна и запускаемых им

@@ -6,7 +6,7 @@
   window.__webcodexBridgeDispose?.();
   window.__webcodexBridgeLoaded = true;
   const adapter=WebCodexStudio.createAdapter(document,location);
-  const contentVersion='0.3.7';
+  const contentVersion='0.3.8';
   const pageInstance=Date.now()+'-'+Math.random();
   let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, newChatPending=false, newChatRequestInFlight=false, attempted=new Set(), recoverTurn='', recoverTools=[], turnless=false, turnlessRecovery=false, observedUserText='', observedResultId='', observedContext='';
   let awaitingResponse=false, generationSeen=false, generationCounter=0, baselineModelText='';
@@ -23,6 +23,11 @@
   };
   delete window.__webcodexBridgeReattach;
   function parsedResult(text){try{const result=JSON.parse(text||'');return result?.type==='webcodex-result'&&typeof result.operation_id==='string'&&result.operation_id?result:null;}catch{return null;}}
+  async function responseKeyFor(generation,resultId,userText,modelText){
+    const digest=async text=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))),byte=>byte.toString(16).padStart(2,'0')).join('');
+    const [userHash,modelHash]=await Promise.all([digest(userText),digest(modelText)]);
+    return JSON.stringify([pageInstance,generation,resultId,userHash,modelHash]);
+  }
   function visibleResultId(user){const parsed=parsedResult(user?.text)?.operation_id,id=typeof user?.operationId==='string'&&user.operationId?user.operationId:'';return id||parsed||'';}
   function snapshot(operationId,conversationReplaced=false,expectedResultText){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser);return {supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered:operationId?resultId===operationId||adapter.hasDelivery(operationId,expectedResultText):undefined};}
   function hello(){const s=adapter.inspect();return{pageInstance,supported:s.supported,editorEmpty:s.editorEmpty,generating:s.generating,hasHistory:!!s.latestModel||!!s.latestUser,blankChat:s.supported&&s.editorEmpty&&(!s.generating||s.controlsPending)&&!s.latestModel&&!s.latestUser};}
@@ -80,7 +85,11 @@
     if(turnless&&(!awaitingResponse||!generationSeen&&model.text===baselineModelText))return;
     const recoveringTurn=!!recoverTurn;if(recoveringTurn){try{if(!WebCodexProtocol.parseCall(model.text,recoverTurn,recoverTools))return;}catch{return;}}
     if(!replySettled(s))return;
-    const marker=sessionId+'\0'+(turnless?observedResultId+'\0'+observedUserText+'\0':'')+model.text;if(attempted.has(model.text)||inFlight===marker)return;const callSession=sessionId,callGeneration=generationCounter,callContext=observedContext;inFlight=marker;try{const response=await send('studio.call',{text:model.text,conversationKey,generating:s.generating,...(turnless?{responseKey:JSON.stringify([pageInstance,generationCounter,observedResultId,observedUserText,model.text]),precedingResultId:observedResultId}:{})});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```webcodex-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
+    const marker=sessionId+'\0'+(turnless?observedResultId+'\0'+observedUserText+'\0':'')+model.text;if(attempted.has(model.text)||inFlight===marker)return;const callSession=sessionId,callGeneration=generationCounter,callContext=observedContext;inFlight=marker;try{
+      const contextFields=turnless?{responseKey:await responseKeyFor(callGeneration,observedResultId,observedUserText,model.text),precedingResultId:observedResultId}:{};
+      const current=adapter.inspect();
+      if(sessionId!==callSession||current.generating||current.latestModel?.text!==model.text||(current.latestModel?.sourceText??model.text)!==(model.sourceText??model.text)||turnless&&(callGeneration!==generationCounter||callContext!==observedContext||!awaitingResponse))return;
+      const response=await send('studio.call',{text:model.text,conversationKey,generating:false,...contextFields});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```webcodex-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
   }
   const schedule=()=>{if(retired)return;if(turnless)trackGeneration(adapter.inspect());clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(()=>{}),250);};
   document.addEventListener('click',event=>{
@@ -103,7 +112,7 @@
   window.__webcodexBridgeDispose=retire;
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
     if(retired)return;
-    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup'].includes(m.type)){reply({ok:false});return;}
+    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup','studio.captureWrite'].includes(m.type)){reply({ok:false});return;}
     if(m.type==='studio.arm'){
       const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
       if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
@@ -112,6 +121,16 @@
       sessionId=m.sessionId;conversationKey=s.conversationKey;turnless=!!m.turnless;turnlessRecovery=turnless&&!!m.recover;awaitingResponse=false;generationSeen=false;generationCounter=0;allowedFollowupId='';baselineModelText=s.latestModel?.text||'';observedUserText=s.latestUser?.text||'';observedResultId='';observedContext=JSON.stringify([observedResultId,observedUserText]);recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;newChatRequestInFlight=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
     }
     if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
+    if(m.type==='studio.captureWrite'){
+      const s=adapter.inspect();
+      if(!s.supported||s.generating||!s.latestModel){reply({ok:false,error:'Дождитесь полного ответа модели'});return;}
+      try{
+        const call=WebCodexProtocol.parseCall(s.latestModel.text,null,[m.tool]);
+        if(call?.name!=='write_file')throw Error('В последнем ответе нет единственного корректного write_file');
+        resetReply();baselineText=s.latestModel.text;lastText=baselineText;awaitingResponse=false;allowedFollowupId='';
+        reply({ok:true,text:s.latestModel.text,pageInstance,conversationKey:s.conversationKey});
+      }catch(error){reply({ok:false,error:String(error.message||error)});}return;
+    }
     if(m.type==='studio.cleanup'){if(m.final)adapter.annotateContext();if(!m.enabled)adapter.restoreCleanup();else if(m.final)adapter.cleanup({turns:[...serviceNodes],operationIds:m.operationIds||[]});reply({ok:true});return;}
     if(m.type==='studio.disarm'){resetReply();sessionId='';inFlight='';allowedFollowupId='';reply({ok:true});return;}
     if(m.type==='studio.stage'){

@@ -4,7 +4,7 @@
   if (root) root.WebCodexMCP = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '2025-06-18', LIMIT = 2 * 1024 * 1024;
+  const VERSION = '2025-06-18';
   function requestSignal(signal) {
     const deadline = AbortSignal.timeout(15000);
     return signal ? AbortSignal.any([signal, deadline]) : deadline;
@@ -21,18 +21,16 @@
     if (typeof token !== 'string' || !token) throw new Error('MCP token is required');
     const origin = url.origin;
     let nextId = 0;
-    async function readBounded(response) {
+    async function readResponse(response) {
       if (!response.body || !response.body.getReader) {
         const bytes = new TextEncoder().encode(await response.text());
-        if (bytes.length > LIMIT) throw new Error('MCP response exceeds 2 MiB');
         return new TextDecoder().decode(bytes);
       }
       const reader = response.body.getReader(), chunks = []; let size = 0;
       try {
         while (true) {
           const { done, value } = await reader.read(); if (done) break;
-          size += value.byteLength; if (size > LIMIT) { await reader.cancel(); throw new Error('MCP response exceeds 2 MiB'); }
-          chunks.push(value);
+          chunks.push(value);size+=value.byteLength;
         }
       } finally { reader.releaseLock?.(); }
       const bytes = new Uint8Array(size); let offset = 0;
@@ -47,9 +45,9 @@
       return payload.result;
     }
     async function readRpc(response, id) {
-      if (!/text\/event-stream/i.test(response.headers?.get?.('content-type') || '')) return parse(await readBounded(response), id);
-      if (!response.body?.getReader) return parse(await readBounded(response), id);
-      const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '', size = 0;
+      if (!/text\/event-stream/i.test(response.headers?.get?.('content-type') || '')) return parse(await readResponse(response), id);
+      if (!response.body?.getReader) return parse(await readResponse(response), id);
+      const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '';
       function eventResult(event) {
         const data = event.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n');
         if (!data) return null;
@@ -64,7 +62,6 @@
         while (true) {
           const { done, value } = await reader.read();
           if (value) {
-            size += value.byteLength; if (size > LIMIT) throw new Error('MCP response exceeds 2 MiB');
             buffer += decoder.decode(value, { stream: !done });
             let boundary;
             while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
@@ -89,21 +86,20 @@
     }
     async function rpc(method, params = {}, signal) { return request(method, params, signal); }
     async function initialize(signal) {
-      const result = await request('initialize', { protocolVersion: VERSION, capabilities: {}, clientInfo: { name: 'WebCodex AI Studio Bridge', version: '0.3.7' } }, signal);
+      const result = await request('initialize', { protocolVersion: VERSION, capabilities: {}, clientInfo: { name: 'WebCodex AI Studio Bridge', version: '0.3.8' } }, signal);
       const response = await fetchImpl(origin + '/mcp/v5', { method: 'POST', signal: requestSignal(signal), headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': VERSION }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }) });
       if (!response.ok || response.status !== 202) throw httpError('MCP initialized notification', response.status);
       return result;
     }
     async function listTools(signal) {
-      const all = []; let cursor;
-      for (let page = 0; page < 20; page++) {
+      const all = [],seen=new Set(); let cursor;
+      while (true) {
         const result = await rpc('tools/list', cursor ? { cursor } : {}, signal);
         if (!result || !Array.isArray(result.tools)) throw new Error('Invalid tools/list result');
-        all.push(...result.tools); if (all.length > 1000) throw new Error('MCP tool limit exceeded');
+        all.push(...result.tools);
         if (!result.nextCursor) return all;
-        cursor = result.nextCursor;
+        if(seen.has(result.nextCursor))throw Error('MCP tools pagination repeated a cursor');seen.add(result.nextCursor);cursor = result.nextCursor;
       }
-      throw new Error('MCP tools pagination limit exceeded');
     }
     async function listAgents(signal) {
       const result = await rpc('tools/call', { name: 'list_agents', arguments: {} }, signal);
@@ -121,7 +117,7 @@
     async function bridge(path, method, body, signal) {
       const response = await fetchImpl(origin + path, { method, signal: requestSignal(signal), headers: { Authorization: 'Bearer ' + token, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
       if (!response.ok) throw httpError('Bridge', response.status);
-      const text = await readBounded(response); try { return JSON.parse(text); } catch (_) { throw new Error('Invalid bridge JSON response'); }
+      const text = await readResponse(response); try { return JSON.parse(text); } catch (_) { throw new Error('Invalid bridge JSON response'); }
     }
     return { rpc, initialize, listTools, listAgents, createOperation, getOperation };
   }

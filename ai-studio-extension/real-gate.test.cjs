@@ -7,8 +7,8 @@ const { spawn } = require('node:child_process');
 const { createClient } = require('./mcp-client.js');
 
 const enabled = process.env.WEBCODEX_BRIDGE_REAL_TEST === '1';
-const gatePath = path.resolve(__dirname, '..', 'bin', 'ai-studio-bridge', 'webcodex-gate.exe');
-const agentPath = path.resolve(__dirname, '..', 'bin', 'ai-studio-bridge', 'webcodex-agent.exe');
+const gatePath = process.env.WEBCODEX_TEST_GATE_PATH || path.resolve(__dirname, '..', 'bin', 'ai-studio-bridge', 'webcodex-gate.exe');
+const agentPath = process.env.WEBCODEX_TEST_AGENT_PATH || path.resolve(__dirname, '..', 'bin', 'ai-studio-bridge', 'webcodex-agent.exe');
 
 test('compiled Gate and agent complete real bridge file operations and reconnect', { skip: !enabled || process.platform !== 'win32', timeout: 45_000 }, async t => {
   assert.ok(fs.existsSync(gatePath), 'compiled Gate binary is missing');
@@ -89,8 +89,8 @@ test('compiled Gate and agent complete real bridge file operations and reconnect
     assert.match(agent.output, /connected to Gate; agent version=\S+ gate version=\S+/);
     assert.match(gate.output, /webcodex-gate version=\S+/);
     assert.match(gate.output, /agent stream connected .*agent_version=\S+ gate_version=\S+/);
-    assert.match(agent.output, /agent version=1\.5\.0-ai-studio-alpha\.2 gate version=1\.5\.0-ai-studio-alpha\.4/);
-    assert.match(gate.output, /agent_version=1\.5\.0-ai-studio-alpha\.2 gate_version=1\.5\.0-ai-studio-alpha\.4/);
+    assert.match(agent.output, /agent version=1\.5\.0-ai-studio-alpha\.5 gate version=1\.5\.0-ai-studio-alpha\.5/);
+    assert.match(gate.output, /agent_version=1\.5\.0-ai-studio-alpha\.5 gate_version=1\.5\.0-ai-studio-alpha\.5/);
 
     phase = 'authorize extension bridge';
     const accessToken = await authorizeBridge(oauthClientId, extensionId);
@@ -119,6 +119,13 @@ test('compiled Gate and agent complete real bridge file operations and reconnect
     assert.equal(write.status, 'completed');
     assert.equal(fs.readFileSync(writtenPath, 'utf8'), 'real agent write\n');
 
+    phase='large UTF-8 file through Gate and agent';
+    const largePath=path.join(root,'large-through-gate.html'),content='code \u044f \ud83d\ude00\n'.repeat(450000);
+    assert.ok(Buffer.byteLength(content)>2*1024*1024);
+    const largeWrite=await completeOperation(client,operationKey(),'write_file',{path:largePath,content,if_absent:true});
+    assert.equal(largeWrite.status,'completed');assert.ok(fs.readFileSync(largePath,'utf8')===content,'Gate write must preserve exact contents');
+    const largeRead=await completeOperation(client,operationKey(),'read_file',{path:largePath});
+    assert.ok(largeRead.result.structuredContent.content===content,'Gate must return the full large result');
     const previousGate = gate;
     phase = 'restart Gate';
     previousGate.kill();

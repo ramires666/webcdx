@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,8 +11,6 @@ import (
 	"webcodex/internal/buildinfo"
 	"webcodex/internal/protocol"
 )
-
-const maxAgentResultBytes = 2 << 20
 
 func (s *server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	agent, _, err := s.authenticateAgent(r)
@@ -107,14 +104,8 @@ func (s *server) handleAgentResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxAgentResultBytes)
 	var result protocol.AgentResponse
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}

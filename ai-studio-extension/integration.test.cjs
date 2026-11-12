@@ -23,7 +23,7 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
   class TestDate extends Date { static now() { return clock; } }
   const chrome = {
     runtime: { id: 'test-id', getURL: p => 'chrome-extension://test-id/' + p, onMessage: { addListener: fn => { listeners.message = fn; } } },
-    storage: { session: { setAccessLevel: async () => {}, get: async k => ({ [k]: db[k] && structuredClone(db[k]) }), set: async x => { for (const [k,v] of Object.entries(x)) db[k] = structuredClone(v); } }, local: { get: async k => ({[k]:localData[k]}), set: async x => Object.assign(localData,x), remove: async k => {delete localData[k];}, setAccessLevel: async () => {} } },
+    storage: { session: { setAccessLevel: async () => {}, get: async k => ({ [k]: db[k] && structuredClone(db[k]) }), set: async x => { if(tabBehavior.sessionQuota&&JSON.stringify(x).length>tabBehavior.sessionQuota)throw Error('QUOTA_BYTES exceeded');for (const [k,v] of Object.entries(x)) db[k] = structuredClone(v); } }, local: { get: async k => ({[k]:localData[k]}), set: async x => Object.assign(localData,x), remove: async k => {delete localData[k];}, setAccessLevel: async () => {} } },
     action: { onClicked: { addListener: () => {} } }, sidePanel: { open: async () => {} }, alarms: { create: () => {}, onAlarm: { addListener: fn => { listeners.alarm = fn; } } },
     permissions: { contains: async () => true },
     tabs: { get: async id => ({ id, url: 'https://aistudio.google.com/app/prompts/test' }), sendMessage: async (id, msg) => {
@@ -750,4 +750,24 @@ test('exact next turn proves delivery directly from a paused conversation change
   assert.equal(h.createCount,1);
   assert.equal(h.calls.filter(x=>x.method==='POST')[0].body.arguments.path,'safe.txt');
   assert.equal(h.deliveryCount,0);
+});
+
+const largeWriteTool={name:'write_file',inputSchema:{type:'object',properties:{path:{type:'string'},content:{type:'string'},if_absent:{type:'boolean',const:true}},required:['path','content','if_absent'],additionalProperties:false}};
+test('an explicit save recovers a large write from the existing answer and persists past the session quota',async()=>{
+ const content='code \u044f \ud83d\ude00\n'.repeat(200000),text=JSON.stringify({v:1,name:'write_file',arguments:{path:'large.html',content,if_absent:true}});
+ const initial=saved('paused','write_file');initial.tools=[largeWriteTool];initial.session.error='Reply exceeds 64 KiB';initial.session.paused=true;
+ const h=harness(initial,{sessionQuota:65536,listTools:()=>[largeWriteTool],sendMessage:async(_id,msg)=>msg.type==='studio.captureWrite'?{ok:true,text,pageInstance:'page-large',conversationKey:'chat-1'}:{ok:true,supported:true,delivered:true,conversationKey:'chat-1'}},{bridgeAuto:{enabled:true,consent:true,autoApprove:true,agentId:'agent-1',toolNames:['write_file']}});
+ await h.status();assert.equal((await h.message({type:'bridge.saveFromReply'})).ok,true);
+ assert.equal(h.createCount,1);assert.equal(h.calls.find(call=>call.method==='POST').body.arguments.content,content);
+ assert.equal(h.db[KEY].largeState,true);assert.equal(h.localData.webcodexLargeSessionState.session.pendingCall.arguments.content,content);
+ await h.alarm();assert.equal((await h.status()).state.session.phase,'result_ready');
+});
+test('explicit file recovery never bypasses consent, selected tools or unfinished operations',async()=>{
+ for(const variant of ['consent','tool','pending']){
+  const initial=saved('paused','write_file');initial.tools=[largeWriteTool];initial.session.paused=true;
+  if(variant==='tool')initial.session.toolNames=[];
+  if(variant==='pending')initial.session.operationKey='saved-key';
+  const h=harness(initial,{listTools:()=>[largeWriteTool]},{bridgeAuto:{enabled:true,consent:variant!=='consent',agentId:'agent-1',toolNames:['write_file']}});
+  await h.status();assert.equal((await h.message({type:'bridge.saveFromReply'})).ok,false);assert.equal(h.createCount,0);
+ }
 });

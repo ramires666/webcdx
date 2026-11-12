@@ -84,7 +84,7 @@ func (w *cappedStreamWriter) Write(data []byte) (int, error) {
 	w.budget.mu.Lock()
 	defer w.budget.mu.Unlock()
 	part := data
-	if int64(len(part)) > w.budget.remaining {
+	if w.budget.remaining >= 0 && int64(len(part)) > w.budget.remaining {
 		if !w.budget.stdoutTruncated && !w.budget.stderrTruncated {
 			if w.verbose {
 				w.logf("[session=%s] LOG_LIMIT reached; further output is not saved to disk", w.sessionID)
@@ -101,7 +101,9 @@ func (w *cappedStreamWriter) Write(data []byte) (int, error) {
 	}
 	if len(part) > 0 {
 		n, err := w.file.Write(part)
-		w.budget.remaining -= int64(n)
+		if w.budget.remaining >= 0 {
+			w.budget.remaining -= int64(n)
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -179,9 +181,6 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 		stdin, err := optionalString(args, "stdin")
 		if err != nil {
 			return nil, err
-		}
-		if len(stdin) > maxStdinBytes {
-			return nil, toolErr("too_large", "stdin exceeds size limit")
 		}
 		if _, exists := args["stdin"]; exists {
 			cmd.Stdin = strings.NewReader(stdin)
@@ -434,11 +433,10 @@ func (e *nativeExecutor) pollCommand(args map[string]any, v4 bool) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	maxBytes, err := optionalInt(args, "max_bytes", 64<<10, 1, 1<<20)
+	maxBytes, err := optionalInt(args, "max_bytes", 64<<10, 1, int(^uint(0)>>1))
 	if err != nil {
 		return nil, err
 	}
-	maxBytes = min(maxBytes, e.maxResponse)
 	if v4 {
 		stdoutOffset, err := optionalInt(args, "stdout_offset", 0, 0, int(^uint(0)>>1))
 		if err != nil {

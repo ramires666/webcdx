@@ -15,8 +15,6 @@ import (
 
 const mcpProtocolVersion = "2025-06-18"
 
-const maxMCPRequestBytes = 1 << 20
-
 type jsonrpcMessage struct {
 	ID     json.RawMessage `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
@@ -73,14 +71,8 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxMCPRequestBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
 		writeRPCError(w, nil, -32700, "read request")
 		return
 	}

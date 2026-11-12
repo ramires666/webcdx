@@ -43,7 +43,7 @@ test('unknown tools, injected arguments, invalid versions and excessive nesting 
   for(const value of invalid)assert.throws(()=>parseCall(JSON.stringify(value),null,tools));
   const deep='{"v":1,"name":"exec_command","arguments":'+('['.repeat(80))+'0'+(']'.repeat(80))+'}';
   assert.equal(analyzeReply(deep).kind,'error');
-  assert.throws(()=>parseCall(JSON.stringify(call)+'x'.repeat(65536),null,tools),/64 KiB/);
+  assert.deepEqual(parseCall(JSON.stringify(call)+'x'.repeat(65536),null,tools),{name:call.name,arguments:args});
 });
 
 test('result extraction returns only complete unambiguous top-level values',()=>{

@@ -32,10 +32,9 @@ test('validates oneOf alternatives and types', () => {
   assert.doesNotThrow(()=>parseCall(block('n','exec_command',{cwd:'/',argv:['echo','ok']}),'n',tools));
   for (const args of [{path:1,content:'x',if_absent:true},{path:'x',content:'x'},{path:'x',content:'x',if_absent:true,expected_sha256:'a'.repeat(64)},{cwd:'/',command:'true',agent_id:'a'}]) assert.throws(()=>parseCall(block('n',args.agent_id?'exec_command':'write_file',args),'n',tools));
 });
-test('rejects dangerous keys and oversized replies', () => {
+test('rejects dangerous keys and unsupported schemas', () => {
   const malicious='```webcodex-call\n{"v":1,"turn":"n","name":"loose","arguments":{"nested":{"constructor":{}}}}\n```';
   assert.throws(()=>parseCall(malicious,'n',tools));
-  assert.throws(()=>parseCall('x'.repeat(65537),'n',tools));
   assert.throws(()=>parseCall(block('n','unsupported',{}),'n',tools),/Unsupported schema keyword/);
 });
 test('instructions and results retain protocol data', () => {
@@ -74,4 +73,12 @@ test('command instructions discover the agent working directory before assuming 
   const prompt=buildSystemInstructions({agentId:'windows-agent',turnless:true,tools:[...tools,{name:'list_allowed_roots',inputSchema:{type:'object',properties:{}}}]});
   assert.match(prompt,/Before the first command in this chat, call list_allowed_roots/);
   assert.match(prompt,/do not assume the operating system/);
+});
+
+test('large UTF-8 write calls retain their complete content',()=>{
+ const content=('code \u044f \ud83d\ude00\n').repeat(200000);
+ for(const turn of ['n',null]){
+  const args={path:'large.html',content,if_absent:true};
+  assert.deepEqual(parseCall(block('n','write_file',args),turn,tools),{name:'write_file',arguments:args});
+ }
 });

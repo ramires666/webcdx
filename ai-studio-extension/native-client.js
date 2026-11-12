@@ -4,7 +4,7 @@
   if (root) root.WebCodexNative = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const HOST = 'org.webcodex.studio', TIMEOUT = 15000, REQUEST_LIMIT = 1024 * 1024, RESPONSE_LIMIT = 4 * 1024 * 1024, CHUNK_LIMIT = 64;
+  const HOST = 'org.webcodex.studio', TIMEOUT = 15000;
   class NativeClientError extends Error {
     constructor(message, code) { super(message); this.name = 'NativeClientError'; this.code = code; }
   }
@@ -25,16 +25,15 @@
       const request = pending.get(frame.id);
       if (!request) { if (!issued.has(frame.id)) failAll(protocolError('Native response ID mismatch')); return; }
       if (Object.prototype.hasOwnProperty.call(frame, 'chunk')) {
-        if (typeof frame.chunk !== 'string' || !Number.isInteger(frame.index) || !Number.isInteger(frame.total) || frame.total < 1 || frame.total > CHUNK_LIMIT || frame.index < 0 || frame.index >= frame.total) { settle(request, protocolError('Invalid native response chunk')); return; }
-        if (!request.chunks) request.chunks = { total: frame.total, parts: new Array(frame.total), count: 0, size: 0 };
+        if (typeof frame.chunk !== 'string' || !Number.isInteger(frame.index) || !Number.isInteger(frame.total) || frame.total < 1 || frame.index < 0 || frame.index >= frame.total) { settle(request, protocolError('Invalid native response chunk')); return; }
+        if (!request.chunks) request.chunks = { total: frame.total, parts: new Map(), count: 0, size: 0 };
         const chunks = request.chunks;
         const size = new TextEncoder().encode(frame.chunk).byteLength;
-        if (chunks.total !== frame.total || chunks.parts[frame.index] !== undefined) { settle(request, protocolError('Inconsistent native response chunks')); return; }
+        if (chunks.total !== frame.total || chunks.parts.has(frame.index)) { settle(request, protocolError('Inconsistent native response chunks')); return; }
         chunks.size += size;
-        if (chunks.size > RESPONSE_LIMIT) { settle(request, protocolError('Native response exceeds 4 MiB')); return; }
-        chunks.parts[frame.index] = frame.chunk; chunks.count++;
+        chunks.parts.set(frame.index,frame.chunk); chunks.count++;
         if (chunks.count !== chunks.total) return;
-        let text = ''; for (const part of chunks.parts) text += part;
+        let text = ''; for(let i=0;i<chunks.total;i++)text+=chunks.parts.get(i);
         try { frame = JSON.parse(text); } catch (_) { settle(request, protocolError('Invalid chunked native JSON response')); return; }
         if (!frame || frame.id !== request.id) { settle(request, protocolError('Native response ID mismatch')); return; }
       }
@@ -54,7 +53,6 @@
       const id = String(++nextId), message = { id, method, params };
       let serialized;
       try { serialized = JSON.stringify(message); } catch (_) { return Promise.reject(protocolError('Native request is not serializable')); }
-      if (new TextEncoder().encode(serialized).byteLength > REQUEST_LIMIT) return Promise.reject(new NativeClientError('Native request exceeds 1 MiB', 'NATIVE_REQUEST_TOO_LARGE'));
       return new Promise((resolve, reject) => {
         const request = { id, resolve, reject, signal };
         request.abort = () => { if (pending.has(id)) settle(request, new NativeClientError('Native request aborted', 'NATIVE_ABORTED')); };

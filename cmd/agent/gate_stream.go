@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -43,10 +44,16 @@ func streamOnce(ctx context.Context, client *http.Client, gateURL, token string,
 	log.Printf("connected to Gate; agent version=%s gate version=%s", buildinfo.Version, gateVersion)
 	log.Printf("Агент подключён. Жду действий модели.")
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
+	reader := bufio.NewReader(resp.Body)
+	for {
+		raw, readErr := reader.ReadBytes('\n')
+		if len(raw) == 0 && readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return errors.New("stream closed")
+			}
+			return fmt.Errorf("read stream: %w", readErr)
+		}
+		line := bytes.TrimSpace(raw)
 		if len(line) == 0 {
 			continue
 		}
@@ -62,10 +69,6 @@ func streamOnce(ctx context.Context, client *http.Client, gateURL, token string,
 		}
 		go handleRequest(ctx, client, gateURL, token, runner, request)
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read stream: %w", err)
-	}
-	return errors.New("stream closed")
 }
 
 // handleRequest forwards one gate request to the MCP runner and posts the correlated result.

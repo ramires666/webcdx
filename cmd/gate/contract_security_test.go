@@ -13,7 +13,7 @@ import (
 	"webcodex/internal/protocol"
 )
 
-func TestInitializeMetadataAndBodyLimit(t *testing.T) {
+func TestInitializeMetadataAndLargePayloads(t *testing.T) {
 	srv, cleanup := setupTestServer(t)
 	defer cleanup()
 	token := "wc_mcp_contract"
@@ -41,11 +41,11 @@ func TestInitializeMetadataAndBodyLimit(t *testing.T) {
 		}
 	}
 
-	large := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(strings.Repeat("x", maxMCPRequestBytes+1)))
+	large := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"padding":"`+strings.Repeat("x", 2<<20)+`"}}`))
 	large.Header.Set("Authorization", "Bearer "+token)
 	largeRecorder := httptest.NewRecorder()
 	srv.handleMCP(largeRecorder, large)
-	if largeRecorder.Code != http.StatusRequestEntityTooLarge {
+	if largeRecorder.Code != http.StatusOK {
 		t.Fatalf("large body status = %d", largeRecorder.Code)
 	}
 
@@ -80,12 +80,12 @@ func TestInitializeMetadataAndBodyLimit(t *testing.T) {
 		t.Fatalf("non-OIDC server published OIDC metadata: status=%d", openidRecorder.Code)
 	}
 
-	largeResultBody := `{"id":"` + strings.Repeat("x", maxAgentResultBytes) + `"}`
+	largeResultBody := `{"id":"` + strings.Repeat("x", 3<<20) + `"}`
 	largeResult := httptest.NewRequest(http.MethodPost, "/agent/result", strings.NewReader(largeResultBody))
 	largeResult.Header.Set("Authorization", "Bearer agent")
 	largeResultRecorder := httptest.NewRecorder()
 	srv.handleAgentResult(largeResultRecorder, largeResult)
-	if largeResultRecorder.Code != http.StatusRequestEntityTooLarge {
+	if largeResultRecorder.Code != http.StatusNotFound {
 		t.Fatalf("large agent result status = %d", largeResultRecorder.Code)
 	}
 }

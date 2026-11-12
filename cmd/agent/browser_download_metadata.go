@@ -13,8 +13,6 @@ import (
 	"os"
 )
 
-const browserDownloadMaxBytes = 64 << 20
-
 func saveBrowserDownloadedFile(source, destination, downloadID string) (map[string]any, error) {
 	if downloadID == "" || len(downloadID) > 64 {
 		return nil, toolErr("invalid_arguments", "invalid download identifier")
@@ -23,15 +21,8 @@ func saveBrowserDownloadedFile(source, destination, downloadID string) (map[stri
 	if err != nil || !sourceInfo.Mode().IsRegular() {
 		return nil, toolErr("invalid_path", "download source is unavailable")
 	}
-	data, info, err := readRegularFile(source, browserDownloadMaxBytes)
+	data, info, err := readRegularFile(source)
 	if err != nil {
-		if errors.Is(err, errFileTooLarge) {
-			return nil, toolErr("too_large", "download exceeds the 64 MiB limit")
-		}
-		var coded *codedError
-		if errors.As(err, &coded) && coded.code == "too_large" {
-			return nil, toolErr("too_large", "download exceeds the 64 MiB limit")
-		}
 		return nil, toolErr("invalid_path", "download source could not be read")
 	}
 	if !info.Mode().IsRegular() {
@@ -49,7 +40,7 @@ func saveBrowserDownloadedFile(source, destination, downloadID string) (map[stri
 		if !destinationInfo.Mode().IsRegular() {
 			return nil, toolErr("invalid_path", "download destination is not a regular file")
 		}
-		existing, _, readErr := readRegularFile(destination, browserDownloadMaxBytes)
+		existing, _, readErr := readRegularFile(destination)
 		if readErr != nil {
 			return nil, toolErr("invalid_path", "download destination could not be read")
 		}
@@ -64,7 +55,7 @@ func saveBrowserDownloadedFile(source, destination, downloadID string) (map[stri
 		var coded *codedError
 		if errors.As(err, &coded) && coded.code == "already_exists" {
 			// Another writer won the create race. Accept only byte-identical data.
-			existing, existingInfo, readErr := readRegularFile(destination, browserDownloadMaxBytes)
+			existing, existingInfo, readErr := readRegularFile(destination)
 			if readErr != nil || !existingInfo.Mode().IsRegular() {
 				return nil, toolErr("invalid_path", "download destination is unavailable")
 			}

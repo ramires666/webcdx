@@ -42,9 +42,9 @@ func (b *browserManager) trackDownloads(s *browserSession) {
 					}
 					tooLarge := recordManagedDownload(s, method, event.GUID, event.State, int64(event.Bytes))
 					b.artifactMu.Lock()
-					size, err := b.cleanArtifacts()
+					_, err := b.cleanArtifacts()
 					b.artifactMu.Unlock()
-					tooLarge = tooLarge || err != nil || size > browserArtifactMax
+					tooLarge = tooLarge || err != nil
 					if tooLarge {
 						ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 						_ = chromedp.FromContext(s.ctx).Browser.Call(ctx, "Browser.cancelDownload", map[string]any{"guid": event.GUID}, nil)
@@ -62,7 +62,7 @@ func recordManagedDownload(s *browserSession, method, id, state string, bytes in
 	s.downloadMu.Lock()
 	defer s.downloadMu.Unlock()
 	download := s.downloads[id]
-	if download == nil && len(s.downloads) < 16 {
+	if download == nil {
 		download = &browserDownload{ID: id, Status: "running"}
 		s.downloads[id] = download
 	}
@@ -77,7 +77,7 @@ func recordManagedDownload(s *browserSession, method, id, state string, bytes in
 			download.Status = state
 		}
 	}
-	return bytes > browserDownloadMaxBytes
+	return false
 }
 
 func (b *browserManager) files(ctx context.Context, s *browserSession, t *browserTab, args map[string]any) (any, error) {
@@ -89,13 +89,10 @@ func (b *browserManager) files(ctx context.Context, s *browserSession, t *browse
 	switch action {
 	case "enable_downloads":
 		b.artifactMu.Lock()
-		size, err := b.cleanArtifacts()
+		_, err := b.cleanArtifacts()
 		b.artifactMu.Unlock()
 		if err != nil {
 			return nil, toolErr("io_error", "inspect artifacts", err)
-		}
-		if size >= browserArtifactMax {
-			return nil, toolErr("limit_reached", "browser artifact budget reached")
 		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, toolErr("io_error", "create download directory", err)
@@ -149,8 +146,8 @@ func (b *browserManager) upload(ctx context.Context, t *browserTab, args map[str
 		return nil, err
 	}
 	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 64<<20 {
-		return nil, toolErr("invalid_path", "upload requires a regular permitted file up to 64 MiB")
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, toolErr("invalid_path", "upload requires a regular permitted file")
 	}
 	locator, err := b.locator(t, args)
 	if err != nil {

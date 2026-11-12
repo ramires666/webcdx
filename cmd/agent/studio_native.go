@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,23 @@ type studioRequest struct {
 	Params map[string]any `json:"params"`
 }
 
+// Studio accepts the request frame delivered by Chrome, without a smaller file-size ceiling.
+func readStudioNativeMessage(reader io.Reader) ([]byte, error) {
+	var length uint32
+	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return nil, errors.New("empty native message")
+	}
+	data := make([]byte, int(length))
+	_, err := io.ReadFull(reader, data)
+	if err == nil && !json.Valid(data) {
+		err = errors.New("invalid native JSON")
+	}
+	return data, err
+}
+
 func studioNativeHostInvocation(args []string) bool {
 	return len(args) > 1 && args[1] == "chrome-extension://"+studioAllowedExtensionID()+"/"
 }
@@ -54,15 +72,12 @@ func runStudioNativeHost(origin string) error {
 		return err
 	}
 	for {
-		data, err := readNativeMessage(os.Stdin)
+		data, err := readStudioNativeMessage(os.Stdin)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			return err
-		}
-		if len(data) > browserBridgeMax {
-			return errors.New("request exceeds 1 MiB")
 		}
 		var req studioRequest
 		if err := json.Unmarshal(data, &req); err != nil || req.ID == "" || req.Method == "" {
@@ -188,9 +203,6 @@ func writeStudioResponse(w io.Writer, id string, result any, rpcErr *studioRPCEr
 	if err != nil {
 		return err
 	}
-	if len(payload) > 4<<20 {
-		payload, _ = json.Marshal(map[string]any{"id": id, "error": map[string]any{"code": -32000, "message": "response exceeds 4 MiB limit"}})
-	}
 	if len(payload) <= browserBridgeMax {
 		return writeNativeMessage(w, payload)
 	}
@@ -295,9 +307,7 @@ func studioOperationResult(op studioOperation) map[string]any {
 	if op.Result != nil {
 		r["result"] = op.Result
 	}
-	if data, err := json.Marshal(r); err == nil && len(data) > 4<<20 {
-		r["result"] = map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": "Operation finished, but its result exceeds the 4 MiB Studio response limit. Do not run this operation again. For files, request a smaller line range; for commands, use list_commands and poll_command with bounded output."}}}
-	}
+
 	return r
 }
 func (h *studioOperations) create(ctx context.Context, e *nativeExecutor, key, name string, args map[string]any, agentID string) (map[string]any, error) {

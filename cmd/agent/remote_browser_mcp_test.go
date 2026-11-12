@@ -180,17 +180,24 @@ func TestRemoteBrowserMCPUpstreamErrorRedirectAndBodyLimit(t *testing.T) {
 			t.Fatalf("error=%v", err)
 		}
 	})
-	t.Run("body limit", func(t *testing.T) {
+	t.Run("large body", func(t *testing.T) {
 		c, _ := remoteFixture(t, func(w http.ResponseWriter, _ *http.Request, req map[string]any) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":`))
 			id, _ := json.Marshal(req["id"])
 			_, _ = w.Write(id)
-			_, _ = w.Write([]byte(`,"result":{"padding":"` + strings.Repeat("x", remoteBrowserMaxBody) + `"}}`))
+			_, _ = w.Write([]byte(`,"result":{"padding":"` + strings.Repeat("x", 3<<20) + `"}}`))
 		})
-		if _, err := c.Tools(context.Background()); err == nil || !strings.Contains(err.Error(), "size limit") {
-			t.Fatalf("error=%v", err)
+		raw, _, err := c.request(context.Background(), "tools/call", remoteBrowserProtocolVersion, map[string]any{}, "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result struct {
+			Padding string `json:"padding"`
+		}
+		if json.Unmarshal(raw, &result) != nil || len(result.Padding) != 3<<20 {
+			t.Fatal("large remote MCP result was changed")
 		}
 	})
 }

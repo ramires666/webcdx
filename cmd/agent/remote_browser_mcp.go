@@ -16,7 +16,6 @@ import (
 	"time"
 )
 
-const remoteBrowserMaxBody = 2 << 20
 const remoteBrowserProtocolVersion = "2025-03-26"
 
 var remoteBrowserToolNames = map[string]bool{
@@ -125,12 +124,9 @@ func (c *remoteBrowserMCP) request(ctx context.Context, method, protocolVersion 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, session, fmt.Errorf("remote browser MCP request failed (HTTP %d)", resp.StatusCode)
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, remoteBrowserMaxBody+1))
+	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, session, fmt.Errorf("read remote browser MCP response: %w", err)
-	}
-	if len(b) > remoteBrowserMaxBody {
-		return nil, session, errors.New("remote browser MCP response exceeds size limit")
 	}
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		b, err = remoteBrowserSSEData(b)

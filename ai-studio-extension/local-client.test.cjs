@@ -18,7 +18,7 @@ test('discovers the first available local agent without Native Messaging or Gate
   assert.equal(client.endpoint, ENDPOINTS[1]);
   assert.equal(calls[2].request.headers['X-WebCodex-Agent'], 'agent-two');
   assert.equal(calls[2].request.headers['X-WebCodex-Extension'], 'test-extension');
-  assert.equal(JSON.parse(calls[1].request.body).params.clientInfo.version, '0.3.7');
+  assert.equal(JSON.parse(calls[1].request.body).params.clientInfo.version, '0.3.8');
   client.close();
 });
 
@@ -44,13 +44,20 @@ test('a saved session refuses an endpoint taken by another agent and does not sc
   client.close();
 });
 
-test('rejects wrong response IDs and bounded streamed responses before accepting a result', async () => {
+test('rejects wrong response IDs and preserves streamed responses above the former size limit', async () => {
   const client = createClient({ endpoint: ENDPOINTS[0], agentIdentity: 'one', fetchImpl: async () => new Response(JSON.stringify({ id: 'wrong', result: {} })) });
   await assert.rejects(client.initialize(), /ID mismatch/);
   client.close();
-  let cancelled = false;
-  const large = createClient({ endpoint: ENDPOINTS[0], agentIdentity: 'one', fetchImpl: async () => new Response(new ReadableStream({ pull(controller) { controller.enqueue(new Uint8Array(1024 * 1024)); }, cancel() { cancelled = true; } })) });
-  await assert.rejects(large.initialize(), /exceeds 4 MiB/);
-  assert.equal(cancelled, true);
+  const text='x'.repeat(5*1024*1024);
+  const large = createClient({ endpoint: ENDPOINTS[0], agentIdentity: 'one', fetchImpl: async (_url,request) => reply(request,{text}) });
+  assert.equal((await large.rpc('read')).text,text);
   large.close();
+});
+
+test('large file contents are sent without a client request ceiling',async()=>{
+  const content='x'.repeat(2*1024*1024);
+  const client=createClient({endpoint:ENDPOINTS[0],agentIdentity:'one',fetchImpl:async(_url,request)=>{
+    assert.equal(JSON.parse(request.body).params.arguments.content,content);return reply(request,{status:'completed'});
+  }});
+  assert.equal((await client.createOperation({key:'large',name:'write_file',arguments:{path:'large.html',content,if_absent:true},agentId:'local'})).status,'completed');client.close();
 });

@@ -27,7 +27,7 @@ test('initialize and RPC use string IDs and expose requested operation methods',
   h.client.close();
 });
 
-test('reassembles out-of-order UTF-8 chunks and enforces response bounds', async () => {
+test('reassembles out-of-order UTF-8 chunks and preserves large responses', async () => {
   const h = harness(), promise = h.client.rpc('hello');
   const json = JSON.stringify({ id: '1', result: { text: 'snowman ☃ and emoji 🧪' } });
   const split = Math.floor(json.length / 2);
@@ -35,8 +35,11 @@ test('reassembles out-of-order UTF-8 chunks and enforces response bounds', async
   h.reply({ id: '1', chunk: json.slice(0, split), index: 0, total: 2 });
   assert.deepEqual(await promise, { text: 'snowman ☃ and emoji 🧪' });
   const huge = h.client.rpc('large');
-  h.reply({ id: '2', chunk: 'x'.repeat(4 * 1024 * 1024 + 1), index: 0, total: 1 });
-  await assert.rejects(huge, /exceeds 4 MiB/);
+  const text='x'.repeat(5*1024*1024);
+  const payload=JSON.stringify({id:'2',result:{text}}),total=Math.ceil(payload.length/60000);
+  assert.ok(total>64);
+  for(let index=total-1;index>=0;index--)h.reply({id:'2',chunk:payload.slice(index*60000,(index+1)*60000),index,total});
+  assert.deepEqual(await huge,{text});h.client.close();
 });
 
 test('disconnect fails pending calls and never retries or replays', async () => {
@@ -73,7 +76,7 @@ test('duplicate chunks clean up the request and leave other calls usable', async
   h.client.close();
 });
 
-test('times out without replaying and rejects oversized requests before dispatch', async () => {
+test('times out without replaying and sends large requests without a client ceiling', async () => {
   const realSetTimeout = global.setTimeout, realClearTimeout = global.clearTimeout;
   const timers = [];
   global.setTimeout = (fn) => { const timer = { fn, cleared: false }; timers.push(timer); return timer; };
@@ -83,8 +86,9 @@ test('times out without replaying and rejects oversized requests before dispatch
     timers.at(-1).fn();
     await assert.rejects(pending, error => error.code === 'NATIVE_TIMEOUT');
     assert.equal(h.port.sent.length, 1);
-    await assert.rejects(h.client.rpc('big', { value: 'x'.repeat(1024 * 1024) }), error => error.code === 'NATIVE_REQUEST_TOO_LARGE');
-    assert.equal(h.port.sent.length, 1);
+    const value='x'.repeat(2*1024*1024),large=h.client.rpc('big',{value});
+    assert.equal(h.port.sent[1].params.value,value);h.reply({id:'2',result:'ok'});assert.equal(await large,'ok');
+    assert.equal(h.port.sent.length, 2);
     h.client.close();
   } finally { global.setTimeout = realSetTimeout; global.clearTimeout = realClearTimeout; }
 });

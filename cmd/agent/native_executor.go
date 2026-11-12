@@ -20,11 +20,8 @@ import (
 )
 
 const (
-	maxReadBytes       = 10 << 20
-	maxSearchFileBytes = 10 << 20
-	maxStdinBytes      = 10 << 20
 	defaultResponseMax = 256 << 10
-	defaultLogMax      = 50 << 20
+	defaultLogMax      = -1
 	contractMarker     = "_webcodex_contract"
 )
 
@@ -611,7 +608,7 @@ func truncateUTF8(value string, maxBytes int) (string, bool) {
 }
 
 func isBinary(data []byte) bool {
-	// File readers already enforce a size limit and return complete buffers.
+	// File readers return complete buffers; validate UTF-8 across the entire file.
 	// Sampling can split a UTF-8 rune and incorrectly reject valid text.
 	return bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data)
 }

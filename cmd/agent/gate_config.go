@@ -32,7 +32,7 @@ func loadAllowedRoots(ctx context.Context, client *http.Client, gateURL, token s
 		return "", fmt.Errorf("agent config status %s", resp.Status)
 	}
 	var config protocol.AgentConfig
-	if err := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 64<<10)).Decode(&config); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(config.AllowedRoots) == "" {

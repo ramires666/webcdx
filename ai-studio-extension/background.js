@@ -1,16 +1,27 @@
 importScripts('protocol.js', 'mcp-client.js', 'local-client.js');
-const KEY = 'webcodexState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
+const KEY = 'webcodexState', LARGE_KEY='webcodexLargeSessionState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
 let state = {connected:false,transport:'',localError:'',gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',transport:'',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
 let token = '', client = null, localClient = null, gateClient = null, serial = Promise.resolve(), demo = false, connecting = false, lastAutoRefresh = 0, lastAutoRefreshOK = false, autoToolsAvailable = true;
 const uuid = () => crypto.randomUUID();
 const clone = x => JSON.parse(JSON.stringify(x));
 function publicState() { const s=clone(state); delete s.accessToken; s.connecting=connecting; return s; }
-async function save() { await chrome.storage.session.set({[KEY]:state});if(state.connected&&state.accessToken&&!state.demoMode)await chrome.storage.local.set({bridgeAuth:{gateUrl:state.gateUrl,clientId:state.clientId,accessToken:state.accessToken}}); }
+async function save() {
+  try {await chrome.storage.session.set({[KEY]:state});await chrome.storage.local.remove?.(LARGE_KEY);}
+  catch(error){
+    if(!/quota|QUOTA_BYTES|size/i.test(String(error.message||error)))throw error;
+    // Session storage has a Chrome-owned quota; keep large operation payloads in
+    // extension-local storage with unlimitedStorage and a session-only pointer.
+    await chrome.storage.local.set({[LARGE_KEY]:state});
+    await chrome.storage.session.set({[KEY]:{largeState:true}});
+  }
+  if(state.connected&&state.accessToken&&!state.demoMode)await chrome.storage.local.set({bridgeAuth:{gateUrl:state.gateUrl,clientId:state.clientId,accessToken:state.accessToken}});
+}
 function enqueue(fn) { const p=serial.then(fn); serial=p.catch(()=>{}); return p; }
 async function restore() {
   try {
     const data=await chrome.storage.session.get(KEY);
-    if(data[KEY])state=data[KEY];
+    if(data[KEY]?.largeState){const large=await chrome.storage.local.get(LARGE_KEY);if(!large[LARGE_KEY])throw Error('Saved operation payload is unavailable');state=large[LARGE_KEY];}
+    else if(data[KEY])state=data[KEY];
     if(state.session.conversationKey?.startsWith('/'))state.session.conversationKey='active-chat';
     delete state.session.temporaryConversationKey;
     const {bridgeAuto}=await chrome.storage.local.get('bridgeAuto');state.autoSettings=bridgeAuto?{...bridgeAuto,autoApprove:!!bridgeAuto.autoApprove}:{enabled:false,autoApprove:false};
@@ -155,6 +166,20 @@ async function command(m) {
         if(state.session.phase==='ready'&&state.session.pendingCall&&!state.session.operationKey&&!state.session.operationId&&!state.session.resultText)await dispatch();
       }
       break;
+    case 'bridge.saveFromReply': {
+      const s=state.session,tool=state.tools.find(t=>t.name==='write_file');
+      if(!state.connected||state.autoSettings?.consent!==true||!s.toolNames?.includes('write_file')||!tool)throw Error('Выберите write_file и разрешите операции с локальным агентом');
+      if(!['waiting_model','ready','paused'].includes(s.phase)||s.resumeBlocked||s.pendingCall||s.operationId||s.operationKey||s.resultText||s.error?.includes('outcome is unknown'))throw Error('Сначала завершите проверку предыдущей операции');
+      const captured=await chrome.tabs.sendMessage(s.tabId,{type:'studio.captureWrite',sessionId:s.sessionId,tool});
+      if(!captured?.ok||captured.conversationKey!==s.conversationKey)throw Error(captured?.error||'Не удалось прочитать последний ответ в текущем чате');
+      const call=WebCodexProtocol.parseCall(captured.text,null,[tool]);
+      if(call?.name!=='write_file')throw Error('В последнем ответе нет корректного write_file');
+      const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(captured.text));
+      const recoveryId=captured.pageInstance+':'+Array.from(new Uint8Array(digest),n=>n.toString(16).padStart(2,'0')).join('');
+      if(s.lastRecoveredFile===recoveryId)break;
+      s.lastRecoveredFile=recoveryId;s.paused=false;s.userPaused=false;s.pausedPhase='';s.error='';s.pendingCall={...call,turn:s.turn};
+      await dispatch();break;
+    }
     case 'bridge.stop': await disableAuto();await stop();break;
     default: throw Error('Unknown bridge command');
   }
@@ -173,7 +198,7 @@ async function connect({gateUrl,clientId,configureGate=false}) {
   const auth=new URL('/bridge/v1/authorize',url);Object.entries({client_id:clientId,redirect_uri:redirect,response_type:'code',state:nonce,code_challenge:challenge,code_challenge_method:'S256'}).forEach(([k,v])=>auth.searchParams.set(k,v));
   const returned=await chrome.identity.launchWebAuthFlow({url:auth.href,interactive:true}), callback=new URL(returned);
   if(callback.origin+callback.pathname!==redirect || callback.searchParams.get('state')!==nonce || callback.searchParams.get('iss')!==url.origin || !callback.searchParams.get('code')) throw Error('OAuth response verification failed');
-  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);let response,text;try{response=await fetch(url.origin+'/bridge/v1/token',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:clientId,code:callback.searchParams.get('code'),redirect_uri:redirect,code_verifier:verifier})});if(!response.ok)throw Error('OAuth token exchange failed');text=await readLimited(response,65536);}finally{clearTimeout(timeout);}let data;try{data=JSON.parse(text);}catch{throw Error('Invalid OAuth response');}if(typeof data.access_token!=='string'||!data.access_token)throw Error('OAuth response missing access token');
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);let response,text;try{response=await fetch(url.origin+'/bridge/v1/token',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:clientId,code:callback.searchParams.get('code'),redirect_uri:redirect,code_verifier:verifier})});if(!response.ok)throw Error('OAuth token exchange failed');text=await response.text();}finally{clearTimeout(timeout);}let data;try{data=JSON.parse(text);}catch{throw Error('Invalid OAuth response');}if(typeof data.access_token!=='string'||!data.access_token)throw Error('OAuth response missing access token');
     const gateToken=data.access_token,configuredGate=WebCodexMCP.createClient({baseUrl:url.origin,token:gateToken}),init=await configuredGate.initialize();
   if(configureGate&&state.transport==='local'){
     const gateAgents=await configuredGate.listAgents(),{bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');if(!settings.gateAgentId&&gateAgents.filter(a=>a.online!==false).length===1)settings.gateAgentId=String(gateAgents.find(a=>a.online!==false).id??gateAgents.find(a=>a.online!==false).name);await chrome.storage.local.set({bridgeAuto:settings});await configuredGate.close?.();gateClient=WebCodexMCP.createClient({baseUrl:url.origin,token:gateToken});token=gateToken;state.accessToken=token;state.gateUrl=url.origin;state.clientId=clientId;state.gateVersion=init?.serverInfo?.version||'';state.connected=true;state.transport='local';client=localClient;await chrome.storage.local.set({bridgeAuth:{gateUrl:url.origin,clientId,accessToken:gateToken}});return;
@@ -281,7 +306,6 @@ async function reattachDelivery(sender,m){
     return {accepted:true};
   }catch(e){s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.error='Could not check delivery in AI Studio; the saved result will not be sent again';if(unsentSizeResult)retainUnsent();await save();return {accepted:false};}
 }
-async function readLimited(response,limit){if(!response.body?.getReader){const text=await response.text();if(new TextEncoder().encode(text).length>limit)throw Error('OAuth response exceeds 64 KiB');return text;}const reader=response.body.getReader(),chunks=[];let size=0;try{while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>limit){await reader.cancel();throw Error('OAuth response exceeds 64 KiB');}chunks.push(part.value);}}finally{reader.releaseLock?.();}const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return new TextDecoder().decode(bytes);}
 async function armPage(tabId,message){
   try{return await chrome.tabs.sendMessage(tabId,message);}catch(e){
     if(!/Receiving end does not exist|Could not establish connection/i.test(String(e.message||e)))throw e;
@@ -309,7 +333,7 @@ async function arm(m) {
   } catch(e){await chrome.tabs.sendMessage(m.tabId,{type:'studio.disarm',sessionId:state.session.sessionId}).catch(()=>{});state.session.phase='stopped';state.session.error=String(e.message||e);await save();throw e;}
 }
 async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});state.session={phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null};await save();}
-async function stageInstructions({ensureOnly=false}={}){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=ensureOnly||s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');if(new TextEncoder().encode(s.instructions).length>65536)throw Error('Selected tools and instructions exceed 64 KiB; select fewer tools.');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text,...(ensureOnly?{ensureOnly:true}:{})});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
+async function stageInstructions({ensureOnly=false}={}){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=ensureOnly||s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text,...(ensureOnly?{ensureOnly:true}:{})});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
   if(m.type==='studio.ensureInstructions'){

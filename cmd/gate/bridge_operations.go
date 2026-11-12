@@ -19,11 +19,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	bridgeOperationBodyLimit   = 64 << 10
-	bridgeOperationResultLimit = 2 << 20
-)
-
 var bridgeOperationKey = regexp.MustCompile(`^[0-9]{1,16}-[0-9a-fA-F-]{36}$`)
 
 type bridgeOperation struct {
@@ -79,14 +74,8 @@ func (s *server) handleBridgeCreateOperation(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "origin denied", 403)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, bridgeOperationBodyLimit)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
 		http.Error(w, "invalid request body", 400)
 		return
 	}
@@ -324,10 +313,6 @@ func (s *server) runBridgeOperation(token, id string, req bridgeOperationRequest
 			message = toolResult.Content[0].Text
 		}
 	}
-	if len(response) > bridgeOperationResultLimit {
-		s.finishBridgeOperation(ctx, id, "outcome_unknown", nil, "result exceeded storage limit")
-		return
-	}
 	result := envelope.Result
 	if status == "failed" {
 		var rpcError struct {
@@ -343,11 +328,6 @@ func (s *server) runBridgeOperation(token, id string, req bridgeOperationRequest
 }
 
 func (s *server) finishBridgeOperation(ctx context.Context, id, status string, result json.RawMessage, message string) {
-	if len(result) > bridgeOperationResultLimit {
-		status = "outcome_unknown"
-		result = nil
-		message = "result exceeded storage limit"
-	}
 	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	res, err := s.store.db.ExecContext(writeCtx, `UPDATE bridge_operations SET status=?,result=?,error=? WHERE id=? AND status='dispatching'`, status, nullBytes(result), nullString(message), id)

@@ -94,7 +94,7 @@
         const char=text[j];
         if(inside){if(escaped)escaped=false;else if(char==='\\')escaped=true;else if(char==='"')inside=false;continue;}
         if(char==='"'){inside=true;continue;}
-        if(char==='{'||char==='['){stack.push(char);if(stack.length>64){error='JSON nesting exceeds 64 levels';end=text.length;break;}}
+        if(char==='{'||char==='['){stack.push(char);}
         else if(char==='}'||char===']'){
           if(stack.pop()!==(char==='}'?'{':'[')){error='mismatched JSON brackets';end=j+1;break;}
           if(!stack.length){end=j+1;error='';break;}
@@ -127,19 +127,25 @@
     const {segments}=jsonSegments(String(text));
     return segments.some(part=>part.error||!uniqueJSONKeys(part.raw))?[]:segments.map(part=>part.value);
   }
+  function outsideRanges(text,ranges){
+    let end=0;const parts=[];
+    for(const [start,next]of ranges.sort((a,b)=>a[0]-b[0])){
+      if(start>end)parts.push(text.slice(end,start));
+      end=Math.max(end,next);
+    }
+    parts.push(text.slice(end));return parts.join('\n');
+  }
   function analyzeReply(text){
     text=String(text||'');
-    if(new TextEncoder().encode(text).length>65536)return{kind:'error',error:'Reply exceeds 64 KiB'};
     const {segments,quoted}=jsonSegments(text);
     const callLike=part=>part.error
       ? /"v"\s*:/.test(part.raw)&&/"(?:name|arguments)"\s*:/.test(part.raw)
       : part.value&&typeof part.value==='object'&&!Array.isArray(part.value)&&Object.hasOwn(part.value,'v')&&(Object.hasOwn(part.value,'name')||Object.hasOwn(part.value,'arguments'));
     const candidates=segments.filter(callLike);
-    const outside=text.split('');for(const part of segments)for(let i=part.start;i<part.end;i++)outside[i]=' ';
-    const remainder=outside.join('');
+    const ranges=segments.map(part=>[part.start,part.end]);
+    const remainder=outsideRanges(text,ranges);
     const dangling=/"v"\s*:/.test(remainder)&&/"name"\s*:/.test(remainder)&&/"arguments"\s*:/.test(remainder);
-    const mask=text.split('');for(const [start,end] of [...quoted,...segments.map(part=>[part.start,part.end])])for(let i=start;i<end;i++)if(mask[i]!=='\n')mask[i]=' ';
-    const explicit=/(?:^|\n)[ \t]*(?:`{3,}|~{3,})[ \t]*webcodex-call\b/i.test(mask.join(''));
+    const explicit=/(?:^|\n)[ \t]*(?:`{3,}|~{3,})[ \t]*webcodex-call\b/i.test(outsideRanges(text,[...quoted,...ranges]));
     if(!candidates.length)return explicit||dangling?{kind:'error',error:'Tool call block contains no complete v1 envelope'}:{kind:'none'};
     // Ordinary prose may contain [links] or {placeholders}; malformed JSON wrappers
     // still consume their contents and can never expose a nested call for execution.
@@ -153,7 +159,6 @@
     return{kind:'call',call,raw:part.raw};
   }
   function parseCall(text, expectedTurn, tools) {
-    if (new TextEncoder().encode(text).length > 65536) fail('Reply exceeds 64 KiB');
     const turnless = expectedTurn === null;
     let call;
     if(turnless){const found=analyzeReply(text);if(found.kind==='none')return null;if(found.kind==='error')fail(found.error);call=found.call;}

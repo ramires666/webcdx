@@ -5,16 +5,14 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const ENDPOINTS = Array.from({ length: 10 }, (_, i) => `http://127.0.0.1:${47831 + i}`);
-  const LIMIT = 4 * 1024 * 1024;
   function unavailable(message) { const error = Error(message); error.code = 'NATIVE_DISCONNECTED'; return error; }
-  function createClient({ fetchImpl = globalThis.fetch, extensionId = globalThis.chrome?.runtime?.id, version = '0.3.7', endpoint = '', agentIdentity = '' } = {}) {
+  function createClient({ fetchImpl = globalThis.fetch, extensionId = globalThis.chrome?.runtime?.id, version = '0.3.8', endpoint = '', agentIdentity = '' } = {}) {
     if (endpoint && !ENDPOINTS.includes(endpoint)) throw Error('Invalid saved local endpoint');
     let selected = endpoint, identity = agentIdentity, nextId = 0, closed = false;
     const active = new Set();
     async function request(base, method, params, signal, timeout = 15000) {
       if (closed) throw unavailable('Local client closed');
       const body = JSON.stringify({ id: String(++nextId), method, params });
-      if (new TextEncoder().encode(body).byteLength > 1024 * 1024) throw Error('Local request exceeds 1 MiB');
       const controller = new AbortController(); active.add(controller);
       const abort = () => controller.abort();
       if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
@@ -25,10 +23,10 @@
         if (!response.ok) throw unavailable(response.status === 409 ? 'The saved local agent is unavailable; another agent will not receive its operations' : `Local agent HTTP ${response.status}`);
         let text = '';
         if (response.body?.getReader) {
-          const reader = response.body.getReader(), decoder = new TextDecoder(); let size = 0;
-          try { while (true) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > LIMIT) { await reader.cancel(); throw Error('Local response exceeds 4 MiB'); } text += decoder.decode(value, { stream: true }); } text += decoder.decode(); }
+          const reader = response.body.getReader(), decoder = new TextDecoder();
+          try { while (true) { const { done, value } = await reader.read(); if (done) break; text += decoder.decode(value, { stream: true }); } text += decoder.decode(); }
           finally { reader.releaseLock(); }
-        } else { text = await response.text(); if (new TextEncoder().encode(text).byteLength > LIMIT) throw Error('Local response exceeds 4 MiB'); }
+        } else { text = await response.text(); }
         const frame = JSON.parse(text);
         if (frame?.id !== JSON.parse(body).id) throw Error('Local response ID mismatch');
         if (frame.error) { const error = Error(frame.error.message || 'Local RPC failed'); error.code = frame.error.code; throw error; }

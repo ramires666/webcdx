@@ -30,11 +30,12 @@ test('rpc sends authenticated JSON-RPC and rejects bad HTTP, RPC errors, and IDs
   const http = clientWith(() => response('{}', { status: 503 }));
   await assert.rejects(http.client.rpc('x'), /HTTP error 503/);
 });
-test('reads matching SSE data events and enforces response byte limit', async () => {
+test('reads matching SSE data events and preserves large JSON responses', async () => {
   const { client } = clientWith(() => response('event: ping\ndata: {"jsonrpc":"2.0","id":99,"result":{}}\n\nevent: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"ok":1}}\n\n', { type: 'text/event-stream' }));
   assert.deepEqual(await client.rpc('x'), { ok: 1 });
-  const tooBig = clientWith(() => response('x'.repeat(2 * 1024 * 1024 + 1)));
-  await assert.rejects(tooBig.client.rpc('x'), /exceeds 2 MiB/);
+  const text='x'.repeat(3*1024*1024);
+  const large = clientWith(() => rpcResult({text}));
+  assert.deepEqual(await large.client.rpc('x'),{text});
 });
 test('returns a matching SSE RPC result without waiting for the stream to close', async () => {
   let cancelled = false;

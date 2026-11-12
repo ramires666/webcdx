@@ -135,7 +135,7 @@ func studioLocalHandler(e *nativeExecutor, operations *studioOperations, allowed
 			return
 		}
 		var req studioRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, browserBridgeMax))
+		decoder := json.NewDecoder(r.Body)
 		if err := decoder.Decode(&req); err != nil || req.ID == "" || req.Method == "" {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
@@ -162,8 +162,8 @@ func studioLocalHandler(e *nativeExecutor, operations *studioOperations, allowed
 			response = map[string]any{"id": req.ID, "error": rpcErr}
 		}
 		data, err := json.Marshal(response)
-		if err != nil || len(data) > 4<<20 {
-			data, _ = json.Marshal(map[string]any{"id": req.ID, "error": studioRPCError{-32000, "response exceeds 4 MiB limit"}})
+		if err != nil {
+			data, _ = json.Marshal(map[string]any{"id": req.ID, "error": studioRPCError{-32000, "cannot encode response"}})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(data)

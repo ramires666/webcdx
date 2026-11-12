@@ -103,7 +103,7 @@ func TestSaveBrowserDownloadedFileDuplicateAndConflictNeverOverwrite(t *testing.
 	}
 }
 
-func TestSaveBrowserDownloadedFileRejectsInvalidAndOversizedSources(t *testing.T) {
+func TestSaveBrowserDownloadedFileRejectsInvalidSourcesAndPreservesLargeDownloads(t *testing.T) {
 	_, root := downloadMetadataTestPaths(t)
 	destination := filepath.Join(root, "invalid-target")
 	directory := filepath.Join(root, "directory-source")
@@ -118,19 +118,22 @@ func TestSaveBrowserDownloadedFileRejectsInvalidAndOversizedSources(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := file.Truncate(browserDownloadMaxBytes + 1); err != nil {
+	if err := file.Truncate((64 << 20) + 1); err != nil {
 		file.Close()
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, err = saveBrowserDownloadedFile(oversized, destination, "oversized-id")
-	var coded *codedError
-	if !errors.As(err, &coded) || coded.code != "too_large" {
-		t.Fatalf("oversized source should return too_large, got %v", err)
+	result, err := saveBrowserDownloadedFile(oversized, destination, "oversized-id")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(destination); !os.IsNotExist(err) {
-		t.Fatalf("invalid download created destination: %v", err)
+	info, err := os.Stat(destination)
+	if err != nil || info.Size() != (64<<20)+1 {
+		t.Fatalf("large download not saved: %v", err)
+	}
+	if result["bytes"] != int(info.Size()) {
+		t.Fatal("download length changed")
 	}
 }

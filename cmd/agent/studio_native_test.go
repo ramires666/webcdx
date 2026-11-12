@@ -132,18 +132,14 @@ func TestStudioChunkFramesStayWithinNativeLimit(t *testing.T) {
 	}
 }
 
-func TestStudioOversizedOperationResultIsBoundedWithoutChangingStatus(t *testing.T) {
+func TestStudioLargeOperationResultPreservesContentAndStatus(t *testing.T) {
 	op := studioOperation{ID: studioOperationID("large"), Status: "completed", Result: map[string]any{"text": string(make([]byte, 5<<20))}}
 	result := studioOperationResult(op)
 	if result["status"] != "completed" {
 		t.Fatalf("status changed: %#v", result)
 	}
-	encoded, _ := json.Marshal(result)
-	if len(encoded) > 4<<20 {
-		t.Fatalf("still oversized: %d", len(encoded))
-	}
-	if !strings.Contains(string(encoded), "Do not run this operation again") {
-		t.Fatal("missing safe recovery instruction")
+	if result["result"].(map[string]any)["text"] != op.Result.(map[string]any)["text"] {
+		t.Fatal("large result content changed")
 	}
 }
 

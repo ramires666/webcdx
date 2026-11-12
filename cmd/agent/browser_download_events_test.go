@@ -13,7 +13,7 @@ func TestBrowserDownloadProgressBeforeBeginNeverCancelsCompletedFile(t *testing.
 	if s.downloads["file"].Status != "completed" || s.downloads["file"].Bytes != 1234 {
 		t.Fatalf("late begin reset download metadata: %+v", s.downloads["file"])
 	}
-	if !recordManagedDownload(s, "Browser.downloadProgress", "large", "inProgress", browserDownloadMaxBytes+1) {
-		t.Fatal("oversized download was not cancelled")
+	if recordManagedDownload(s, "Browser.downloadProgress", "large", "inProgress", 65<<20) {
+		t.Fatal("large download was incorrectly cancelled")
 	}
 }

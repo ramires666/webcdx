@@ -21,7 +21,7 @@ function createPanel(store = {}, options = {}) {
   const document = { activeElement: null, getElementById(id) { if (!els.has(id)) els.set(id, new Element(id)); return els.get(id); }, createElement() { return new Element(); } };
   let snapshot = { connected: false, session: { phase: 'idle', paused: false }, tools: [], agents: [], autoSettings: store.autoSettings }, failAction = false, poll, connectCount = 0;
   const messages = [];
-  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.7'}), lastError: null, sendMessage(msg, cb) {
+  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.8'}), lastError: null, sendMessage(msg, cb) {
     messages.push(msg);
     if (msg.type === 'bridge.status') return cb({ ok: true, state: snapshot });
     if (msg.type === 'bridge.preferences') { store.autoSettings = msg; snapshot.autoSettings = msg; return cb({ ok: true, state: snapshot }); }
@@ -257,4 +257,11 @@ test('connect stays locked across status polls, ignores duplicate clicks, and un
   assert.equal(p.get('demo').disabled, false);
   assert.equal(p.get('disconnect').disabled, true);
   assert.equal(p.get('error').textContent, 'Login failed');
+});
+
+test('file recovery has an explicit action and is blocked while an operation is unfinished',async()=>{
+ const p=createPanel(),snapshot={connected:true,autoSettings:{consent:true},session:{phase:'waiting_model',toolNames:['write_file']},tools:[],agents:[]};
+ await p.update(snapshot);assert.equal(p.get('save-from-reply').disabled,false);
+ await p.click('save-from-reply');assert.equal(p.messages.at(-1).type,'bridge.saveFromReply');
+ await p.update({...snapshot,session:{...snapshot.session,operationKey:'pending'}});assert.equal(p.get('save-from-reply').disabled,true);
 });

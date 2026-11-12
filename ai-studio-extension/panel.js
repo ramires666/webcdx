@@ -97,6 +97,7 @@
     $('deliver').disabled = !session.resultText || session.phase !== 'result_ready' || session.paused;
     $('pause').disabled = !session.phase || ['idle', 'stopped'].includes(session.phase) || session.paused;
     $('resume').disabled = !session.phase || !session.paused || session.resumeBlocked;
+    $('save-from-reply').disabled = !next.connected || !$('consent').checked || !session.toolNames?.includes('write_file') || !['waiting_model','ready','paused'].includes(session.phase) || !!session.resumeBlocked || !!(session.pendingCall||session.operationId||session.operationKey||session.resultText);
     $('stop').disabled = !session.phase || ['idle', 'stopped'].includes(session.phase);
   }
   async function act(type, payload = {}) {
@@ -134,6 +135,7 @@
   $('deliver').addEventListener('click', () => act('bridge.deliver', { submit: true }));
   $('pause').addEventListener('click', () => act('bridge.pause'));
   $('resume').addEventListener('click', () => act('bridge.resume'));
+  $('save-from-reply').addEventListener('click', () => act('bridge.saveFromReply'));
   $('stop').addEventListener('click', () => act('bridge.stop'));
   function savePreferences(field) {
     editedPreferences.add(field);

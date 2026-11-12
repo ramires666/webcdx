@@ -30,7 +30,7 @@ function harness({manualClock=false}={}) {
   const window = {}; window.top = window;
   class MutationObserver { constructor(callback) { observerCallback = callback; } observe() {} disconnect() { disconnected = true; } }
   const context = { window, location: new URL('https://aistudio.google.com/app/prompts/one'), document, chrome, WebCodexStudio: { createAdapter: () => adapter }, MutationObserver,
-    setTimeout: (fn,ms=0) => { const id = ++timerId; timers.set(id, {fn,at:now+ms}); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, Date:TestDate, TextEncoder, structuredClone, WebCodexProtocol };
+    setTimeout: (fn,ms=0) => { const id = ++timerId; timers.set(id, {fn,at:now+ms}); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, Date:TestDate, TextEncoder, structuredClone, crypto:{subtle:{digest:async(_algorithm,data)=>require('node:crypto').createHash('sha256').update(data).digest()}}, WebCodexProtocol };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const send = message => new Promise(resolve => listeners.message(message, {}, response => resolve(structuredClone(response))));
   const flush = async () => {
@@ -517,4 +517,15 @@ test('a delivered result anchors one fast automatic followup without replaying h
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
   h.state.latestModel={text:'historical call'};h.mutate();await h.flush();
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
+});
+
+test('explicit capture reads only a complete selected write_file without replaying chat history',async()=>{
+ const h=harness(),tool={name:'write_file',inputSchema:{type:'object',properties:{path:{type:'string'},content:{type:'string'},if_absent:{type:'boolean'}},required:['path','content','if_absent'],additionalProperties:false}};
+ const content='code\n'.repeat(300000),text=JSON.stringify({v:1,name:'write_file',arguments:{path:'large.html',content,if_absent:true}});
+ h.state.latestModel={text};await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+ const captured=await h.send({type:'studio.captureWrite',sessionId:'s1',tool});assert.equal(captured.ok,true);assert.equal(JSON.parse(captured.text).arguments.content,content);
+ h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
+ h.state.generating=true;assert.equal((await h.send({type:'studio.captureWrite',sessionId:'s1',tool})).ok,false);
+ h.state.generating=false;h.state.latestModel={text:JSON.stringify({v:1,name:'exec_command',arguments:{}})};
+ assert.equal((await h.send({type:'studio.captureWrite',sessionId:'s1',tool})).ok,false);
 });

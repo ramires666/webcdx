@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,8 +15,6 @@ import (
 	"strings"
 )
 
-var errFileTooLarge = errors.New("file exceeds size limit")
-
 func (e *nativeExecutor) readFile(args map[string]any) (any, error) {
 	if err := onlyArgs(args, "path", "offset", "limit"); err != nil {
 		return nil, err
@@ -31,7 +27,7 @@ func (e *nativeExecutor) readFile(args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, _, err := readRegularFile(path, maxReadBytes)
+	data, _, err := readRegularFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -53,27 +49,12 @@ func (e *nativeExecutor) readFile(args map[string]any) (any, error) {
 		lines = lines[:len(lines)-1]
 	}
 	start := min(offset-1, len(lines))
-	requestedEnd := min(start+limit, len(lines))
-	end := start
-	var content strings.Builder
-	byteTruncated := false
-	for end < requestedEnd {
-		line := lines[end]
-		if content.Len()+len(line) > e.maxResponse {
-			if content.Len() == 0 {
-				line, _ = truncateUTF8(line, e.maxResponse)
-				content.WriteString(line)
-				end++
-			}
-			byteTruncated = true
-			break
-		}
-		content.WriteString(line)
-		end++
-	}
+	requestedEnd := start + min(limit, len(lines)-start)
+	end := requestedEnd
+	content := strings.Join(lines[start:end], "")
 	return map[string]any{
-		"path": path, "content": content.String(), "sha256": hashBytes(data), "size": len(data), "offset": offset,
-		"line_count": end - start, "next_offset": end + 1, "truncated": end < len(lines) || byteTruncated,
+		"path": path, "content": content, "sha256": hashBytes(data), "size": len(data), "offset": offset,
+		"line_count": end - start, "next_offset": end + 1, "truncated": end < len(lines),
 	}, nil
 }
 
@@ -96,9 +77,6 @@ func (e *nativeExecutor) writeFile(args map[string]any, requirePrecondition bool
 	content, ok := args["content"].(string)
 	if !ok {
 		return nil, toolErr("invalid_arguments", "content must be a string")
-	}
-	if len(content) > maxReadBytes {
-		return nil, toolErr("too_large", "content exceeds file size limit")
 	}
 	createOnly := false
 	if requirePrecondition {
@@ -128,7 +106,7 @@ func (e *nativeExecutor) writeFile(args map[string]any, requirePrecondition bool
 		}
 	}
 	data := []byte(content)
-	before, _, previewErr := readRegularFile(path, maxReadBytes)
+	before, _, previewErr := readRegularFile(path)
 	_, inspectErr := os.Lstat(path)
 	previewOK := previewErr == nil && !isBinary(before) || errors.Is(inspectErr, os.ErrNotExist)
 	_, parentErr := os.Stat(filepath.Dir(path))
@@ -167,7 +145,7 @@ func (e *nativeExecutor) editFile(args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, _, err := readRegularFile(path, maxReadBytes)
+	data, _, err := readRegularFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -221,9 +199,6 @@ func (e *nativeExecutor) editFile(args map[string]any) (any, error) {
 			content = strings.Replace(content, oldText, newText, 1)
 			replacements++
 		}
-		if len(content) > maxReadBytes {
-			return nil, toolErr("too_large", "edited file exceeds size limit")
-		}
 	}
 	newData := []byte(content)
 	if err := atomicWrite(path, newData, false); err != nil {
@@ -248,11 +223,10 @@ func (e *nativeExecutor) listDirectory(args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxEntries, err := optionalInt(args, "max_entries", 1000, 1, 10000)
+	maxEntries, err := optionalInt(args, "max_entries", int(^uint(0)>>1), 1, int(^uint(0)>>1))
 	if err != nil {
 		return nil, err
 	}
-	maxEntries = min(maxEntries, max(1, e.maxResponse/256))
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, pathError("list directory", err)
@@ -319,7 +293,7 @@ func (e *nativeExecutor) searchFiles(ctx context.Context, args map[string]any) (
 			return nil, toolErr("invalid_arguments", "invalid glob", err)
 		}
 	}
-	maxResults, err := optionalInt(args, "max_results", 200, 1, 5000)
+	maxResults, err := optionalInt(args, "max_results", int(^uint(0)>>1), 1, int(^uint(0)>>1))
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +311,6 @@ func (e *nativeExecutor) searchFiles(ctx context.Context, args map[string]any) (
 	matches := make([]searchMatch, 0, min(maxResults, 200))
 	accessErrors := []string{}
 	truncated := false
-	responseBytes := 0
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -370,20 +343,16 @@ func (e *nativeExecutor) searchFiles(ctx context.Context, args map[string]any) (
 			appendAccessError(&accessErrors, path, resolveErr)
 			return nil
 		}
-		data, readErr := readLimitedFile(safePath, maxSearchFileBytes)
+		data, readErr := os.ReadFile(safePath)
 		if readErr != nil {
-			if !errors.Is(readErr, errFileTooLarge) {
-				appendAccessError(&accessErrors, safePath, readErr)
-			}
+			appendAccessError(&accessErrors, safePath, readErr)
 			return nil
 		}
 		if isBinary(data) {
 			return nil
 		}
-		scanner := bufio.NewScanner(bytes.NewReader(data))
-		scanner.Buffer(make([]byte, 64*1024), 1<<20)
-		for lineNumber := 1; scanner.Scan(); lineNumber++ {
-			line := scanner.Text()
+		for index, rawLine := range strings.Split(string(data), "\n") {
+			lineNumber, line := index+1, strings.TrimSuffix(rawLine, "\r")
 			found := strings.Contains(line, pattern)
 			if expression != nil {
 				found = expression.MatchString(line)
@@ -391,21 +360,11 @@ func (e *nativeExecutor) searchFiles(ctx context.Context, args map[string]any) (
 			if !found {
 				continue
 			}
-			remaining := e.maxResponse - responseBytes
-			if remaining <= 0 {
-				truncated = true
-				return fs.SkipAll
-			}
-			line, _ = truncateUTF8(line, min(4096, remaining))
 			matches = append(matches, searchMatch{Path: safePath, Line: lineNumber, Text: line})
-			responseBytes += len(safePath) + len(line) + 64
 			if len(matches) >= maxResults {
 				truncated = true
 				return fs.SkipAll
 			}
-		}
-		if scanErr := scanner.Err(); scanErr != nil {
-			appendAccessError(&accessErrors, safePath, scanErr)
 		}
 		return nil
 	})
@@ -454,13 +413,12 @@ func (e *nativeExecutor) findFiles(ctx context.Context, args map[string]any) (an
 	if kind != "file" && kind != "directory" && kind != "any" {
 		return nil, toolErr("invalid_arguments", "kind must be file, directory, or any")
 	}
-	maxResults, err := optionalInt(args, "max_results", 1000, 1, 10000)
+	maxResults, err := optionalInt(args, "max_results", int(^uint(0)>>1), 1, int(^uint(0)>>1))
 	if err != nil {
 		return nil, err
 	}
 	entries := []map[string]any{}
 	accessErrors := []string{}
-	responseBytes := 0
 	truncated := false
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
@@ -501,8 +459,7 @@ func (e *nativeExecutor) findFiles(ctx context.Context, args map[string]any) (an
 			return nil
 		}
 		relative = filepath.ToSlash(relative)
-		estimated := len(path) + len(relative) + 128
-		if len(entries) >= maxResults || responseBytes+estimated > e.maxResponse {
+		if len(entries) >= maxResults {
 			truncated = true
 			return fs.SkipAll
 		}
@@ -510,7 +467,6 @@ func (e *nativeExecutor) findFiles(ctx context.Context, args map[string]any) (an
 			"path": filepath.Clean(path), "relative_path": relative, "type": entryType,
 			"size": entryInfo.Size(), "modified_at": entryInfo.ModTime().UTC().Format(timeFormat),
 		})
-		responseBytes += estimated
 		return nil
 	})
 	if err != nil && !errors.Is(err, fs.SkipAll) {
@@ -638,7 +594,7 @@ func (e *nativeExecutor) deletePath(args map[string]any) (any, error) {
 	return map[string]any{"path": path, "deleted": true, "type": kind}, nil
 }
 
-func readRegularFile(path string, maxBytes int64) ([]byte, os.FileInfo, error) {
+func readRegularFile(path string) ([]byte, os.FileInfo, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, nil, pathError("inspect file", err)
@@ -646,30 +602,11 @@ func readRegularFile(path string, maxBytes int64) ([]byte, os.FileInfo, error) {
 	if !info.Mode().IsRegular() {
 		return nil, nil, toolErr("not_file", "path is not a regular file")
 	}
-	data, err := readLimitedFile(path, maxBytes)
-	if errors.Is(err, errFileTooLarge) {
-		return nil, nil, toolErr("too_large", "file exceeds size limit")
-	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, toolErr("io_error", "read file", err)
 	}
 	return data, info, nil
-}
-
-func readLimitedFile(path string, maxBytes int64) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, errFileTooLarge
-	}
-	return data, nil
 }
 
 func atomicWrite(path string, data []byte, createParents bool) error {
@@ -731,7 +668,7 @@ func requireFileHash(path, expected string) error {
 	if err := validateHash(expected); err != nil {
 		return err
 	}
-	data, _, err := readRegularFile(path, maxReadBytes)
+	data, _, err := readRegularFile(path)
 	if err != nil {
 		return err
 	}
