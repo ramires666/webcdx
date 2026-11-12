@@ -401,6 +401,35 @@ test('does not promote an unmarked three-field JSON example in prose', () => {
   state.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));
   assert.doesNotMatch(state.adapter.inspect().latestModel.text, /^```webcodex-call/);
 });
+
+test('reconstructs the screenshot read_file call from the visible code language header after prose', () => {
+  const state = setup(); state.chunk.children = []; state.chunk._text = 'I will verify if the file exists at the specified path.';
+  const thought = state.model.children[0].add(new Node('ms-thought-accordion', {}, 'Expand to view model thoughts'));
+  thought.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"hidden","arguments":{}}'));
+  const block = state.chunk.add(new Node('ms-code-block'));
+  const header = block.add(new Node('div', { class: 'code-block-header' }));
+  header.add(new Node('mat-icon', {}, 'code'));
+  header.add(new Node('span', {}, 'Webcodex-call'));
+  for (const label of ['download', 'content_copy', 'expand_less']) header.add(new Node('button', {}, label));
+  const call = { v: 1, name: 'read_file', arguments: { limit: 5, offset: 1, path: 'W:\\projects\\example-game\\index.html' } };
+  block.add(new Node('pre')).add(new Node('code', {}, JSON.stringify(call)));
+  const extracted = state.adapter.inspect().latestModel.text;
+  const { parseCall } = require('./protocol.js');
+  const tools = [{ name: 'read_file', inputSchema: { type: 'object', properties: { path: { type: 'string' }, limit: { type: 'integer' }, offset: { type: 'integer' } }, required: ['path'], additionalProperties: false } }];
+  assert.deepEqual(parseCall(extracted, null, tools), { name: call.name, arguments: call.arguments });
+  assert.doesNotMatch(extracted, /Expand to view|hidden|content_copy|download/);
+});
+
+test('visible language fallback requires the exact call marker outside the code and action buttons', () => {
+  for (const label of ['json', 'webcodex-call example', 'not-webcodex-call']) {
+    const state = setup(); state.chunk.children = []; state.chunk._text = 'Example payload:';
+    const block = state.chunk.add(new Node('ms-code-block'));
+    block.add(new Node('span', {}, label));
+    block.add(new Node('button', {}, 'webcodex-call'));
+    block.add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{"path":"webcodex-call"}}'));
+    assert.doesNotMatch(state.adapter.inspect().latestModel.text, /```webcodex-call/);
+  }
+});
 test('does not promote duplicate code blocks or legacy calls with prose', () => {
   const duplicate = setup(); duplicate.chunk.children = []; duplicate.chunk._text = '';
   for (let i = 0; i < 2; i++) duplicate.chunk.add(new Node('ms-code-block')).add(new Node('pre')).add(new Node('code', {}, '{"v":1,"name":"read","arguments":{}}'));

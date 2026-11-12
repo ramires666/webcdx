@@ -95,8 +95,13 @@
         if (prose) for (const block of prose.querySelectorAll('ms-code-block')) block.remove();
         const proseChunks = prose && chunks.length ? [...prose.querySelectorAll('ms-text-chunk')] : prose ? [prose] : [];
         const proseText = proseChunks.map(cleanContentText).filter(Boolean).join('\n');
-        const explicitlyMarked = attr(codes[0], 'data-test-language') === 'webcodex-call' ||
-          /(?:^|\s)language-webcodex-call(?:\s|$)/.test(attr(code, 'class') || '');
+        const callLanguage = value => String(value || '').trim().toLowerCase() === 'webcodex-call';
+        const header = codes[0].cloneNode ? codes[0].cloneNode(true) : null;
+        if (header) for (const node of header.querySelectorAll('pre, code, button, [role="button"], mat-icon, svg, [aria-hidden="true"], .material-icons, .material-symbols-outlined')) node.remove();
+        const explicitlyMarked = callLanguage(attr(codes[0], 'data-test-language')) ||
+          callLanguage(attr(codes[0], 'data-language')) ||
+          /(?:^|\s)language-webcodex-call(?:\s|$)/i.test(attr(code, 'class') || '') ||
+          !!header && callLanguage(text(header));
         const hasContext = !!proseText.trim() || chunks.length > 1;
         if ((shape === 'current' && (!hasContext || explicitlyMarked)) || (shape === 'legacy' && chunks.length <= 1 && !proseText.trim())) {
           const call = `\`\`\`webcodex-call\n${raw}\n\`\`\``;
