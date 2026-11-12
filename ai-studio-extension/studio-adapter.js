@@ -1,8 +1,8 @@
 // Selectors are based on published AI Studio DOM observations; verify against the live chat before release.
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory;
-  if (root) root.WebCodexStudio = { createAdapter: factory };
-})(typeof globalThis !== 'undefined' ? globalThis : this, function createAdapter(document, location) {
+  if (typeof module === 'object' && module.exports) {const protocol=require('./protocol.js');module.exports=(document,location)=>factory(document,location,protocol);}
+  if (root) root.WebCodexStudio = { createAdapter: (document,location)=>factory(document,location,root.WebCodexProtocol) };
+})(typeof globalThis !== 'undefined' ? globalThis : this, function createAdapter(document, location, protocol) {
   const visible = (el) => !!el && el.isConnected !== false && el.hidden !== true &&
     (!el.getAttribute || el.getAttribute('aria-hidden') !== 'true') &&
     (!el.getBoundingClientRect || el.getBoundingClientRect().width > 0);
@@ -15,7 +15,11 @@
     .map(node => roleValue(node) || (node.matches?.('.chat-turn-container.user') ? 'user' : node.matches?.('.chat-turn-container.model') ? 'model' : ''))
     .filter(Boolean);
   const marked = (el, kind) => roleMarkers(el).includes(kind);
-  const turns = () => allElements('ms-chat-turn, model-prompt-container').filter(el => visible(el) || attr(el, 'data-webcodex-hidden') === 'true');
+  const turns = () => {
+    const candidates=allElements('ms-chat-turn, model-prompt-container, [data-turn-role], .chat-turn-container.user, .chat-turn-container.model')
+      .filter(el=>visible(el)||attr(el,'data-webcodex-hidden')==='true'),set=new Set(candidates);
+    return candidates.filter(el=>{for(let parent=el.parentElement||el.parent;parent;parent=parent.parentElement||parent.parent)if(set.has(parent))return false;return true;});
+  };
   const role = (el) => marked(el, 'model') ? 'model' : marked(el, 'user') ? 'user' : '';
   const inSystemPanel = (el) => {
     for (let node = el; node; node = node.parentElement || node.parent) {
@@ -62,74 +66,48 @@
   };
   const editorValue = (el) => el.isContentEditable || attr(el, 'contenteditable') === 'true' ? text(el) : String(el.value || '');
   let ownedDraft = null, pendingSubmit = null;
-  const cleanContentText = (el) => {
-    const copy = el.cloneNode ? el.cloneNode(true) : el;
-    if (copy !== el && copy.querySelectorAll) {
-      for (const note of copy.querySelectorAll('[data-webcodex-context]')) note.remove();
-      for (const junk of copy.querySelectorAll('ms-thought-accordion, ms-thought-chunk, button')) junk.remove();
-      return text(copy);
+  const answerCopy = (el) => {
+    const copy=el.cloneNode?el.cloneNode(true):el;
+    if(copy===el||!copy.querySelectorAll)return copy;
+    const originals=[el,...el.querySelectorAll('*')],copies=[copy,...copy.querySelectorAll('*')];
+    for(let i=1;i<originals.length;i++){
+      const source=originals[i];let style;
+      try{style=document.defaultView?.getComputedStyle?.(source);}catch{}
+      const inline=attr(source,'style')||'';
+      if(source.hidden||attr(source,'hidden')!==null||attr(source,'aria-hidden')==='true'||style?.display==='none'||style?.visibility==='hidden'||/(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b/i.test(inline))copies[i]?.remove();
     }
-    return text(el);
-  };
-  const codeBlockPayload = (block) => {
-    const pre = [...block.querySelectorAll('pre')];
-    if (pre.length) return pre.length === 1 ? String(pre[0].textContent || '').trim() : '';
-    const code = [...block.querySelectorAll('code')];
-    if (code.length) return code.length === 1 ? String(code[0].textContent || '').trim() : '';
-    const body = block.cloneNode(true);
-    for (const node of body.querySelectorAll('button, [role="button"], mat-icon, svg, [aria-hidden="true"], .material-icons, .material-symbols-outlined')) node.remove();
-    const raw = String(body.textContent || '').trim(), start = raw.indexOf('{');
-    // Some renderers expose only a language label and highlighted text nodes.
-    if (start < 0 || !/^[\w.+#-]{0,64}$/.test(raw.slice(0,start).trim())) return '';
-    return raw.slice(start);
-  };
-  const finalText = (el) => {
-    const content = el.cloneNode ? el.cloneNode(true) : el;
-    if (content !== el && content.querySelectorAll) {
-      for (const note of content.querySelectorAll('[data-webcodex-context]')) note.remove();
-      for (const junk of content.querySelectorAll('ms-thought-accordion, ms-thought-chunk, button')) junk.remove();
+    for(const node of copy.querySelectorAll('ms-thought-accordion, ms-thought-chunk, [data-thought="true"], [data-is-thought="true"], [data-role="thought"], [data-webcodex-context], button, [role="button"], mat-icon, svg, .material-icons, .material-symbols-outlined'))node.remove();
+    for(const node of copy.querySelectorAll('details')){
+      const summary=node.querySelectorAll('summary')[0];
+      if(attr(node,'open')===null||/^(thoughts|thinking|model thoughts|мысли|размышления)$/i.test(text(summary||{})))node.remove();
     }
-    const chunks = content.querySelectorAll ? [...content.querySelectorAll('ms-text-chunk')] : [];
-    const codes = content.querySelectorAll ? [...content.querySelectorAll('ms-code-block')] : [];
-    if (codes.length === 1) {
-      const raw = codeBlockPayload(codes[0]);
-      if (raw) {
-        let shape = '';
-        try {
-          const parsed = JSON.parse(raw);
-          const keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.keys(parsed).sort().join(',') : '';
-          const envelope = parsed?.v === 1 && typeof parsed.name === 'string' && !!parsed.name && parsed.arguments && typeof parsed.arguments === 'object' && !Array.isArray(parsed.arguments);
-          if (envelope && keys === 'arguments,name,v') shape = 'current';
-          else if (envelope && keys === 'arguments,name,turn,v') shape = 'legacy';
-        } catch {}
-        const prose = content.cloneNode ? content.cloneNode(true) : null;
-        if (prose) for (const block of prose.querySelectorAll('ms-code-block')) block.remove();
-        const proseChunks = prose && chunks.length ? [...prose.querySelectorAll('ms-text-chunk')] : prose ? [prose] : [];
-        const proseText = proseChunks.map(cleanContentText).filter(Boolean).join('\n');
-        if (shape === 'current' || (shape === 'legacy' && chunks.length <= 1 && !proseText.trim())) {
-          const call = `\`\`\`webcodex-call\n${raw}\n\`\`\``;
-          return proseText.trim() ? `${proseText}\n${call}` : call;
-        }
-      }
-    }
-    return chunks.length ? chunks.map(cleanContentText).filter(Boolean).join('\n') : cleanContentText(content);
+    return copy;
   };
-  const parseResultOperationId = (raw, header = false) => {
-    const parse = (value) => {
-      try {
-        const parsed = JSON.parse(value);
-        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
-          parsed.type === 'webcodex-result' && typeof parsed.operation_id === 'string' && parsed.operation_id
-          ? parsed.operation_id : '';
-      } catch { return ''; }
-    };
-    const value = String(raw).trim();
-    const direct = parse(value);
-    if (direct || !header) return direct;
-    const json = value.match(/^User\s*\n[^\n]+\n(\{[\s\S]*\})$/i)?.[1];
-    return json ? parse(json) : '';
+  const finalText = (el,modelReply=false) => {
+    const raw=String(answerCopy(el).textContent||'').trim();
+    if(!modelReply)return raw;
+    const found=protocol.analyzeReply(raw);
+    return found.kind==='call'?'```webcodex-call\n'+found.raw+'\n```':raw;
   };
-  const stripUserHeader = (raw) => String(raw).trim().replace(/^User(?:[ \t]*\d{1,2}:\d{2}(?:AM|PM)?[^\n]*|[ \t]+[^\n]*)?\n+|^User\n[^\n]+\n+/i, '');
+  const userBody = (el) => {
+    const roleContent=allElements('[data-turn-role], .chat-turn-container',el).find(node=>visible(node)&&(roleValue(node)==='user'||node.matches?.('.chat-turn-container.user')));
+    if(roleContent)return roleContent;
+    const bodies=allElements('.turn-content',el).filter(visible);
+    return bodies.length===1?bodies[0]:el;
+  };
+  const parseResultOperationId = (raw) => {
+    const candidate=stripUserHeader(raw);
+    try{JSON.parse(candidate);}catch{return '';}
+    const roots=protocol.findJSONValues(candidate);
+    if(roots.length!==1)return '';
+    const value=roots[0];
+    return value&&typeof value==='object'&&!Array.isArray(value)&&value.type==='webcodex-result'&&typeof value.operation_id==='string'&&value.operation_id?value.operation_id:'';
+  };
+  const stripUserHeader = (raw) => {
+    const value=String(raw).trim(),start=value.indexOf('{');
+    if(start>0&&/^User(?:[ \t]+[^\n]*|[ \t]*\n[^\n]*)?[\r\n \t]*$/i.test(value.slice(0,start)))return value.slice(start);
+    return value.replace(/^User(?:[ \t]+[^\n]*)?\n+/i,'');
+  };
   const commonMarkUnescape = (raw) => {
     let result = '';
     for (let i = 0; i < raw.length; i++) {
@@ -153,7 +131,8 @@
   };
   const matchesExpectedDelivery = (raw, expectedText) => {
     const candidate = stripUserHeader(raw);
-    return candidate === expectedText || candidate === commonMarkUnescape(expectedText);
+    if(candidate===expectedText||candidate===commonMarkUnescape(expectedText))return true;
+    try{const values=protocol.findJSONValues(candidate);return values.length===1&&JSON.stringify(values[0])===JSON.stringify(JSON.parse(expectedText));}catch{return false;}
   };
   const inspect = () => {
     if (!location.hostname || location.hostname.toLowerCase() !== 'aistudio.google.com')
@@ -174,17 +153,15 @@
     else if (recognized.length && !roles.some(Boolean)) error = 'unrecognized conversation roles';
     else if (runs.length > 1 || explicitStops.length > 1) error = `ambiguous generation controls: Run=${runs.length}, Stop=${explicitStops.length}`;
     const model = recognized.filter((el) => role(el) === 'model').pop() || null;
+    const modelContent = model && [...new Set(allElements('[data-turn-role], .chat-turn-container', model))]
+      .find(el => visible(el)&&(roleValue(el) === 'model' || el.matches?.('.chat-turn-container.model')));
     const user = recognized.filter((el) => role(el) === 'user').pop() || null;
-    const userContent = user && [...new Set(allElements('[data-turn-role], .chat-turn-container', user))]
-      .find(el => roleValue(el) === 'user' || el.matches?.('.chat-turn-container.user'));
-    const latestUserText = user ? finalText(userContent || user) : '';
-    const latestUserOperationId = user && (parseResultOperationId(latestUserText, true) ||
-      [...new Set(allElements('.turn-content, ms-prompt-chunk, ms-cmark-node, ms-text-chunk, pre code', user))]
-        .map(node => parseResultOperationId(text(node))).find(Boolean)) || '';
+    const latestUserText = user ? finalText(userBody(user)) : '';
+    const latestUserOperationId = user && parseResultOperationId(latestUserText) || '';
     return {
       conversationKey: conversationKey(), generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
-      supported: !error, error, latestModel: model ? { element: model, text: finalText(model) } : null,
+      supported: !error, error, latestModel: model ? { element: model, text: finalText(modelContent||model,true) } : null,
       historyAnchor: recognized[0] || null,
       historyStart: recognized[0] ? finalText(recognized[0]).slice(0,2048) : '',
       latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,
@@ -379,10 +356,9 @@
     const expected = expectedDeliveryText(marker, expectedText);
     return turns().filter((el) => {
       if (role(el) !== 'user') return false;
-      const nested = [...new Set(allElements('.turn-content, ms-prompt-chunk, ms-cmark-node, ms-text-chunk, pre code', el))];
-      if (expected) return nested.some((node) => matchesExpectedDelivery(text(node), expected)) || matchesExpectedDelivery(text(el), expected);
-      if (nested.some((node) => text(node).includes(`[WebCodex operation ${marker}]`) || parseResultOperationId(text(node)) === marker)) return true;
-      return text(el).includes(`[WebCodex operation ${marker}]`) || parseResultOperationId(text(el), true) === marker;
+      const raw=finalText(userBody(el));
+      if (expected) return matchesExpectedDelivery(raw,expected);
+      return raw.includes(`[WebCodex operation ${marker}]`) || parseResultOperationId(raw) === marker;
     });
   };
   const hasDelivery = (operationId, expectedText) => deliveryTurns(operationId, expectedText).length > 0;

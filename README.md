@@ -10,12 +10,13 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.3.5)
+## AI Studio Bridge (alpha 0.3.6)
 
-Version `0.3.5` recognizes an exact v1 tool envelope in a single code block
-regardless of its language label or position beside prose. Selected-tool schema
-validation still applies. Unrecognized call envelopes show an error instead of
-silently completing as prose. Historical calls are not executed.
+Version `0.3.6` uses one JSON scanner for the whole model answer and execution
+validation. Code widget names, language labels, nested wrappers and syntax
+highlighting do not control call recognition. Strings and command arguments remain
+exact; ambiguous, duplicate-key and malformed calls show errors. Selected-tool
+schemas, generation checks and protection against replaying history still apply.
 With agent
 `1.5.0-ai-studio-alpha.4` already installed, update only the extension, reload it
 in `chrome://extensions`, reload a saved AI Studio tab, and repeat the request.
@@ -32,14 +33,13 @@ An uncertain command is not automatically replayed. The live AI Studio page has
 not been verified; its DOM selectors remain alpha.
 
 The ready-to-use kit is in
-[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.5`
+[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.6`
 and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.4`. No local
 build is required. Gate remains `1.5.0-ai-studio-alpha.4`; local mode does not
-need it. To update, replace the extension and agent, reload the extension in
+need it. With agent alpha.4 already installed, replace only the extension, reload it in
 `chrome://extensions`, and reload an already saved AI Studio tab. Do not reload
-a tab with an unsaved conversation. Restart the updated agent, or launch
-`start-local-agent.cmd` at the project root. Gate does not need updating or a
-restart. Each new session tries the local agent first, then uses the saved Gate
+a tab with an unsaved conversation. The agent, Gate and Jinn launcher need no
+replacement or restart. Each new session tries the local agent first, then uses the saved Gate
 fallback if needed. While local mode is active, **Configure Gate fallback** sets
 the Gate connection and target for future sessions; it does not switch the
 current session. A session already using Gate stays pinned there until stopped

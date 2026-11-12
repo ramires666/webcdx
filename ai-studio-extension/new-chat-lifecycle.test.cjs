@@ -97,14 +97,46 @@ test('a new chat runs repeated calls without inserting an ID or replaying an old
   }
 });
 
-test('an unrecognized tool envelope shows an error instead of silently becoming a completed prose answer',async()=>{
+test('a damaged tool envelope shows an error instead of silently becoming a completed prose answer',async()=>{
   const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
-  h.userMessage('Read a file');h.modelMessage('Проверю файл.\n{"v":1,"name":"read_file","arguments":{"path":"safe.txt"}}');
+  h.userMessage('Read a file');h.modelMessage('Проверю файл.\n{"v":1,"name":"read_file","arguments":{"path":"safe.txt"}');
   await h.tick();
   assert.equal(h.state.phase,'paused');
-  assert.match(h.state.error,/блок не распознан/);
+  assert.match(h.state.error,/JSON/);
   assert.equal(h.operations.length,0);
+});
+
+test('real DOM extraction reaches operation dispatch exactly once and preserves command arguments',async()=>{
+  const {Node,setup}=require('./test-fixtures/studio-dom.cjs');
+  const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  const path='W:\\Игра {test}\\"quoted"\\safe.txt';
+  for(const tag of ['future-renderer','pre']){
+    const state=setup();state.chunk.remove();const body=state.model.children[0];
+    body.add(new Node('div',{},'Сначала прочитаю файл.\n'));
+    const code=body.add(new Node(tag));code.add(new Node('header',{},'v\n'));
+    const raw=JSON.stringify({v:1,name:'read_file',arguments:{path}});
+    for(const char of raw)code.add(new Node('span',{},char));
+    const before=h.operations.length;
+    h.userMessage('Read the file again');h.modelMessage(state.adapter.inspect().latestModel.text);
+    await h.tick();await h.tick();await h.tick();
+    assert.equal(h.operations.length,before+1);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.operations[before].arguments)),{path});
+    assert.equal(h.state.phase,'waiting_model','the completed operation returns its result and awaits the model');
+  }
+});
+
+test('malformed, duplicated and injected calls extracted from generic DOM never dispatch',async()=>{
+  const {Node,setup}=require('./test-fixtures/studio-dom.cjs');
+  const call=JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt'}});
+  for(const raw of [call.slice(0,-1),call+'\n'+call,JSON.stringify({v:1,name:'read_file',arguments:{path:'safe.txt',request_key:'injected'}})]){
+    const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
+    await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+    const state=setup();state.chunk.remove();state.model.children[0].add(new Node('future-renderer',{},raw));
+    h.userMessage('Read file');h.modelMessage(state.adapter.inspect().latestModel.text);await h.tick();await h.tick();
+    assert.equal(h.operations.length,0);assert.equal(h.state.phase,'paused');assert.ok(h.state.error);
+  }
 });
 
 test('selecting a saved chat stages only system instructions and never dispatches its historical call',async()=>{
