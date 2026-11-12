@@ -10,24 +10,24 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.3.0)
+## AI Studio Bridge (alpha 0.3.1)
 
 The Chrome extension sends commands from an ordinary AI Studio chat directly to
-the local agent through Native Messaging. The agent runs them locally and returns
-results; this mode needs no Gate, OAuth, or model API key. Sessions stay in one
+the first available local agent through `127.0.0.1`. The agent runs them locally and returns
+results; this mode needs no host registration, Gate, OAuth, or model API key. Sessions stay in one
 active tab without binding to a chat ID or URL. Do not use that tab for an
 unrelated conversation. Selected tools and consent controls remain in effect.
 An uncertain command is not automatically replayed. The live AI Studio page has
 not been verified; its DOM selectors remain alpha.
 
 The ready-to-use kit is in
-[`bin/ai-studio-bridge`](bin/ai-studio-bridge): extension ZIP version `0.3.0`
-and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.2`. No local
+[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.1`
+and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.3`. No local
 build is required. Gate remains `1.5.0-ai-studio-alpha.4`; local mode does not
 need it. To update, replace the extension and agent, reload the extension in
 `chrome://extensions`, and reload an already saved AI Studio tab. Do not reload
-a tab with an unsaved conversation. Chrome launches the registered host when
-needed; it has no separate console window. Gate does not need updating or a
+a tab with an unsaved conversation. Restart the updated agent, or launch
+`start-local-agent.cmd` at the project root. Gate does not need updating or a
 restart. Each new session tries the local agent first, then uses the saved Gate
 fallback if needed. While local mode is active, **Configure Gate fallback** sets
 the Gate connection and target for future sessions; it does not switch the
@@ -35,20 +35,21 @@ current session. A session already using Gate stays pinned there until stopped
 and restarted. A saved remote target may be another computer; sessions never
 silently switch to an arbitrary agent.
 
-Install the Chrome Native Messaging host once from PowerShell at the repository
-root:
+Launch the local agent from PowerShell at the repository root:
 
 ```powershell
-.\bin\ai-studio-bridge\webcodex-agent.exe --install-studio-host lgiihodklblifecheadnfjkaokmmfikk --roots 'C:\projects'
+.\bin\ai-studio-bridge\webcodex-agent.exe --local
 ```
 
-`--install-studio-host` registers the host for Chrome, and the following value
-is the extension ID. `--roots` saves the permitted local root; replace
-`C:\projects` with an absolute path the agent may access. For multiple roots,
-separate paths with semicolons inside the quotes, for example
-`'C:\projects;D:\work'`. If omitted, roots come from `WEBCODEX_ALLOWED_ROOTS`
-or default to the user's home directory. The EXE is already compiled at the
-shown path. See the [Russian setup and update guide](ai-studio-extension/README.ru.md).
+`--local` enables local mode and ignores Gate connection variables. The path
+after `.\` selects the compiled EXE relative to the current directory. Permitted
+roots come from the semicolon-separated absolute paths in `WEBCODEX_ALLOWED_ROOTS`,
+previous local settings, or the startup directory. Discovery probes ports
+`127.0.0.1:47831–47840`; an active session remains pinned to its selected agent.
+The EXE is already compiled at the shown path in this working copy; binaries and
+ZIPs are not stored in Git. Source-only checkouts use the separate
+[build guide](ai-studio-extension/BUILD.ru.md). See the
+[Russian setup and update guide](ai-studio-extension/README.ru.md).
 
 Russian documentation: [README.ru.md](README.ru.md) · [User guide](USER_GUIDE.ru.md)
 

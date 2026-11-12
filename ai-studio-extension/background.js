@@ -1,4 +1,4 @@
-importScripts('protocol.js', 'mcp-client.js', 'native-client.js');
+importScripts('protocol.js', 'mcp-client.js', 'local-client.js');
 const KEY = 'webcodexState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
 let state = {connected:false,transport:'',localError:'',gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',transport:'',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
 let token = '', client = null, localClient = null, gateClient = null, serial = Promise.resolve(), demo = false, connecting = false, lastAutoRefresh = 0, lastAutoRefreshOK = false, autoToolsAvailable = true;
@@ -41,9 +41,12 @@ async function restore() {
   }
 }
 async function initializeLocal(){
-  const next=WebCodexNative.createClient({host:'org.webcodex.studio'});
+  const s=state.session,pinned=s.transport==='local'&&!['idle','stopped'].includes(s.phase);
+  if(pinned&&(s.operationKey||s.operationId||s.pendingCall)&&(!s.localEndpoint||!s.localAgentIdentity))throw Error('The old local operation has no agent identity; inspect its outcome before starting a new session');
+  const next=WebCodexLocal.createClient(pinned?{endpoint:s.localEndpoint||'',agentIdentity:s.localAgentIdentity||''}:{});
   try{const init=await next.initialize();const tools=(await next.listTools()).filter(t=>!t.name.startsWith('browser_')),agents=await next.listAgents();
-    localClient=next;client=next;state.connected=true;state.transport='local';state.localError='';state.agentVersion=init?.serverInfo?.version||'';state.agents=agents;state.tools=tools;state.gateInstructions=init?.instructions||'';
+    localClient=next;client=next;state.connected=true;state.transport='local';state.localError='';state.localEndpoint=next.endpoint;state.localAgentIdentity=next.agentIdentity;state.agentVersion=init?.serverInfo?.version||'';state.agents=agents;state.tools=tools;state.gateInstructions=init?.instructions||'';
+    if(pinned){s.localEndpoint=next.endpoint;s.localAgentIdentity=next.agentIdentity;}
     const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
     if(agents.length===1&&String(agents[0].id??agents[0].name)==='local'&&previous.enabled){const safe=tools.map(t=>t.name),names=(previous.toolNames||[]).filter(n=>safe.includes(n));state.autoSettings={...previous,gateAgentId:previous.gateAgentId||(previous.agentId&&previous.agentId!=='local'?previous.agentId:''),agentId:'local',toolNames:names};await chrome.storage.local.set({bridgeAuto:state.autoSettings});}
     await migrateAutoSetup();return next;
@@ -196,9 +199,10 @@ function updateAutoStatus(settings=state.autoSettings||{enabled:false}) {
 }
 async function refreshForAutoStart(settings) {
   settings=settings||state.autoSettings||{enabled:false,toolNames:[]};
-  if(!state.connected||demo||!client||Date.now()-lastAutoRefresh<5000)return lastAutoRefreshOK;
+  if(demo||Date.now()-lastAutoRefresh<5000)return lastAutoRefreshOK;
   lastAutoRefresh=Date.now();
   try {
+    if(!state.connected||!client){if(state.session.transport==='gate'&&!['idle','stopped'].includes(state.session.phase))return false;await initializeLocal();}
     const signal=AbortSignal.timeout(5000),[agents,tools]=await Promise.all([client.listAgents(signal),client.listTools(signal)]);
     if(Array.isArray(agents))state.agents=agents;
     const visibleTools=Array.isArray(tools)?tools.filter(t=>!t.name.startsWith('browser_')):[];
@@ -285,7 +289,7 @@ async function arm(m) {
   const selected=m.toolNames.map(name=>state.tools.find(t=>t.name===name));if(selected.some(x=>!x))throw Error('Unknown selected tool');
   const tab=await chrome.tabs.get(m.tabId);if(!tab.url?.startsWith('https://aistudio.google.com/'))throw Error('Active tab must be AI Studio');
   if(!demo&&!state.connected)throw Error(state.localError||'Connect to an agent first');
-  state.session={phase:'arming',transport:demo?'demo':state.transport,agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,paused:false,turnless:true,turn:uuid(),instructions:'',customInstructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:m.tabId,sessionId:uuid(),conversationKey:''};await save();
+  state.session={phase:'arming',transport:demo?'demo':state.transport,localEndpoint:state.localEndpoint,localAgentIdentity:state.localAgentIdentity,agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,paused:false,turnless:true,turn:uuid(),instructions:'',customInstructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:m.tabId,sessionId:uuid(),conversationKey:''};await save();
   try {const snap=await armPage(m.tabId,{type:'studio.arm',sessionId:state.session.sessionId,turnless:true,hideServiceMessages:!!state.hideServiceMessages});
     if(!snap?.supported)throw Error(snap?.error||'Unsupported chat');
     state.session.conversationKey=snap.conversationKey;state.session.phase='waiting_model';await stageInstructions();await save();

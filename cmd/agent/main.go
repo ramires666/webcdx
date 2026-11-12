@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -64,11 +65,35 @@ func main() {
 	}
 	gateURL := strings.TrimRight(env("WEBCODEX_GATE_URL", ""), "/")
 	token := env("WEBCODEX_AGENT_TOKEN", "")
-	if gateURL == "" || token == "" {
-		log.Fatal("WEBCODEX_GATE_URL and WEBCODEX_AGENT_TOKEN are required")
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	localOnly := len(os.Args) > 1 && os.Args[1] == "--local"
+	localRoots := studioAllowedRoots()
+	if len(localRoots) == 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Fatal(err)
+		}
+		localRoots = []string{cwd}
+	}
+	localExecutor, err := newNativeExecutorWithConfig(executorConfig{AllowedRoots: localRoots, LogDir: filepath.Join(studioConfigDir(), "logs"), BrowserBackend: "disabled"})
+	if err != nil {
+		log.Fatalf("initialize local Studio executor: %v", err)
+	}
+	defer localExecutor.Close()
+	closeLocal, err := startStudioLocal(ctx, localExecutor)
+	if err != nil {
+		log.Fatalf("start local Studio: %v", err)
+	}
+	defer closeLocal()
+	if localOnly || (gateURL == "" && token == "") {
+		log.Print("Локальный агент готов. Gate не используется.")
+		<-ctx.Done()
+		return
+	}
+	if gateURL == "" || token == "" {
+		log.Fatal("Gate mode requires both WEBCODEX_GATE_URL and WEBCODEX_AGENT_TOKEN; use --local for local mode")
+	}
 	client := &http.Client{}
 	var roots string
 	for ctx.Err() == nil {

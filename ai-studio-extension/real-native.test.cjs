@@ -9,7 +9,7 @@ const enabled = process.env.WEBCODEX_NATIVE_REAL_TEST === '1';
 const agentPath = path.resolve(__dirname, '..', 'bin', 'ai-studio-bridge', 'webcodex-agent.exe');
 const extensionId = 'lgiihodklblifecheadnfjkaokmmfikk';
 const origin = `chrome-extension://${extensionId}/`;
-const expectedVersion = '1.5.0-ai-studio-alpha.2';
+const expectedVersion = '1.5.0-ai-studio-alpha.3';
 
 test('compiled agent serves real Chrome Native Messaging requests and persists operations', { skip: !enabled || process.platform !== 'win32', timeout: 60_000 }, async t => {
   assert.ok(fs.existsSync(agentPath), 'compiled agent binary is missing');

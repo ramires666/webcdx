@@ -49,7 +49,7 @@
     state = next;
     const session = next.session || {};
     const phaseNames = { idle: 'ожидает запуска', ready: 'готов', active: 'выполняется', running: 'выполняется', waiting_approval: 'ожидает подтверждения', paused: 'на паузе', stopped: 'остановлен', delivery_uncertain: 'передача результата не подтверждена', error: 'ошибка' };
-    const connectionName = next.transport === 'local' ? 'Локальный агент' : 'Gate';
+    const connectionName = next.transport === 'gate' ? 'Gate' : 'Локальный агент';
     stateEl.textContent = `${session.demo || next.demoMode ? 'Демо режим · ' : ''}${connectionName} ${next.connected ? 'подключён' : 'не подключён'}${session.phase ? ` · сеанс: ${phaseNames[session.phase] || session.phase}` : ''}`;
     $('transport-info').textContent = next.transport === 'local'
       ? `Прямое соединение · агент ${next.agentVersion || 'версия не передана'} · Gate не используется`
