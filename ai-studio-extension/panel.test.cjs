@@ -214,6 +214,19 @@ test('late saved consent hydrates during an active session without replacing act
   assert.equal(p.get('automatic').checked, false);
 });
 
+test('local connection shows the received agent version and allows configuring Gate fallback', async () => {
+  const p = createPanel();
+  await p.ready();
+  await p.update({ connected: true, transport: 'local', agentVersion: 'received-version', session: { phase: 'idle' }, tools: [], agents: [] });
+  assert.match(p.get('status').textContent, /Локальный агент подключён/);
+  assert.match(p.get('transport-info').textContent, /received-version/);
+  assert.equal(p.get('connect').disabled, false);
+  assert.equal(p.get('connect').textContent, 'Настроить резерв Gate');
+  await p.input('gate-url', 'https://gate.example');
+  await p.click('connect');
+  assert.equal(p.messages.find(m => m.type === 'bridge.connect').configureGate, true);
+});
+
 test('connect stays locked across status polls, ignores duplicate clicks, and unlocks on error', async () => {
   const permission = deferred(), connectReply = deferred(), p = createPanel({}, { permission, connectReply });
   await p.ready();

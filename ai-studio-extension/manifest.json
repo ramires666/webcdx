@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "WebCodex AI Studio Bridge",
-  "version": "0.2.16",
-  "description": "Соединяет WebCodex Gate с Google AI Studio.",
+  "version": "0.3.0",
+  "description": "Соединяет Google AI Studio с локальным агентом WebCodex; Gate используется как резерв.",
   "minimum_chrome_version": "125",
-  "permissions": ["storage", "sidePanel", "identity", "alarms", "scripting"],
+  "permissions": ["storage", "sidePanel", "identity", "alarms", "scripting", "nativeMessaging"],
   "host_permissions": ["https://aistudio.google.com/*"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "background": { "service_worker": "background.js" },

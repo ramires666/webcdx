@@ -10,53 +10,45 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.2.16)
+## AI Studio Bridge (alpha 0.3.0)
 
-The Chrome extension connects an ordinary AI Studio chat to Gate and a selected
-local agent through Gate OAuth. It uses the open AI Studio page, so no model API
-key is needed. One AI Studio tab can be active per bridge session. Starting a session
-writes tool rules to **System instructions** and leaves the composer for your
-task. A short explanation may precede one fenced call; no `Active turn` or
-`turn` field is required:
+The Chrome extension sends commands from an ordinary AI Studio chat directly to
+the local agent through Native Messaging. The agent runs them locally and returns
+results; this mode needs no Gate, OAuth, or model API key. Sessions stay in one
+active tab without binding to a chat ID or URL. Do not use that tab for an
+unrelated conversation. Selected tools and consent controls remain in effect.
+An uncertain command is not automatically replayed. The live AI Studio page has
+not been verified; its DOM selectors remain alpha.
 
-~~~text
-```webcodex-call
-{"v":1,"name":"read_file","arguments":{"path":"C:\\work\\notes.txt"}}
+The ready-to-use kit is in
+[`bin/ai-studio-bridge`](bin/ai-studio-bridge): extension ZIP version `0.3.0`
+and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.2`. No local
+build is required. Gate remains `1.5.0-ai-studio-alpha.4`; local mode does not
+need it. To update, replace the extension and agent, reload the extension in
+`chrome://extensions`, and reload an already saved AI Studio tab. Do not reload
+a tab with an unsaved conversation. Chrome launches the registered host when
+needed; it has no separate console window. Gate does not need updating or a
+restart. Each new session tries the local agent first, then uses the saved Gate
+fallback if needed. While local mode is active, **Configure Gate fallback** sets
+the Gate connection and target for future sessions; it does not switch the
+current session. A session already using Gate stays pinned there until stopped
+and restarted. A saved remote target may be another computer; sessions never
+silently switch to an arbitrary agent.
+
+Install the Chrome Native Messaging host once from PowerShell at the repository
+root:
+
+```powershell
+.\bin\ai-studio-bridge\webcodex-agent.exe --install-studio-host lgiihodklblifecheadnfjkaokmmfikk --roots 'C:\projects'
 ```
-~~~
 
-The bridge follows the active AI Studio tab and does not bind sessions to a chat
-ID or URL. URL changes, including `/prompts/new_chat` becoming a saved prompt,
-do not stop the session or its pending result. Internal operation keys still
-prevent duplicate execution. Chats opened or selected in the same tab are not
-isolated from each other by URL; finish or stop the current command before
-starting an unrelated conversation. New result messages use a fenced
-`webcodex-result` block so quotes and backslashes in JSON survive AI Studio
-rendering; internal envelopes remain raw JSON. For a legacy result whose
-delivery stalled, the extension compares the full saved result with the full
-Markdown-unescaped copy rendered in the page. After extension reload, recovery checks for
-the visible result first, then accepts the current next model call. The extension also
-removed the forced pause after 10 calls or 5 minutes and the automatic pause
-for results over 32 KiB; the existing 2 MiB transport limit remains. After
-delivery, it checks for the exact visible `webcodex-result` `operation_id`;
-uncertain results are never blindly resent, and a previous acknowledgement
-cannot consume the next model run. AI Studio DOM selectors are alpha and have
-not been verified against the current live site; regression checks use a saved
-sample from the live DOM.
-
-To update, replace the extension source folder or unzip
-[`bin/ai-studio-bridge/webcodex-ai-studio-bridge.zip`](bin/ai-studio-bridge/webcodex-ai-studio-bridge.zip)
-over its existing folder. In `chrome://extensions`, click **Reload** for AI
-Studio Bridge. Reload an already saved AI Studio tab so its system instructions
-are refreshed; keep any unsaved conversation tab open and do not reload it.
-Reloading may pause the current session; check its state in the panel before
-continuing. For an uncertain delivery, inspect the visible result and operation;
-do not restart the command. Gate
-`1.5.0-ai-studio-alpha.4` and agent `1.5.0-ai-studio-alpha.1` do not need replacing, updating,
-or restarting. The agent is compiled; its ready-made EXE is
-[`bin/ai-studio-bridge/webcodex-agent.exe`](bin/ai-studio-bridge/webcodex-agent.exe),
-and you do not need to build it yourself. See the
-[Russian setup and update guide](ai-studio-extension/README.ru.md) for details.
+`--install-studio-host` registers the host for Chrome, and the following value
+is the extension ID. `--roots` saves the permitted local root; replace
+`C:\projects` with an absolute path the agent may access. For multiple roots,
+separate paths with semicolons inside the quotes, for example
+`'C:\projects;D:\work'`. If omitted, roots come from `WEBCODEX_ALLOWED_ROOTS`
+or default to the user's home directory. The EXE is already compiled at the
+shown path. See the [Russian setup and update guide](ai-studio-extension/README.ru.md).
 
 Russian documentation: [README.ru.md](README.ru.md) · [User guide](USER_GUIDE.ru.md)
 

@@ -11,13 +11,15 @@
   <main>
     <header>
       <h1>WebCodex Bridge</h1>
-      <p>AI Studio · alpha 0.2.16</p>
+      <p>AI Studio · alpha 0.3.0</p>
     </header>
     <p id="status" role="status" aria-live="polite">Загрузка состояния…</p>
+    <p id="transport-info" class="hint" hidden></p>
     <p id="error" class="error" role="alert" aria-live="assertive" hidden></p>
 
     <section aria-labelledby="gate-heading">
-      <h2 id="gate-heading">Подключение к Gate</h2>
+      <h2 id="gate-heading">Подключение</h2>
+      <p class="hint">Сначала подключается локальный агент. Если он недоступен, используется сохранённое подключение к Gate. Команда с неизвестным исходом через другой канал не повторяется.</p>
       <label for="gate-url">Адрес Gate</label>
       <input id="gate-url" type="url" inputmode="url" placeholder="https://gate.example.com" autocomplete="url">
       <label for="client-id">OAuth Client ID</label>

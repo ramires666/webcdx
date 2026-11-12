@@ -89,8 +89,8 @@ test('compiled Gate and agent complete real bridge file operations and reconnect
     assert.match(agent.output, /connected to Gate; agent version=\S+ gate version=\S+/);
     assert.match(gate.output, /webcodex-gate version=\S+/);
     assert.match(gate.output, /agent stream connected .*agent_version=\S+ gate_version=\S+/);
-    assert.match(agent.output, /agent version=1\.5\.0-ai-studio-alpha\.1 gate version=1\.5\.0-ai-studio-alpha\.4/);
-    assert.match(gate.output, /agent_version=1\.5\.0-ai-studio-alpha\.1 gate_version=1\.5\.0-ai-studio-alpha\.4/);
+    assert.match(agent.output, /agent version=1\.5\.0-ai-studio-alpha\.2 gate version=1\.5\.0-ai-studio-alpha\.4/);
+    assert.match(gate.output, /agent_version=1\.5\.0-ai-studio-alpha\.2 gate_version=1\.5\.0-ai-studio-alpha\.4/);
 
     phase = 'authorize extension bridge';
     const accessToken = await authorizeBridge(oauthClientId, extensionId);

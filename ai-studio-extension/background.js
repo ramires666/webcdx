@@ -1,7 +1,7 @@
-importScripts('protocol.js', 'mcp-client.js');
+importScripts('protocol.js', 'mcp-client.js', 'native-client.js');
 const KEY = 'webcodexState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
-let state = {connected:false,gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
-let token = '', client = null, serial = Promise.resolve(), demo = false, connecting = false, lastAutoRefresh = 0, lastAutoRefreshOK = false, autoToolsAvailable = true;
+let state = {connected:false,transport:'',localError:'',gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',transport:'',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
+let token = '', client = null, localClient = null, gateClient = null, serial = Promise.resolve(), demo = false, connecting = false, lastAutoRefresh = 0, lastAutoRefreshOK = false, autoToolsAvailable = true;
 const uuid = () => crypto.randomUUID();
 const clone = x => JSON.parse(JSON.stringify(x));
 function publicState() { const s=clone(state); delete s.accessToken; s.connecting=connecting; return s; }
@@ -19,11 +19,65 @@ async function restore() {
     let fresh=false;
     if(!state.accessToken&&!state.demoMode){const {bridgeAuth}=await chrome.storage.local.get('bridgeAuth');if(bridgeAuth?.accessToken){Object.assign(state,bridgeAuth);state.connected=true;fresh=true;}}
     token=state.accessToken||'';demo=!!state.demoMode;
-    if(token&&state.connected){client=WebCodexMCP.createClient({baseUrl:state.gateUrl,token});const init=await client.initialize();if(fresh){state.gateInstructions=init?.instructions||'';state.tools=(await client.listTools()).filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();await migrateAutoSetup();}await save();}
+    if(demo){state.transport='demo';return;}
+    if(state.session.phase!=='idle'&&state.session.phase!=='stopped'&&!state.session.transport)state.session.transport='gate';
+    const savedTransport=state.session.phase!=='idle'&&state.session.phase!=='stopped'?state.session.transport:'';
+    if(savedTransport==='gate'&&token&&state.connected){gateClient=WebCodexMCP.createClient({baseUrl:state.gateUrl,token});client=gateClient;const init=await client.initialize();state.transport='gate';state.gateVersion=init?.serverInfo?.version||'';if(fresh){state.gateInstructions=init?.instructions||'';state.tools=(await client.listTools()).filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();await migrateAutoSetup();}await save();}
+    else if(savedTransport==='local'){
+      try{await initializeLocal();}catch(e){state.localError=String(e.message||e);state.connected=false;state.transport='local';state.session.error='Local agent is unavailable; retrying the saved operation on the local transport';await save();}
+    }
+    else if(savedTransport==='gate'&&!token){state.connected=false;state.transport='gate';state.session.error='Gate credentials are unavailable; this session remains pinned to Gate';await save();}
+    else {
+      try { await initializeLocal(); }
+      catch(localError) {
+        state.localError=String(localError.message||localError);
+        if(token&&state.connected){gateClient=WebCodexMCP.createClient({baseUrl:state.gateUrl,token});client=gateClient;const init=await client.initialize();state.transport='gate';state.gateVersion=init?.serverInfo?.version||'';state.gateInstructions=init?.instructions||'';state.tools=(await client.listTools()).filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();await selectGateFallbackAgent();await migrateAutoSetup();await save();}
+        else {state.connected=false;state.transport='';client=null;state.agents=[];state.tools=[];await save();}
+      }
+    }
   } catch(e) {
     if(e?.status===401)await chrome.storage.local.remove('bridgeAuth');
     state.connected=false;client=null;token='';state.accessToken='';state.session.paused=true;state.session.resumeBlocked=true;state.session.phase='paused';state.session.error='Could not restore Gate connection; reconnect to Gate';await save();
   }
+}
+async function initializeLocal(){
+  const next=WebCodexNative.createClient({host:'org.webcodex.studio'});
+  try{const init=await next.initialize();const tools=(await next.listTools()).filter(t=>!t.name.startsWith('browser_')),agents=await next.listAgents();
+    localClient=next;client=next;state.connected=true;state.transport='local';state.localError='';state.agentVersion=init?.serverInfo?.version||'';state.agents=agents;state.tools=tools;state.gateInstructions=init?.instructions||'';
+    const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
+    if(agents.length===1&&String(agents[0].id??agents[0].name)==='local'&&previous.enabled){const safe=tools.map(t=>t.name),names=(previous.toolNames||[]).filter(n=>safe.includes(n));state.autoSettings={...previous,gateAgentId:previous.gateAgentId||(previous.agentId&&previous.agentId!=='local'?previous.agentId:''),agentId:'local',toolNames:names};await chrome.storage.local.set({bridgeAuto:state.autoSettings});}
+    await migrateAutoSetup();return next;
+  }catch(e){try{next.close?.();}catch{}if(localClient===next)localClient=null;throw e;}
+}
+async function selectGateFallbackAgent(){
+  const {bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');
+  const agents=state.agents.filter(a=>a.online!==false),agentId=settings.gateAgentId||'';
+  if(!agentId&&agents.length===1){settings.gateAgentId=String(agents[0].id??agents[0].name);await chrome.storage.local.set({bridgeAuto:settings});}
+  state.autoSettings={...settings,agentId:settings.gateAgentId||settings.agentId||''};
+  if(settings.gateAgentId)await chrome.storage.local.set({bridgeAuto:state.autoSettings});
+  state.gateFallbackAgents=agents.length>1&&!settings.gateAgentId?agents:[];
+  if(state.gateFallbackAgents.length)state.localError='Choose a Gate agent before using the Gate fallback';
+}
+async function usePinnedClient(s=state.session){
+  if(s.transport==='local'){
+    if(localClient){client=localClient;return client;}
+    try{await initializeLocal();}catch(e){state.localError=String(e.message||e);throw Error('Local agent disconnected; its saved operation was not sent to Gate');}
+    client=localClient;return client;
+  }
+  if(s.transport==='gate'){
+    if(!token&&state.accessToken)token=state.accessToken;
+    if(!token)throw Error('Gate connection is unavailable; its saved operation was not sent to the local agent');
+    if(!gateClient)gateClient=WebCodexMCP.createClient({baseUrl:state.gateUrl,token});
+    await gateClient.initialize();client=gateClient;return client;
+  }
+  throw Error('Session transport is missing; re-arm this chat before continuing');
+}
+async function ensureNewTransport(){
+  if(demo)return;
+  if(state.transport==='local'&&state.connected&&localClient){client=localClient;return;}
+  try{await initializeLocal();return;}catch(e){state.localError=String(e.message||e);}
+  if(token&&state.gateUrl){gateClient=gateClient||WebCodexMCP.createClient({baseUrl:state.gateUrl,token});const init=await gateClient.initialize();client=gateClient;state.transport='gate';state.connected=true;state.gateVersion=init?.serverInfo?.version||'';state.gateInstructions=init?.instructions||'';state.agents=await gateClient.listAgents();state.tools=(await gateClient.listTools()).filter(t=>!t.name.startsWith('browser_'));await selectGateFallbackAgent();return;}
+  state.connected=false;state.transport='';client=null;
 }
 chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}).catch(()=>{});
 chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}).catch(()=>{});
@@ -48,14 +102,14 @@ async function command(m) {
       if(state.session.tabId!==null)await chrome.tabs.sendMessage(state.session.tabId,{type:'studio.cleanup',sessionId:state.session.sessionId,enabled:state.hideServiceMessages,operationIds:state.session.completedOperationIds||[],final:state.session.phase==='ready'}).catch(()=>{});
       break;
     case 'bridge.connect': await connect(m); break;
-    case 'bridge.disconnect': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');token='';client=null;demo=false;state.accessToken='';state.demoMode=false;state.connected=false;state.gateUrl='';state.clientId='';state.agents=[];state.tools=[];break;
-    case 'bridge.demo': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');demo=true;state.demoMode=true;token='';client=null;state.accessToken='';state.connected=true;state.gateUrl='Demo mode';state.clientId='demo';state.agents=[{id:'demo',name:'Demo agent',online:true}];state.tools=[{name:'read_file',description:'Demo only: return fixed sample text.',inputSchema:{type:'object',additionalProperties:false,properties:{path:{type:'string'}},required:['path']}}];break;
-    case 'bridge.arm': await arm(m);await rememberAuto(m);break;
+    case 'bridge.disconnect': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');try{localClient?.close?.();}catch{}token='';client=null;localClient=null;gateClient=null;demo=false;state.accessToken='';state.demoMode=false;state.connected=false;state.transport='';state.gateUrl='';state.clientId='';state.agents=[];state.tools=[];break;
+    case 'bridge.demo': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');try{localClient?.close?.();}catch{}demo=true;state.demoMode=true;token='';client=null;localClient=null;state.accessToken='';state.connected=true;state.transport='demo';state.gateUrl='Demo mode';state.clientId='demo';state.agents=[{id:'demo',name:'Demo agent',online:true}];state.tools=[{name:'read_file',description:'Demo only: return fixed sample text.',inputSchema:{type:'object',additionalProperties:false,properties:{path:{type:'string'}},required:['path']}}];break;
+    case 'bridge.arm': await arm(m);await rememberAuto(state.session);break;
     case 'bridge.preferences':
       {const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
       const agentId=m.agentId??previous.agentId??'',toolNames=Array.isArray(m.toolNames)?m.toolNames:previous.toolNames||[],consent=m.consent===true;
       const autoApprove=!!(m.autoApprove??previous.autoApprove??false),wasAutoApproving=!!state.session.autoApprove;
-      const settings={enabled:consent&&!!agentId&&toolNames.length>0,agentId,toolNames,automatic:m.automatic??previous.automatic??false,autoApprove,consent};
+      const settings={enabled:consent&&!!agentId&&toolNames.length>0,agentId,gateAgentId:state.transport==='gate'&&agentId!=='local'?agentId:previous.gateAgentId||(previous.agentId&&previous.agentId!=='local'?previous.agentId:''),toolNames,automatic:m.automatic??previous.automatic??false,autoApprove,consent};
       await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;
       if(m.automatic!==undefined)state.session.automatic=!!m.automatic;
       state.session.autoApprove=autoApprove;
@@ -92,21 +146,28 @@ async function command(m) {
   }
   await save();return publicState();
 }
-async function connect({gateUrl,clientId}) {
+async function connect({gateUrl,clientId,configureGate=false}) {
   if(state.session.phase!=='stopped'&&state.session.resumeBlocked&&state.session.pendingCall)throw Error('Stop the paused session before reconnecting; its operation will not be retried automatically');
+  if(configureGate&&state.session.transport==='gate'&&!['idle','stopped'].includes(state.session.phase))throw Error('Stop the active Gate session before changing its fallback connection');
+  if(!configureGate&&(!state.connected||state.transport!=='local'))try{await ensureNewTransport();}catch(e){state.localError=String(e.message||e);}
+  if(!configureGate&&state.connected&&state.transport==='local')return;
   const url=new URL(gateUrl); if(url.origin!==gateUrl || url.username||url.password||url.search||url.hash || !(url.protocol==='https:'||(url.protocol==='http:'&&['localhost','127.0.0.1'].includes(url.hostname)))) throw Error('Invalid Gate origin');
   if(!clientId) throw Error('OAuth client ID required');
   const granted=await chrome.permissions.contains({origins:[url.origin+'/*']});if(!granted)throw Error('Gate host permission is required');
-  await clearSession();
+  if(!(configureGate&&state.transport==='local'))await clearSession();
   const verifier=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join(''), challenge=base64url(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))), nonce=uuid(), redirect=chrome.identity.getRedirectURL('webcodex');
   const auth=new URL('/bridge/v1/authorize',url);Object.entries({client_id:clientId,redirect_uri:redirect,response_type:'code',state:nonce,code_challenge:challenge,code_challenge_method:'S256'}).forEach(([k,v])=>auth.searchParams.set(k,v));
   const returned=await chrome.identity.launchWebAuthFlow({url:auth.href,interactive:true}), callback=new URL(returned);
   if(callback.origin+callback.pathname!==redirect || callback.searchParams.get('state')!==nonce || callback.searchParams.get('iss')!==url.origin || !callback.searchParams.get('code')) throw Error('OAuth response verification failed');
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);let response,text;try{response=await fetch(url.origin+'/bridge/v1/token',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:clientId,code:callback.searchParams.get('code'),redirect_uri:redirect,code_verifier:verifier})});if(!response.ok)throw Error('OAuth token exchange failed');text=await readLimited(response,65536);}finally{clearTimeout(timeout);}let data;try{data=JSON.parse(text);}catch{throw Error('Invalid OAuth response');}if(typeof data.access_token!=='string'||!data.access_token)throw Error('OAuth response missing access token');
-  token=data.access_token;state.accessToken=token;state.demoMode=false;client=WebCodexMCP.createClient({baseUrl:url.origin,token});const init=await client.initialize();state.gateInstructions=typeof init?.instructions==='string'?init.instructions:'';const all=await client.listTools();state.tools=all.filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();state.connected=true;state.gateUrl=url.origin;state.clientId=clientId;state.session.phase='idle';demo=false;
+    const gateToken=data.access_token,configuredGate=WebCodexMCP.createClient({baseUrl:url.origin,token:gateToken}),init=await configuredGate.initialize();
+  if(configureGate&&state.transport==='local'){
+    const gateAgents=await configuredGate.listAgents(),{bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');if(!settings.gateAgentId&&gateAgents.filter(a=>a.online!==false).length===1)settings.gateAgentId=String(gateAgents.find(a=>a.online!==false).id??gateAgents.find(a=>a.online!==false).name);await chrome.storage.local.set({bridgeAuto:settings});await configuredGate.close?.();gateClient=WebCodexMCP.createClient({baseUrl:url.origin,token:gateToken});token=gateToken;state.accessToken=token;state.gateUrl=url.origin;state.clientId=clientId;state.gateVersion=init?.serverInfo?.version||'';state.connected=true;state.transport='local';client=localClient;await chrome.storage.local.set({bridgeAuth:{gateUrl:url.origin,clientId,accessToken:gateToken}});return;
+  }
+  gateClient=configuredGate;token=gateToken;state.accessToken=token;client=gateClient;state.gateVersion=init?.serverInfo?.version||'';state.gateInstructions=typeof init?.instructions==='string'?init.instructions:'';const all=await client.listTools();state.tools=all.filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();state.connected=true;state.transport='gate';state.gateUrl=url.origin;state.clientId=clientId;state.session.phase='idle';demo=false;
 }
 function base64url(bytes){return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
-async function rememberAuto(m){if(!demo){const settings={enabled:true,agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,consent:true};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus(settings);}}
+async function rememberAuto(m){if(!demo){const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');const settings={enabled:true,agentId:m.agentId,gateAgentId:previous.gateAgentId||(m.agentId!=='local'?m.agentId:''),toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,consent:true};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus(settings);}}
 async function disableAuto(){const {bridgeAuto={}}=await chrome.storage.local.get('bridgeAuto');const settings={...bridgeAuto,enabled:false};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus();}
 async function migrateAutoSetup(){
   const {bridgeAutoSetupV1}=await chrome.storage.local.get('bridgeAutoSetupV1');
@@ -125,7 +186,7 @@ async function migrateAutoSetup(){
 function updateAutoStatus(settings=state.autoSettings||{enabled:false}) {
   if(!settings.enabled)return state.autoStatus='';
   if(!settings.consent||!settings.agentId||!settings.toolNames?.length)return state.autoStatus='Выберите агента и инструменты';
-  if(!state.connected||demo)return state.autoStatus='Gate не подключён';
+  if(!state.connected||demo)return state.autoStatus=state.localError||'Агент не подключён';
   if(lastAutoRefresh>0&&!lastAutoRefreshOK)return state.autoStatus='Не удалось обновить Gate; повторяю';
   const agent=state.agents.find(a=>String(a.id??a.name)===settings.agentId);
   if(!agent||agent.online===false)return state.autoStatus='Агент не в сети';
@@ -147,6 +208,7 @@ async function refreshForAutoStart(settings) {
   } catch(e) {
     lastAutoRefreshOK=false;
     if(e?.status===401)await expireAuth(e);
+    if(state.transport==='local'&&(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED')){localClient=null;client=null;state.connected=false;state.localError=String(e.message||e);}
   }
   state.autoSettings=settings;updateAutoStatus(settings);await save();
   return lastAutoRefreshOK;
@@ -216,11 +278,14 @@ async function armPage(tabId,message){
 async function arm(m) {
   if(!['idle','stopped'].includes(state.session.phase))throw Error('Stop the active session before arming another one');
   if(!m.consent||!Number.isInteger(m.tabId)||!Array.isArray(m.toolNames)||!m.toolNames.length)throw Error('Consent, tab and tools are required');
-  const agent=state.agents.find(a=>String(a.id??a.name)===m.agentId);if(!agent||agent.online===false)throw Error('Selected agent is unavailable');
+  await ensureNewTransport();
+  if(state.transport==='local')m={...m,agentId:'local'};
+  else if(m.agentId==='local'){const {bridgeAuto={}}=await chrome.storage.local.get('bridgeAuto');m={...m,agentId:state.autoSettings?.gateAgentId||bridgeAuto.gateAgentId||''};}
+  const agent=state.agents.find(a=>String(a.id??a.name)===m.agentId);if(!agent||agent.online===false)throw Error(state.localError||'Selected agent is unavailable');
   const selected=m.toolNames.map(name=>state.tools.find(t=>t.name===name));if(selected.some(x=>!x))throw Error('Unknown selected tool');
   const tab=await chrome.tabs.get(m.tabId);if(!tab.url?.startsWith('https://aistudio.google.com/'))throw Error('Active tab must be AI Studio');
-  if(!demo&&!state.connected)throw Error('Connect to Gate first');
-  state.session={phase:'arming',agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,paused:false,turnless:true,turn:uuid(),instructions:'',customInstructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:m.tabId,sessionId:uuid(),conversationKey:''};await save();
+  if(!demo&&!state.connected)throw Error(state.localError||'Connect to an agent first');
+  state.session={phase:'arming',transport:demo?'demo':state.transport,agentId:m.agentId,toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,paused:false,turnless:true,turn:uuid(),instructions:'',customInstructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:m.tabId,sessionId:uuid(),conversationKey:''};await save();
   try {const snap=await armPage(m.tabId,{type:'studio.arm',sessionId:state.session.sessionId,turnless:true,hideServiceMessages:!!state.hideServiceMessages});
     if(!snap?.supported)throw Error(snap?.error||'Unsupported chat');
     state.session.conversationKey=snap.conversationKey;state.session.phase='waiting_model';await stageInstructions();await save();
@@ -266,16 +331,16 @@ async function dispatch(){const s=state.session,p=s.pendingCall;if(!p)throw Erro
   if(!s.operationKey)s.operationKey=Date.now()+'-'+uuid();const args={...p.arguments};if(tool.inputSchema.properties?.request_key)args.request_key=s.operationKey;
   s.pendingCall={...p,arguments:p.arguments};s.dispatchArgs=args;s.phase='recovering';await save();
   try{let result;if(demo){if(p.name!=='read_file')throw Error('Demo only supports read_file');result={content:[{type:'text',text:'DEMO MODE: sample content for '+String(args.path)}],isError:false};}
-    else result=await client.createOperation({key:s.operationKey,name:p.name,arguments:args,agentId:s.agentId});
+    else result=await (await usePinnedClient(s)).createOperation({key:s.operationKey,name:p.name,arguments:args,agentId:s.agentId});
     await finishResult(result);
-  }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);s.phase='recovering';await save();}
+  }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);if(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED'){localClient=null;s.phase='recovering';s.paused=false;s.resumeBlocked=false;}else if(s.error.includes('saved operation was not sent')){s.phase='recovering';s.paused=false;s.resumeBlocked=false;}else s.phase='recovering';await save();}
 }
 async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey,expectedResultText:s.resultText});if(!chk?.supported){s.error='AI Studio session is unavailable; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
   if(s.phase!=='recovering'||!s.pendingCall)return;
-  try{let result;if(demo)result={content:[{type:'text',text:'DEMO MODE: sample content'}],isError:false};else if(s.operationId)result=await client.getOperation(s.operationId);else result=await client.createOperation({key:s.operationKey,name:s.pendingCall.name,arguments:s.dispatchArgs,agentId:s.agentId});
+  try{let result;if(demo)result={content:[{type:'text',text:'DEMO MODE: sample content'}],isError:false};else {const pinned=await usePinnedClient(s);result=s.operationId?await pinned.getOperation(s.operationId):await pinned.createOperation({key:s.operationKey,name:s.pendingCall.name,arguments:s.dispatchArgs,agentId:s.agentId});}
     if(['accepted','dispatching','starting','running'].includes(result?.status)){s.operationId=result.operation_id||result.id||s.operationId;await save();return;}
     await finishResult(result);
-  }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);await save();}
+  }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);if(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED')localClient=null;await save();}
 }
 async function finishResult(result){const s=state.session;s.operationId=result?.operation_id||result?.id||s.operationId;if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:toolResult,error:transportError});s.phase='result_ready';await save();if(s.automatic&&!s.paused)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}
 async function deliver(submit){const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a webcodex-result can be delivered');}if(envelope.type!=='webcodex-result')throw Error('Only a webcodex-result can be delivered');if(s.phase==='delivery_uncertain')throw Error('Delivery status is unknown; check AI Studio before taking action');if(submit){s.phase='delivery_uncertain';await save();}let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit});}catch(e){throw Error('Delivery status is unknown; do not send again');}if(!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('AI Studio session is unavailable; delivery is blocked');}if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered');}if(!submit){s.phase='result_ready';await save();return;}if(r.confirmed){completeDelivery();await save();}}
@@ -286,7 +351,7 @@ async function stop(){
   if(s.commandSessionId){
     if(!client||!s.toolNames.includes('cancel_command'))s.error='Command session is known but cancel_command was not selected.';
     else try {
-      const result=await client.rpc('tools/call',{name:'cancel_command',arguments:{session_id:s.commandSessionId,agent_id:s.agentId}});
+      const result=await (await usePinnedClient(s)).rpc('tools/call',{name:'cancel_command',arguments:{session_id:s.commandSessionId,agent_id:s.agentId}});
       if(result?.isError===true)s.error='Command cancellation was rejected by Gate.';
     } catch(e){s.error='Command cancellation could not be confirmed: '+String(e.message||e);}
   }

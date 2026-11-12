@@ -49,7 +49,12 @@
     state = next;
     const session = next.session || {};
     const phaseNames = { idle: 'ожидает запуска', ready: 'готов', active: 'выполняется', running: 'выполняется', waiting_approval: 'ожидает подтверждения', paused: 'на паузе', stopped: 'остановлен', delivery_uncertain: 'передача результата не подтверждена', error: 'ошибка' };
-    stateEl.textContent = `${session.demo || next.demoMode ? 'Демо режим · ' : ''}${session.phase ? `Gate ${next.connected ? 'подключён' : 'не подключён'} · сеанс: ${phaseNames[session.phase] || session.phase}` : next.connected ? 'Gate подключён' : 'Gate не подключён'}`;
+    const connectionName = next.transport === 'local' ? 'Локальный агент' : 'Gate';
+    stateEl.textContent = `${session.demo || next.demoMode ? 'Демо режим · ' : ''}${connectionName} ${next.connected ? 'подключён' : 'не подключён'}${session.phase ? ` · сеанс: ${phaseNames[session.phase] || session.phase}` : ''}`;
+    $('transport-info').textContent = next.transport === 'local'
+      ? `Прямое соединение · агент ${next.agentVersion || 'версия не передана'} · Gate не используется`
+      : next.localError ? `Локальный агент недоступен: ${next.localError}` : '';
+    $('transport-info').hidden = !$('transport-info').textContent;
     const saved = next.autoSettings || {};
     renderChoices($('agents'), next.agents || [], 'agent');
     const availableTools = next.tools || [];
@@ -72,8 +77,8 @@
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;
     if (next.autoStatus) stateEl.textContent += ` · ${typeof next.autoStatus === 'string' ? next.autoStatus : next.autoStatus.message || ''}`;
     const busy = connecting || next.connecting;
-    $('connect').disabled = busy || !!next.connected;
-    $('connect').textContent = busy ? 'Ожидается вход…' : 'Подключить';
+    $('connect').disabled = busy || (!!next.connected && next.transport !== 'local');
+    $('connect').textContent = busy ? 'Ожидается вход…' : next.transport === 'local' ? 'Настроить резерв Gate' : 'Подключить';
     $('disconnect').disabled = busy || !next.connected;
     $('demo').disabled = busy || !!next.connected;
     $('arm').disabled = !next.connected || !['idle', 'stopped'].includes(session.phase) || !$('consent').checked;
@@ -102,7 +107,7 @@
       if (url.username || url.password || url.search || url.hash || url.pathname !== '/' || !(url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname)))) throw new Error('Укажите origin Gate: HTTPS или localhost по HTTP');
       const allowed = await chrome.permissions.request({ origins: [url.origin + '/*'] });
       if (!allowed) throw new Error('Доступ к адресу Gate не разрешён');
-      await act('bridge.connect', { gateUrl: url.origin, clientId: $('client-id').value.trim() });
+      await act('bridge.connect', { gateUrl: url.origin, clientId: $('client-id').value.trim(), configureGate: state?.transport === 'local' });
     } catch (error) { showError(error); }
     finally { connecting = false; render(state); }
   });

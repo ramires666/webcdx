@@ -19,6 +19,36 @@ func main() {
 	if env("WEBCODEX_DEBUG", env("WEBCODEX_VERBOSE", "0")) == "0" {
 		log.SetFlags(0)
 	}
+	if studioNativeHostInvocation(os.Args) {
+		if err := runStudioNativeHost(os.Args[1]); err != nil {
+			log.Printf("native Studio host: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "--install-studio-host" || os.Args[1] == "--remove-studio-host") {
+		extensionID := studioExtensionID
+		roots := ""
+		for i := 2; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--roots":
+				if i+1 >= len(os.Args) {
+					log.Fatal("--roots requires a semicolon-separated absolute path list")
+				}
+				i++
+				roots = os.Args[i]
+			default:
+				if strings.HasPrefix(os.Args[i], "--") {
+					log.Fatalf("unknown Studio host option %s", os.Args[i])
+				}
+				extensionID = os.Args[i]
+			}
+		}
+		if err := installStudioNativeHost(os.Args[1] == "--remove-studio-host", extensionID, roots); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if nativeHostInvocation(os.Args) {
 		if err := runBrowserNativeHost(os.Args[1]); err != nil {
 			log.Printf("native browser host: %v", err)
