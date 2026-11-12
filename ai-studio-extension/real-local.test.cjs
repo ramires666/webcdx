@@ -48,11 +48,11 @@ test('compiled local agent discovers, executes once and reconnects without Gate 
   const read = await client.createOperation({ key: 'local-read', name: 'read_file', arguments: { path: file }, agentId: 'local' });
   assert.match(JSON.stringify(read), /local works/);
   assert.equal((await fetch(endpoint + '/studio/rpc', { method: 'POST', headers: { Origin: 'https://aistudio.google.com', 'Content-Type': 'application/json', 'X-WebCodex-Extension': 'lgiihodklblifecheadnfjkaokmmfikk' }, body: '{}' })).status, 403);
-  const content='<!doctype html>\n'+('const x = "code \u044f \ud83d\ude00";\n'.repeat(600000))+'<!-- end -->';
+  const content='<!doctype html>\n'+('const x = `code "Courier New" \\path \u044f \ud83d\ude00`;\n'.repeat(600000))+'<!-- end -->';
   assert.ok(Buffer.byteLength(content)>10*1024*1024);
   const largePath=path.join(root,'large.html');
   const {parseCall}=require('./protocol.js');
-  const largeCall=parseCall(JSON.stringify({v:1,name:'write_file',arguments:{path:largePath,content,if_absent:true}}),null,tools);
+  const largeCall=parseCall(JSON.stringify({v:1,name:'write_file',arguments:{path:largePath,if_absent:true},content_source:'large_file'})+'\n<<<HELPER_FILE_BEGIN:large_file>>>\n'+content+'\n<<<HELPER_FILE_END:large_file>>>',null,tools);
   const largeWrite=await client.createOperation({key:'large-write-once',...largeCall,agentId:'local'});
   assert.equal(largeWrite.status,'completed');assert.ok(fs.readFileSync(largePath,'utf8')===content,'large write must preserve exact UTF-8');
   const largeRead=await client.createOperation({key:'large-read',name:'read_file',arguments:{path:largePath},agentId:'local'});
@@ -62,7 +62,7 @@ test('compiled local agent discovers, executes once and reconnects without Gate 
   assert.deepEqual(await client.getOperation(op.operation_id), op);
   assert.deepEqual(await client.createOperation(args), op);
   client.close();
-  assert.match(logs, /Studio local connected: agent=1\.5\.0-ai-studio-alpha\.5 extension=0\.3\.9/);
+  assert.match(logs, /Studio local connected: agent=1\.5\.0-ai-studio-alpha\.5 extension=0\.3\.10/);
   assert.match(logs, /Gate не используется/);
   assert.doesNotMatch(logs, /connected to Gate|Не удалось получить настройки/);
   assert.equal(fs.existsSync(path.join(appdata, 'webcodex', 'studio', 'native-host.json')), false);

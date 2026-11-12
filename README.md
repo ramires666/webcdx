@@ -10,7 +10,19 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.3.9)
+## AI Studio Bridge (alpha 0.3.10)
+
+Version `0.3.10` lets `write_file` send its contents in a separate raw text block.
+The model emits a small JSON call with `content_source` and a matching delimited
+`helper-file` block; the extension supplies `arguments.content` and validates the
+complete tool schema. This avoids invalid JSON caused by unescaped quotes in
+generated HTML or JavaScript. File text is preserved exactly, without a size
+ceiling. Existing JSON calls remain supported; malformed ones are not guessed or
+silently repaired. Update the extension and reload a saved AI Studio tab. The
+new format needs no agent or Gate replacement or restart; the previously compiled
+alpha.5 agent is still available at `bin/ai-studio-bridge/webcodex-agent.exe`,
+with no local build required. The alpha.5 update is still needed to remove the
+older agent/Gate size limits described below.
 
 Version `0.3.9` no longer restages instructions or consumes the next call when
 AI Studio rerenders or virtualizes history. Instructions and their preset use
@@ -48,7 +60,7 @@ An uncertain command is not automatically replayed. The live AI Studio page has
 not been verified; its DOM selectors remain alpha.
 
 The ready-to-use kit is in
-[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.9`
+[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.10`
 and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.5`. No local
 build is required. Direct local mode does not need Gate. Replace the agent and extension, reload it in
 `chrome://extensions`, and reload an already saved AI Studio tab. Do not reload

@@ -8,6 +8,24 @@ const WebCodexProtocol = require('./protocol.js');
 const KEY = 'webcodexState', TOKEN = 'test-token';
 const tool = { name: 'read_file', description: 'test', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false } };
 
+test('a streamed raw file executes once with exact content and delivers its result without restaging instructions',async()=>{
+  const write={name:'write_file',inputSchema:{type:'object',properties:{path:{type:'string'},content:{type:'string'},if_absent:{const:true}},required:['path','content','if_absent'],additionalProperties:false}};
+  const h=harness({manualClock:true,tools:[write]});h.local.bridgeAuto.autoApprove=true;
+  await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  const stages=h.staged.filter(item=>item.kind==='system').length;
+  const content='ctx.font = `bold ${size}px "Courier New", monospace`;\n'+('const path = String.raw`W:\\Python`;\n'.repeat(4000));
+  const metadata=JSON.stringify({v:1,name:'write_file',arguments:{path:'large.html',if_absent:true},content_source:'game'});
+  h.userMessage('Save the game');h.modelMessage(metadata+'\n<<<HELPER_FILE_BEGIN:game>>>\n'+content);
+  h.advance(250);await h.tick();h.advance(1000);await h.tick();assert.equal(h.operations.length,0,'an incomplete file is never dispatched');
+  h.renderModelFragment(metadata+'\n<<<HELPER_FILE_BEGIN:game>>>\n'+content+'\n<<<HELPER_FILE_END:game>>>');
+  h.advance(250);await h.tick();h.advance(1000);await h.tick();await h.tick();
+  assert.equal(h.operations.length,1);assert.equal(h.operations[0].arguments.content,content);
+  assert.ok(h.messages.some(message=>message.type==='studio.deliver'));
+  h.rerenderHistory('virtualized older content');await h.tick();await h.tick();
+  assert.equal(h.operations.length,1);assert.equal(h.staged.filter(item=>item.kind==='system').length,stages);
+});
+
 function harness({manualClock=false,tools=[tool]}={}) {
   let model = { text: 'existing answer' }, latestUser = null, modelAfterUser = true, editorEmpty = true, supported = true;
   let refreshFails = 1, systemStageFails = 1, now = 10000, generating = false, observerCallback, currentPath = '/prompts/new_chat', saveOnSubmit=false, legacyProofMissing=false;
