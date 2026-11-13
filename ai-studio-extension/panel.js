@@ -50,7 +50,7 @@
     const previousError = state?.session?.error||state?.pageScript?.observerError;
     state = next;
     const session = next.session || {};
-    const phaseNames = { idle: 'ожидает запуска', ready: 'готов', arming: 'подготовка', waiting_model: 'ожидается ответ модели', recovering: 'проверяется результат операции', result_ready: 'результат готов к передаче', active: 'выполняется', running: 'выполняется', waiting_approval: 'ожидает подтверждения', paused: 'на паузе', stopped: 'остановлен', delivery_uncertain: 'передача результата не подтверждена', error: 'ошибка' };
+    const phaseNames = { idle: 'ожидает запуска', ready: 'готов', arming: 'подготовка', attaching_files:'прикрепляются файлы', waiting_model: 'ожидается ответ модели', recovering: 'проверяется результат операции', result_ready: 'результат готов к передаче', active: 'выполняется', running: 'выполняется', waiting_approval: 'ожидает подтверждения', paused: 'на паузе', stopped: 'остановлен', delivery_uncertain: 'передача результата не подтверждена', error: 'ошибка' };
     const connectionName = next.transport === 'gate' ? 'Gate' : 'Локальный агент';
     stateEl.textContent = `${session.demo || next.demoMode ? 'Демо режим · ' : ''}${connectionName} ${next.connected ? 'подключён' : 'не подключён'}${session.phase ? ` · сеанс: ${phaseNames[session.phase] || session.phase}` : ''}`;
     $('transport-info').textContent = next.transport === 'local'
@@ -72,6 +72,7 @@
     if (!editedPreferences.has('agentId') && saved.agentId && (!session.phase || ['idle', 'stopped'].includes(session.phase))) choose($('agents'), [String(saved.agentId)]);
     if (!editedPreferences.has('toolNames') && Array.isArray(saved.toolNames)) choose($('tools'), saved.toolNames);
     if (!editedPreferences.has('automatic') && typeof saved.automatic === 'boolean') $('automatic').checked = saved.automatic;
+    if(!editedPreferences.has('attachFiles'))$('attach-files').checked=saved.attachFiles!==false;
     if (!editedPreferences.has('autoApprove') && typeof saved.autoApprove === 'boolean') $('auto-approve').checked = saved.autoApprove;
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) {
       if (!editedPreferences.has('agentId') && session.agentId) choose($('agents'), [String(session.agentId)]);
@@ -86,7 +87,7 @@
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;
     const autoStatus=typeof next.autoStatus==='string'?next.autoStatus:next.autoStatus?.message||'';
     if(autoStatus&&(autoStatus!=='Готово'||!session.paused&&!session.error&&!session.notice&&!page?.observerError))stateEl.textContent+=' · '+autoStatus;
-    const observerLabels={unsupported:'Не удалось прочитать страницу',checking:'Проверяются инструкции чата',generating:'Модель формирует ответ',waiting_model:'Ожидается ответ модели',waiting_request:'Ожидается новый запрос; готовый вызов можно запустить кнопкой «Выполнить последний вызов»',settling:'Проверяется завершённость ответа',observing:'Проверяется готовый ответ',error:'Ошибка чтения ответа'};
+    const observerLabels={attaching_files:'Прикрепляются файлы; ожидается подтверждение загрузки',unsupported:'Не удалось прочитать страницу',checking:'Проверяются инструкции чата',generating:'Модель формирует ответ',waiting_model:'Ожидается ответ модели',waiting_request:'Ожидается новый запрос; готовый вызов можно запустить кнопкой «Выполнить последний вызов»',settling:'Проверяется завершённость ответа',observing:'Проверяется готовый ответ',error:'Ошибка чтения ответа'};
     $('observer-status').textContent=session.notice||observerLabels[page?.observerStatus]||'';
     $('observer-status').hidden=!$('observer-status').textContent;
     const busy = connecting || next.connecting;
@@ -148,7 +149,7 @@
     const savedTools = state?.autoSettings?.toolNames || [];
     const visibleTools = new Set([...$('tools').querySelectorAll('input')].map(input => input.value));
     const toolNames = [...new Set([...savedTools.filter(name => !visibleTools.has(name)), ...selected($('tools'))])];
-    const preferences = { agentId: selected($('agents'))[0] || state?.autoSettings?.agentId || '', toolNames, consent: $('consent').checked, automatic: $('automatic').checked, autoApprove: $('auto-approve').checked };
+    const preferences = { agentId: selected($('agents'))[0] || state?.autoSettings?.agentId || '', toolNames, consent: $('consent').checked, automatic: $('automatic').checked, attachFiles:$('attach-files').checked, autoApprove: $('auto-approve').checked };
     if (state) state.autoSettings = preferences;
     send('bridge.preferences', preferences).catch(showError);
   }
@@ -156,6 +157,7 @@
   $('tools').addEventListener('change', () => savePreferences('toolNames'));
   $('consent').addEventListener('change', () => { savePreferences('consent'); render(state); });
   $('automatic').addEventListener('change', () => { if (state?.session) state.session.automatic = $('automatic').checked; savePreferences('automatic'); });
+  $('attach-files').addEventListener('change',()=>savePreferences('attachFiles'));
   $('auto-approve').addEventListener('change', () => savePreferences('autoApprove'));
   $('hide-service').addEventListener('change', () => act('bridge.cleanupPreference', { enabled: $('hide-service').checked }));
   async function poll() { try { render(await send('bridge.status')); } catch (error) { showError(error); } }

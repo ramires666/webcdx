@@ -89,8 +89,8 @@ test('compiled Gate and agent complete real bridge file operations and reconnect
     assert.match(agent.output, /connected to Gate; agent version=\S+ gate version=\S+/);
     assert.match(gate.output, /webcodex-gate version=\S+/);
     assert.match(gate.output, /agent stream connected .*agent_version=\S+ gate_version=\S+/);
-    assert.match(agent.output, /agent version=1\.5\.0-ai-studio-alpha\.5 gate version=1\.5\.0-ai-studio-alpha\.5/);
-    assert.match(gate.output, /agent_version=1\.5\.0-ai-studio-alpha\.5 gate_version=1\.5\.0-ai-studio-alpha\.5/);
+    assert.match(agent.output, /agent version=1\.5\.0-ai-studio-alpha\.6 gate version=1\.5\.0-ai-studio-alpha\.5/);
+    assert.match(gate.output, /agent_version=1\.5\.0-ai-studio-alpha\.6 gate_version=1\.5\.0-ai-studio-alpha\.5/);
 
     phase = 'authorize extension bridge';
     const accessToken = await authorizeBridge(oauthClientId, extensionId);
@@ -109,6 +109,10 @@ test('compiled Gate and agent complete real bridge file operations and reconnect
     const read = await completeOperation(client, readKey, 'read_file', readArgs);
     assert.equal(read.status, 'completed');
     assert.equal(read.result.structuredContent.content, 'real agent read\n');
+    const fileRead=await completeOperation(client,operationKey(),'read_file',{path:fixture,delivery:'file'});
+    assert.equal(fileRead.status,'completed');
+    assert.equal(Buffer.from(fileRead.result.content.find(item=>item.type==='resource').resource.blob,'base64').toString('utf8'),'real agent read\n');
+    assert.equal(fileRead.result.structuredContent.content,undefined,'Gate forwards embedded file resources without duplicating file text');
     const repeated = await client.createOperation({ key: readKey, name: 'read_file', arguments: readArgs, agentId: 'real-agent' });
     assert.equal(repeated.id, read.id);
     await assert.rejects(client.createOperation({ key: readKey, name: 'read_file', arguments: { path: path.join(root, 'other.txt') }, agentId: 'real-agent' }));

@@ -20,7 +20,7 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
 <ms-chat-turn data-turn-role="User">Save this file</ms-chat-turn>
 <ms-chat-turn data-turn-role="Model" id="answer"></ms-chat-turn>
 <button aria-label="Run">Run</button><output id="check"></output>${scripts}<script>
-try {
+(async()=>{try {
   const answer=document.getElementById('answer');
   const tools=[{name:'write_file',inputSchema:{type:'object',properties:{path:{type:'string'},content:{type:'string'},if_absent:{const:true}},required:['path','content','if_absent'],additionalProperties:false}}];
   const metadata=JSON.stringify({v:1,name:'write_file',arguments:{path:'example.html',if_absent:true},content_source:'file_1'});
@@ -59,10 +59,30 @@ try {
   answer.append(prose);const emptyWidget=document.createElement('ms-code-block');emptyWidget.textContent='Code';answer.append(emptyWidget);
   const recovered=WebCodexProtocol.parseCall(adapter.inspect().latestModel.text,null,[{name:'list_directory',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}]);
   if(recovered?.arguments.path!=='W:'+String.fromCharCode(92)+'algo')throw Error('inline Markdown Windows path changed');cases++;
+  const prompt=document.querySelector('ms-prompt-input-wrapper'),run=document.querySelector('button[aria-label="Run"]');
+  const input=document.createElement('input');input.type='file';prompt.append(input);
+  const chip=document.createElement('span');prompt.append(chip);
+  input.addEventListener('change',()=>{chip.textContent=input.files[0]?.name||'';run.disabled=true;const progress=document.createElement('div');progress.setAttribute('role','progressbar');prompt.append(progress);setTimeout(()=>{progress.remove();run.disabled=false;},25);});
+  const source='native file Привет 😀\\r\\nwith bytes';const file=new File([source],'readme.txt',{type:'text/plain'});
+  if(!adapter.stage('small result metadata'))throw Error('file metadata staging failed');
+  const upload=await adapter.attachFiles([file],{key:'native-file',isCurrent:()=>true});
+  if(!upload.ok||await input.files[0].text()!==source)throw Error('native FileList upload changed content');
+  adapter.releaseFiles('native-file');if(input.files.length!==0)throw Error('owned file input was not released');cases++;
+  const human=new DataTransfer();human.items.add(new File(['human'],'human.txt'));input.files=human.files;
+  const blocked=await adapter.attachFiles([file],{key:'other-file',isCurrent:()=>true});
+  if(blocked.ok||input.files[0].name!=='human.txt')throw Error('existing human attachment was replaced');cases++;
+  input.value='';chip.textContent='';const humanCard=document.createElement('span');humanCard.className='file-chip';humanCard.textContent='human.pdf';prompt.append(humanCard);
+  const protectedCard=await adapter.attachFiles([new File(['new'],'new.txt')],{key:'other-card',isCurrent:()=>true});
+  if(protectedCard.ok||!humanCard.isConnected)throw Error('existing uploaded file card was not protected');humanCard.remove();cases++;
+  input.remove();chip.textContent='';let dropped;
+  prompt.addEventListener('drop',event=>{dropped=event.dataTransfer.files[0];chip.textContent=dropped.name;run.disabled=false;});
+  const drop=await adapter.attachFiles([new File([source],'drop.txt',{type:'text/plain'})],{key:'native-drop',isCurrent:()=>true});
+  if(!drop.ok||await dropped.text()!==source)throw Error('native drag and drop transfer failed');cases++;
   document.getElementById('check').textContent='PASS:'+cases;
 } catch(error) {document.getElementById('check').textContent='FAIL:'+error.message;}
+})();
 </script>`,'utf8');
-  const child=spawn(executable,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--user-data-dir='+path.join(temp,'profile'),'--dump-dom',pathToFileURL(fixture).href],{windowsHide:true,stdio:['ignore','pipe','ignore']});
+  const child=spawn(executable,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--virtual-time-budget=3000','--user-data-dir='+path.join(temp,'profile'),'--dump-dom',pathToFileURL(fixture).href],{windowsHide:true,stdio:['ignore','pipe','ignore']});
   t.after(()=>{
     if(child.exitCode===null&&child.signalCode===null)child.kill();
     assert.equal(path.dirname(temp),parent);assert.ok(path.basename(temp).startsWith('real-studio-dom-'));
@@ -72,5 +92,5 @@ try {
   const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});
   assert.equal(code,0);
   const result=/<output id="check">([^<]*)<\/output>/.exec(output)?.[1];
-  assert.equal(result,'PASS:56');t.diagnostic('56 scenarios passed in installed Chrome with an isolated temporary profile');
+  assert.equal(result,'PASS:60');t.diagnostic('60 scenarios passed in installed Chrome, including native FileList and drag-and-drop upload');
 });

@@ -1,10 +1,10 @@
-importScripts('vendor/json-tools.js', 'protocol.js', 'mcp-client.js', 'local-client.js');
+importScripts('vendor/json-tools.js', 'protocol.js', 'attachments.js', 'mcp-client.js', 'local-client.js');
 const KEY = 'webcodexState', LARGE_KEY='webcodexLargeSessionState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
 let state = {connected:false,transport:'',localError:'',gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',transport:'',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
 let token = '', client = null, localClient = null, gateClient = null, serial = Promise.resolve(), demo = false, connecting = false, lastAutoRefresh = 0, lastAutoRefreshOK = false, autoToolsAvailable = true;
 const uuid = () => crypto.randomUUID();
 const clone = x => JSON.parse(JSON.stringify(x));
-function publicState() { const s=clone(state); delete s.accessToken; s.connecting=connecting; return s; }
+function publicState() { const s=clone({...state,session:{...state.session,attachments:state.session.attachments?.map(({data,...metadata})=>metadata)}}); delete s.accessToken; s.connecting=connecting; return s; }
 async function save() {
   try {await chrome.storage.session.set({[KEY]:state});await chrome.storage.local.remove?.(LARGE_KEY);}
   catch(error){
@@ -96,6 +96,7 @@ async function ensureNewTransport(){
 chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}).catch(()=>{});
 chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'}).catch(()=>{});
 const ready=restore();
+function rememberPageScript(msg,tabId){if(state.session.tabId===tabId||state.session.tabId===null)state.pageScript={version:typeof msg.contentVersion==='string'?msg.contentVersion:'',tabId,lastSeen:Date.now(),observerStatus:msg.observerStatus||state.pageScript?.observerStatus||'',observerError:msg.observerStatus?msg.observerError||'':state.pageScript?.observerError||''};}
 chrome.action.onClicked.addListener(tab=>{ if(tab?.windowId!==undefined) chrome.sidePanel.open({windowId:tab.windowId}).catch(()=>{}); });
 chrome.alarms.create('webcodex-recover',{periodInMinutes:0.5});
 chrome.alarms.onAlarm.addListener(a=>{if(a.name==='webcodex-recover') enqueue(async()=>{await ready;await recover();});});
@@ -105,12 +106,13 @@ chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
     enqueue(async()=>{
       await ready;
       if(sender.frameId!==0||!Number.isInteger(sender.tab?.id)||new URL(sender.url||'').origin!=='https://aistudio.google.com')throw Error('Untrusted Studio sender');
+      rememberPageScript(msg,sender.tab.id);
       let result;
       if(msg.type==='studio.hello')result=await autoStart(sender,msg);
       else {if(sender.tab.id!==state.session.tabId)throw Error('Untrusted Studio sender');result=await studioMessage(msg,sender);}
-      if(state.session.tabId===sender.tab.id||state.session.tabId===null)state.pageScript={version:typeof msg.contentVersion==='string'?msg.contentVersion:'',tabId:sender.tab.id,lastSeen:Date.now(),observerStatus:msg.observerStatus||state.pageScript?.observerStatus||'',observerError:msg.observerStatus?msg.observerError||'':state.pageScript?.observerError||''};
+      rememberPageScript(msg,sender.tab.id);
       return result;
-    }).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted,...(value?.conversationKey?{conversationKey:value.conversationKey}:{})})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)}));
+    }).then(value=>reply({ok:!!value?.accepted,accepted:!!value?.accepted,...(value?.fileChunk?{fileChunk:value.fileChunk}:{}),...(value?.conversationKey?{conversationKey:value.conversationKey}:{})})).catch(e=>reply({ok:false,accepted:false,error:String(e.message||e)}));
     return true;
   }
   const connectRequest=msg?.type==='bridge.connect'&&sender.url===chrome.runtime.getURL('panel.html');
@@ -134,19 +136,19 @@ async function command(m) {
       {const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
       const agentId=m.agentId??previous.agentId??'',toolNames=Array.isArray(m.toolNames)?m.toolNames:previous.toolNames||[],consent=m.consent===true;
       const autoApprove=!!(m.autoApprove??previous.autoApprove??false),wasAutoApproving=!!state.session.autoApprove;
-      const settings={enabled:consent&&!!agentId&&toolNames.length>0,agentId,gateAgentId:state.transport==='gate'&&agentId!=='local'?agentId:previous.gateAgentId||(previous.agentId&&previous.agentId!=='local'?previous.agentId:''),toolNames,automatic:m.automatic??previous.automatic??false,autoApprove,consent};
+      const settings={attachFiles:m.attachFiles??previous.attachFiles??true,enabled:consent&&!!agentId&&toolNames.length>0,agentId,gateAgentId:state.transport==='gate'&&agentId!=='local'?agentId:previous.gateAgentId||(previous.agentId&&previous.agentId!=='local'?previous.agentId:''),toolNames,automatic:m.automatic??previous.automatic??false,autoApprove,consent};
       await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;
       if(m.automatic!==undefined)state.session.automatic=!!m.automatic;
       state.session.autoApprove=autoApprove;
       if(!wasAutoApproving&&m.autoApprove===true&&autoApprove&&consent&&settings.enabled&&settings.agentId===state.session.agentId&&state.session.toolNames?.includes(state.session.pendingCall?.name)&&state.session.phase==='waiting_approval'&&state.session.pendingCall&&!state.session.paused)await dispatch();
-      if(!m.consent&&!['idle','stopped','paused'].includes(state.session.phase)){state.session.pausedPhase=state.session.phase;state.session.paused=true;state.session.phase='paused';}
+      if(!m.consent&&!['idle','stopped','paused'].includes(state.session.phase)){await chrome.tabs.sendMessage(state.session.tabId,{type:'studio.cancelDelivery',sessionId:state.session.sessionId}).catch(()=>{});state.session.pausedPhase=state.session.phase;state.session.paused=true;state.session.phase='paused';}
       }
       updateAutoStatus();
       break;
     case 'bridge.instructions': if(m.submit!==false) throw Error('submit must be false');await stageInstructions();await save();break;
     case 'bridge.approve': await approve();break;
     case 'bridge.deliver': if(m.submit!==true) throw Error('submit must be true');await deliver(true);break;
-    case 'bridge.pause': await disableAuto();if(state.session.phase!=='paused')state.session.pausedPhase=state.session.phase;if(state.session.phase==='delivery_uncertain'||state.session.resumeBlocked)state.session.resumeBlocked=true;state.session.paused=true;state.session.userPaused=true;state.session.phase='paused';break;
+    case 'bridge.pause': await chrome.tabs.sendMessage(state.session.tabId,{type:'studio.cancelDelivery',sessionId:state.session.sessionId}).catch(()=>{});await disableAuto();if(state.session.phase!=='paused')state.session.pausedPhase=state.session.phase;if(state.session.phase==='delivery_uncertain'||state.session.resumeBlocked)state.session.resumeBlocked=true;state.session.paused=true;state.session.userPaused=true;state.session.phase='paused';break;
     case 'bridge.resume':
       if(state.session.phase==='stopped'||state.session.resumeBlocked||state.session.phase==='delivery_uncertain'||state.session.pausedPhase==='delivery_uncertain'||state.session.error?.includes('outcome is unknown'))throw Error('Resolve the uncertain operation or re-arm this chat before resuming');
       if(state.autoSettings?.consent===false)throw Error('Grant consent before resuming');
@@ -208,7 +210,7 @@ async function connect({gateUrl,clientId,configureGate=false}) {
   gateClient=configuredGate;token=gateToken;state.accessToken=token;client=gateClient;state.gateVersion=init?.serverInfo?.version||'';state.gateInstructions=typeof init?.instructions==='string'?init.instructions:'';const all=await client.listTools();state.tools=all.filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();state.connected=true;state.transport='gate';state.gateUrl=url.origin;state.clientId=clientId;state.session.phase='idle';demo=false;
 }
 function base64url(bytes){return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
-async function rememberAuto(m){if(!demo){const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');const settings={enabled:true,agentId:m.agentId,gateAgentId:previous.gateAgentId||(m.agentId!=='local'?m.agentId:''),toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,consent:true};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus(settings);}}
+async function rememberAuto(m){if(!demo){const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');const settings={attachFiles:m.attachFiles??previous.attachFiles??true,enabled:true,agentId:m.agentId,gateAgentId:previous.gateAgentId||(m.agentId!=='local'?m.agentId:''),toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,consent:true};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus(settings);}}
 async function disableAuto(){const {bridgeAuto={}}=await chrome.storage.local.get('bridgeAuto');const settings={...bridgeAuto,enabled:false};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus();}
 async function migrateAutoSetup(){
   const {bridgeAutoSetupV1}=await chrome.storage.local.get('bridgeAutoSetupV1');
@@ -292,10 +294,11 @@ async function autoStart(sender,m){
 }
 function recoverableDelivery(s){
   const recoverablePause=s.phase==='paused'&&!s.userPaused&&(s.error==='Conversation changed'||s.pausedPhase!=='delivery_uncertain'&&s.error==='AI Studio session is unavailable; stop and re-arm this chat'||!s.resumeBlocked&&s.error==='Result exceeds 32 KiB; reduce the tool output before delivery.');
-  return !!(s.resultText&&s.nextTurn&&s.operationId&&(s.phase==='delivery_uncertain'||recoverablePause));
+  return !!(s.resultText&&s.nextTurn&&s.operationId&&(s.phase==='delivery_uncertain'||s.phase==='attaching_files'||s.phase==='result_ready'&&!!s.attachments?.length||recoverablePause));
 }
 async function reattachDelivery(sender,m){
   const s=state.session;
+  const unsentFiles=(s.phase==='result_ready'||s.phase==='attaching_files')&&!!s.attachments?.length;
   const unsentSizeResult=s.phase==='paused'&&!s.userPaused&&!s.resumeBlocked&&s.error==='Result exceeds 32 KiB; reduce the tool output before delivery.';
   const retainUnsent=()=>{s.phase='paused';s.paused=true;s.resumeBlocked=false;s.error='Result exceeds 32 KiB; reduce the tool output before delivery.';};
   try{
@@ -304,7 +307,7 @@ async function reattachDelivery(sender,m){
     s.pageInstance=m.pageInstance;s.paused=false;s.userPaused=false;s.resumeBlocked=false;s.phase='delivery_uncertain';s.pausedPhase='';s.error='Checking whether the saved result reached this chat';await save();
     const chk=await chrome.tabs.sendMessage(sender.tab.id,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId,expectedResultText:s.resultText});
     if(!chk?.supported){s.error='AI Studio page is not ready; delivery remains uncertain';if(unsentSizeResult)retainUnsent();await save();return {accepted:!unsentSizeResult};}
-    if(chk.delivered){completeDelivery();await save();}else if(unsentSizeResult){s.phase='result_ready';s.paused=false;s.error='';await save();if(s.automatic)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}else{s.error='Result is not visible yet; waiting for delivery proof. It will not be sent again.';await save();}
+    if(chk.delivered){completeDelivery();await save();}else if(unsentFiles){s.phase='result_ready';s.paused=false;s.error='';s.notice='Файл сохранён. Нажмите «Передать результат», чтобы прикрепить его в текущем чате.';await save();}else if(unsentSizeResult){s.phase='result_ready';s.paused=false;s.error='';await save();if(s.automatic)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}else{s.error='Result is not visible yet; waiting for delivery proof. It will not be sent again.';await save();}
     return {accepted:true};
   }catch(e){s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.error='Could not check delivery in AI Studio; the saved result will not be sent again';if(unsentSizeResult)retainUnsent();await save();return {accepted:false};}
 }
@@ -338,6 +341,28 @@ async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)awa
 async function stageInstructions({ensureOnly=false}={}){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=ensureOnly||s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text,...(ensureOnly?{ensureOnly:true}:{})});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
+  if(m.type==='studio.modelError'){
+    if(!s.pendingCall&&!s.operationKey&&!s.operationId&&!s.resultText){s.pausedPhase='waiting_model';s.phase='paused';s.paused=true;s.error=String(m.error||'AI Studio generation failed');s.notice='';await save();}
+    return{accepted:true};
+  }
+  if(m.type==='studio.fileChunk'){
+    if(!state.autoSettings?.consent||s.paused||s.phase==='stopped'||m.operationId!==(s.operationId||s.operationKey)||!s.toolNames?.includes('read_file'))throw Error('File transfer is not authorized for this operation');
+    const file=s.attachments?.find(file=>file.id===m.attachmentId);
+    if(!file||!Number.isSafeInteger(m.offset)||m.offset<0||m.offset>file.data.length||m.offset%4!==0)throw Error('Invalid file transfer offset');
+    const next=Math.min(file.data.length,m.offset+65536);
+    return{accepted:true,fileChunk:{data:file.data.slice(m.offset,next),nextOffset:next,eof:next===file.data.length}};
+  }
+  if(m.type==='studio.deliveryStarted'){
+    if(s.paused||!state.autoSettings?.consent||s.phase!=='attaching_files'||m.operationId!==(s.operationId||s.operationKey))return{accepted:false};
+    s.phase='delivery_uncertain';await save();return{accepted:true};
+  }
+  if(m.type==='studio.deliveryComplete'){
+    if(m.operationId!==(s.operationId||s.operationKey)||s.phase==='stopped')return{accepted:false};
+    if(m.confirmed){const paused=s.paused;completeDelivery();if(paused){s.paused=true;s.phase='paused';s.pausedPhase='waiting_model';}await save();return{accepted:true};}
+    if(!m.attempted){if(s.paused)s.pausedPhase='result_ready';else s.phase='result_ready';s.error=m.error||'File upload or result delivery was not completed';}
+    else{s.phase='delivery_uncertain';s.error=m.error||'Delivery outcome is not confirmed';}
+    await save();return{accepted:true};
+  }
   if(m.type==='studio.observerError')return {accepted:true};
   if(m.type==='studio.ensureInstructions'){
     const {bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');
@@ -352,6 +377,8 @@ async function studioMessage(m,sender) {
   if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(m.conversationReplaced||!m.supported){if(m.conversationReplaced&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&s.phase!=='delivery_uncertain'){const restarted=await autoStart(sender,{pageInstance:s.pageInstance,conversationReplaced:true});if(restarted.accepted)return restarted;}if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'AI Studio session is unavailable';await save();return {accepted:true};}if(!s.paused&&s.phase==='delivery_uncertain'&&typeof m.deliveredOperationId==='string'&&!!m.deliveredOperationId&&m.deliveredOperationId===(s.operationId||s.operationKey)){completeDelivery();await save();}await recover();return {accepted:true,conversationKey:s.conversationKey};}
     if(m.type==='studio.call'){
     if(s.paused)return {accepted:false};
+    const requiredVersion=chrome.runtime.getManifest?.().version;
+    if(requiredVersion&&m.contentVersion!==requiredVersion){s.paused=true;s.phase='paused';s.error='Обновите сохранённую вкладку AI Studio: требуется скрипт '+requiredVersion;await save();return{accepted:false};}
     if(s.turnless){
       if(typeof m.responseKey!=='string'||!m.responseKey)throw Error('Missing response context');
       if(m.responseKey===s.lastResponseKey&&!m.generating)return {accepted:true};
@@ -366,7 +393,7 @@ async function studioMessage(m,sender) {
     if(m.generating){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='Generation still active';}
     else if(s.phase==='waiting_model'||s.phase==='ready'){
       let call;
-      try{const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);call=WebCodexProtocol.parseCall(m.text,s.turnless?null:s.turn,tools);}
+      try{if(m.sourceError)throw Error(m.sourceError);const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);call=WebCodexProtocol.parseCall(m.text,s.turnless?null:s.turn,tools);}
       catch(e){await rejectUnsentCall(m,e);await save();return {accepted:!s.paused};}
       try {
         if(s.turnless)s.lastResponseKey=m.responseKey;
@@ -396,23 +423,41 @@ async function rejectUnsentCall(m,error){
 async function approve(){const s=state.session;if(s.phase!=='waiting_approval'||!s.pendingCall||s.paused)throw Error('No pending approval');await dispatch();}
 async function expireAuth(e){if(e?.status!==401) return false;await chrome.storage.local.remove('bridgeAuth');state.connected=false;client=null;token='';state.accessToken='';state.session.pausedPhase=state.session.phase;state.session.phase='paused';state.session.paused=true;state.session.resumeBlocked=true;state.session.error='Gate authorization expired; stop this session, reconnect, then re-arm this chat';await save();return true;}
 async function dispatch(){const s=state.session,p=s.pendingCall;if(!p)throw Error('No pending call');const tool=state.tools.find(t=>t.name===p.name);if(!tool)throw Error('Tool unavailable');
-  if(!s.operationKey)s.operationKey=Date.now()+'-'+uuid();const args={...p.arguments};if(tool.inputSchema.properties?.request_key)args.request_key=s.operationKey;
+  if(!s.operationKey)s.operationKey=Date.now()+'-'+uuid();const args={...p.arguments};s.attachmentDelivery??=state.autoSettings?.attachFiles!==false;if(tool.inputSchema.properties?.request_key)args.request_key=s.operationKey;
+  if(p.name==='read_file'&&tool.inputSchema.properties?.delivery)args.delivery=s.attachmentDelivery?'file':'text';
   s.pendingCall={...p,arguments:p.arguments};s.dispatchArgs=args;s.phase='recovering';await save();
   try{let result;if(demo){if(p.name!=='read_file')throw Error('Demo only supports read_file');result={content:[{type:'text',text:'DEMO MODE: sample content for '+String(args.path)}],isError:false};}
     else result=await (await usePinnedClient(s)).createOperation({key:s.operationKey,name:p.name,arguments:args,agentId:s.agentId});
     await finishResult(result);
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);if(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED'){localClient=null;s.phase='recovering';s.paused=false;s.resumeBlocked=false;}else if(s.error.includes('saved operation was not sent')){s.phase='recovering';s.paused=false;s.resumeBlocked=false;}else s.phase='recovering';await save();}
 }
-async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey,expectedResultText:s.resultText});if(!chk?.supported){s.error='AI Studio session is unavailable; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
+async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'||s.phase==='attaching_files'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey,expectedResultText:s.resultText});if(!chk?.supported){s.error='AI Studio session is unavailable; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
   if(s.phase!=='recovering'||!s.pendingCall)return;
   try{let result;if(demo)result={content:[{type:'text',text:'DEMO MODE: sample content'}],isError:false};else {const pinned=await usePinnedClient(s);result=s.operationId?await pinned.getOperation(s.operationId):await pinned.createOperation({key:s.operationKey,name:s.pendingCall.name,arguments:s.dispatchArgs,agentId:s.agentId});}
     if(['accepted','dispatching','starting','running'].includes(result?.status)){s.operationId=result.operation_id||result.id||s.operationId;await save();return;}
     await finishResult(result);
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);if(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED')localClient=null;await save();}
 }
-async function finishResult(result){const s=state.session;s.operationId=result?.operation_id||result?.id||s.operationId;if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:toolResult,error:transportError});s.phase='result_ready';await save();if(s.automatic&&!s.paused)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}
-async function deliver(submit){const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a helper-result can be delivered');}if(!WebCodexProtocol.isResult(envelope))throw Error('Only a helper-result can be delivered');if(s.phase==='delivery_uncertain')throw Error('Delivery status is unknown; check AI Studio before taking action');if(submit){s.phase='delivery_uncertain';await save();}let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit});}catch(e){throw Error('Delivery status is unknown; do not send again');}if(!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('AI Studio session is unavailable; delivery is blocked');}if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered');}if(!submit){s.phase='result_ready';await save();return;}if(r.confirmed){completeDelivery();await save();}}
-function completeDelivery(){const s=state.session;if(s.operationId||s.operationKey)(s.completedOperationIds||=[]).push(s.operationId||s.operationKey);s.error='';s.phase='waiting_model';s.turn=s.nextTurn;s.pendingCall=null;s.resultText='';s.operationKey='';s.operationId='';s.dispatchArgs=null;s.count++;}
+async function finishResult(result){const s=state.session;s.operationId=result?.operation_id||result?.id||s.operationId;if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let prepared;try{prepared=await WebCodexAttachments.prepare({name:s.pendingCall.name,result:toolResult,enabled:s.attachmentDelivery??(state.autoSettings?.attachFiles!==false)});}catch(error){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='File received but attachment verification failed: '+String(error.message||error);await save();return;}s.attachments=prepared.attachments;const deliveredResult=prepared.result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:deliveredResult,error:transportError});s.phase='result_ready';await save();if(s.automatic&&!s.paused)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}
+async function deliver(submit){
+  const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');
+  let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a helper-result can be delivered');}
+  if(!WebCodexProtocol.isResult(envelope))throw Error('Only a helper-result can be delivered');
+  if(['delivery_uncertain','attaching_files'].includes(s.phase))throw Error('Delivery is already in progress or uncertain; it will not be sent again');
+  const attachments=(s.attachments||[]).map(({data,...metadata})=>metadata);
+  const requiredVersion=chrome.runtime.getManifest?.().version;
+  if(attachments.length&&requiredVersion&&state.pageScript?.version!==requiredVersion){s.phase='result_ready';await save();throw Error('Обновите сохранённую вкладку AI Studio: требуется скрипт '+requiredVersion+' для прикрепления файла');}
+  if(attachments.length&&!submit)throw Error('File attachments require explicit delivery');
+  if(submit){s.phase=attachments.length?'attaching_files':'delivery_uncertain';if(attachments.length)s.notice='Прикрепляются файлы: '+attachments.map(file=>file.name).join(', ');await save();}
+  let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit,...(attachments.length?{operationId:s.operationId||s.operationKey,attachments}:{})});}
+  catch{throw Error('Delivery status is unknown; do not send again');}
+  if(!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('AI Studio session is unavailable; delivery is blocked');}
+  if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.error||(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered'));}
+  if(r.pending)return;
+  if(!submit){s.phase='result_ready';await save();return;}
+  if(r.confirmed){completeDelivery();await save();}
+}
+function completeDelivery(){const s=state.session;if(s.operationId||s.operationKey)(s.completedOperationIds||=[]).push(s.operationId||s.operationKey);s.error='';if(s.notice?.startsWith('Прикрепляются файлы:'))s.notice='';s.phase='waiting_model';s.turn=s.nextTurn;s.pendingCall=null;s.resultText='';s.attachments=[];delete s.attachmentDelivery;s.operationKey='';s.operationId='';s.dispatchArgs=null;s.count++;}
 async function stop(){
   const s=state.session;
   await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});

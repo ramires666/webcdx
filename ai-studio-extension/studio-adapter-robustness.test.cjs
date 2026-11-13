@@ -7,6 +7,20 @@ const tools=[{name:'read_file',inputSchema:{type:'object',properties:{path:{type
 const args={path:'W:\\projects\\Игра { [test] }\\"quoted"\\file 😀.txt'};
 const raw=JSON.stringify({v:1,name:'read_file',arguments:args});
 
+test('executable JSON requires an actual code region so Markdown cannot silently change operators',()=>{
+  const call=JSON.stringify({v:1,name:'exec_command',arguments:{argv:['python','-c','print((570+k*5), (570+k*5))'],cwd:'W:/algo'}});
+  const prose=setup();prose.chunk.textContent='Run this. ```helper-call\n'+call;
+  assert.match(prose.adapter.inspect().latestModel.sourceError,/Markdown/);
+  const fenced=setup();fenced.chunk.textContent='Run this.';fenced.chunk.add(new Node('ms-code-block')).add(new Node('pre',{},call));
+  assert.equal(fenced.adapter.inspect().latestModel.sourceError,'');
+  assert.equal(analyzeReply(fenced.adapter.inspect().latestModel.text).call.arguments.argv[2],'print((570+k*5), (570+k*5))');
+});
+
+test('a native AI Studio generation error is exposed instead of becoming a successful final answer',()=>{
+  const state=setup();state.chunk.textContent='An internal error has occurred.';
+  assert.match(state.adapter.inspect().modelError,/AI Studio/);
+});
+
 test('a rendered Helper-result header preserves the operation id that arms an automatic followup',()=>{
   const state=setup();state.user.children=[];state.user._text='';state.user.attrs['data-turn-role']='User';
   const widget=state.user.add(new Node('ms-code-block'));

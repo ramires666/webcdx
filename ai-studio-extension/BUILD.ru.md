@@ -46,22 +46,25 @@ Remove-Item Env:WEBCODEX_BROWSER_REAL_TEST
 `C:\Program Files\Google\Chrome\Application\chrome.exe`. Если он установлен иначе,
 перед тестом задайте переменную `WEBCODEX_TEST_CHROME_PATH` с полным путём к своему
 `chrome.exe`. Тест создаёт отдельный временный профиль внутри `tmp`, проверяет
-56 сценариев: сочетания элементов DOM без искусственных текстовых переносов между блоками,
-разбор Windows-пути и чтение идентификатора отрисованного результата. После проверки
+60 сценариев: сочетания элементов DOM без искусственных текстовых переносов между блоками,
+разбор Windows-пути, чтение идентификатора отрисованного результата, настоящие FileList
+и drag-and-drop, ожидание готовности загрузки и защиту пользовательских вложений. После проверки
 он удаляет временные файлы. Параметры `--headless` и `--disable-gpu` запускают браузер
 без интерфейса и GPU; `--no-first-run` и `--no-default-browser-check` выключают
 первый запуск и проверку браузера по умолчанию; `--disable-background-networking`
 отключает фоновую сетевую активность. `--user-data-dir` указывает на временный профиль,
+`--virtual-time-budget=3000` даёт тестовой странице 3000 миллисекунд виртуального времени
+для асинхронных проверок; этот параметр не ограничивает загрузки расширения.
 `--dump-dom` возвращает DOM локальной страницы. `Remove-Item` удаляет включающую тест
 переменную из текущего окна; `Env:WEBCODEX_BROWSER_REAL_TEST` обозначает её в окружении
 PowerShell. Проверка не открывает аккаунт AI Studio и не заменяет проверку живой вкладки.
-Готовый агент alpha.5 уже скомпилирован в `bin/ai-studio-bridge/webcodex-agent.exe`;
+Готовый агент alpha.6 уже скомпилирован в `bin/ai-studio-bridge/webcodex-agent.exe`;
 для этого теста его пересобирать не нужно.
 
 ### Необязательная проверка локального агента на Windows
 
 Сначала соберите агент командой из раздела Windows ниже. Для локального режима
-нужен только EXE агента версии `1.5.0-ai-studio-alpha.5`; Gate собирать, обновлять
+нужен только EXE агента версии `1.5.0-ai-studio-alpha.6`; Gate собирать, обновлять
 или запускать не нужно. Выполните:
 
 ```powershell
@@ -82,7 +85,7 @@ Remove-Item Env:WEBCODEX_LOCAL_REAL_TEST
 ### Необязательная проверка собранных Gate и агента на Windows
 
 Для этого отдельного теста нужны `webcodex-gate.exe` версии `1.5.0-ai-studio-alpha.5`
-и `webcodex-agent.exe` версии `1.5.0-ai-studio-alpha.5` в `bin/ai-studio-bridge`.
+и `webcodex-agent.exe` версии `1.5.0-ai-studio-alpha.6` в `bin/ai-studio-bridge`.
 В Git готовых EXE нет: если они отсутствуют, сначала выполните Windows-сборку из
 следующего раздела. Для текущего исправления собраны оба EXE; работающая удалённая
 установка Gate автоматически не обновлялась.
@@ -111,7 +114,7 @@ Remove-Item Env:WEBCODEX_BRIDGE_REAL_TEST
 ```powershell
 New-Item -ItemType Directory -Path bin/ai-studio-bridge -Force
 go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.5' -o bin/ai-studio-bridge/webcodex-gate.exe ./cmd/gate
-go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.5' -o bin/ai-studio-bridge/webcodex-agent.exe ./cmd/agent
+go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.6' -o bin/ai-studio-bridge/webcodex-agent.exe ./cmd/agent
 ```
 
 `New-Item` создаёт папку; `-ItemType Directory` выбирает тип «каталог», `-Path`
@@ -119,7 +122,7 @@ go build -ldflags '-X webcodex/internal/buildinfo.Version=1.5.0-ai-studio-alpha.
 уже существующую папку. `go build` компилирует программу. `-ldflags` передаёт
 заключённую в кавычки строку линковщику; `-X` устанавливает строковую переменную
 `webcodex/internal/buildinfo.Version` в указанную версию: Gate —
-`1.5.0-ai-studio-alpha.5`, агент — `1.5.0-ai-studio-alpha.5`.
+`1.5.0-ai-studio-alpha.5`, агент — `1.5.0-ai-studio-alpha.6`.
 `-o` задаёт путь готового EXE: первая команда создаёт Gate, вторая — агент.
 `./cmd/gate` и `./cmd/agent` выбирают соответствующий пакет исходников.
 Команды рассчитаны на Go для Windows x64 без переопределённых GOOS/GOARCH.
@@ -168,7 +171,7 @@ npm.cmd --prefix ai-studio-extension run build:vendor
 esbuild версии `0.28.2` объединяет библиотеки в локальный модуль без `eval` и копирует
 лицензии в `vendor/LICENSES.txt`. Папка `node_modules` не добавляется в Git или ZIP.
 Эти команды не обновляют и не перезапускают рабочие агент, Gate или расширение.
-Агент alpha.5 уже скомпилирован в `bin/ai-studio-bridge/webcodex-agent.exe`; для
+Агент alpha.6 уже скомпилирован в `bin/ai-studio-bridge/webcodex-agent.exe`; для
 изменений JavaScript-библиотек его пересобирать не нужно. После изменения исходников
 расширения упакуйте ZIP следующей командой; установка готового ZIP описана в README.
 
@@ -181,6 +184,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./ai-studio-extension/packag
 только в этом процессе, не меняя системную политику. `-File` задаёт путь скрипта
 относительно корня проекта. Упаковщик без дополнительных аргументов создаёт
 `bin/ai-studio-bridge/webcodex-ai-studio-bridge.zip` только с файлами расширения;
-Go-бинарники, тесты и секреты в ZIP не добавляются. Локальный модуль библиотек
-и их лицензии включаются в ZIP с сохранением папки `vendor`. Само расширение не требует
+Go-бинарники, тесты и секреты в ZIP не добавляются. Модуль передачи файлов `attachments.js`
+включается в корень ZIP. Локальные библиотеки и их лицензии сохраняются в папке `vendor`.
+Само расширение не требует
 компиляции. Перед установкой распакуйте архив в постоянную папку.

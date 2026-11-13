@@ -21,7 +21,7 @@ function createPanel(store = {}, options = {}) {
   const document = { activeElement: null, getElementById(id) { if (!els.has(id)) els.set(id, new Element(id)); return els.get(id); }, createElement() { return new Element(); } };
   let snapshot = { connected: false, session: { phase: 'idle', paused: false }, tools: [], agents: [], autoSettings: store.autoSettings }, failAction = false, poll, connectCount = 0;
   const messages = [];
-  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.12'}), lastError: null, sendMessage(msg, cb) {
+  const chrome = { runtime: { id: 'test', getManifest:()=>({version:options.manifestVersion||'0.3.13'}), lastError: null, sendMessage(msg, cb) {
     messages.push(msg);
     if (msg.type === 'bridge.status') return cb({ ok: true, state: snapshot });
     if (msg.type === 'bridge.preferences') { store.autoSettings = msg; snapshot.autoSettings = msg; return cb({ ok: true, state: snapshot }); }
@@ -42,6 +42,13 @@ test('service JSON preference reflects state and sends both checkbox values', as
   await p.change('hide-service', false);
   await p.change('hide-service', true);
   assert.deepEqual(p.messages.filter(x => x.type === 'bridge.cleanupPreference').map(x => x.enabled), [false, true]);
+});
+
+test('native-file delivery defaults on and its preference is preserved across polls',async()=>{
+  const p=createPanel();await p.update({connected:true,session:{phase:'waiting_model'},autoSettings:{consent:true,agentId:'a',toolNames:['read_file']},tools:[],agents:[]});
+  assert.equal(p.get('attach-files').checked,true);
+  await p.change('attach-files',false);assert.equal(p.messages.filter(message=>message.type==='bridge.preferences').at(-1).attachFiles,false);
+  await p.update({connected:true,session:{phase:'waiting_model'},autoSettings:{attachFiles:false},tools:[],agents:[]});assert.equal(p.get('attach-files').checked,false);
 });
 
 test('shows the actual installed version and identifies an older script still running in the tab',async()=>{

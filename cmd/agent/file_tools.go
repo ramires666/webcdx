@@ -16,7 +16,7 @@ import (
 )
 
 func (e *nativeExecutor) readFile(args map[string]any) (any, error) {
-	if err := onlyArgs(args, "path", "offset", "limit"); err != nil {
+	if err := onlyArgs(args, "path", "offset", "limit", "delivery"); err != nil {
 		return nil, err
 	}
 	rawPath, err := requiredString(args, "path")
@@ -30,6 +30,22 @@ func (e *nativeExecutor) readFile(args map[string]any) (any, error) {
 	data, _, err := readRegularFile(path)
 	if err != nil {
 		return nil, err
+	}
+	delivery, err := optionalString(args, "delivery")
+	if err != nil {
+		return nil, err
+	}
+	if delivery != "" && delivery != "text" && delivery != "file" {
+		return nil, toolErr("invalid_arguments", "delivery must be text or file")
+	}
+	if isBinary(data) && delivery == "file" {
+		if _, ok := args["offset"]; ok {
+			return nil, toolErr("invalid_arguments", "line ranges are not available for binary file attachments")
+		}
+		if _, ok := args["limit"]; ok {
+			return nil, toolErr("invalid_arguments", "line ranges are not available for binary file attachments")
+		}
+		return attachReadFile(map[string]any{"path": path, "sha256": hashBytes(data), "size": len(data), "offset": 1, "line_count": 0, "next_offset": 1, "truncated": false}, data, filepath.Base(path)), nil
 	}
 	if isBinary(data) {
 		return nil, toolErr("binary_file", "binary files are not supported")
@@ -52,10 +68,18 @@ func (e *nativeExecutor) readFile(args map[string]any) (any, error) {
 	requestedEnd := start + min(limit, len(lines)-start)
 	end := requestedEnd
 	content := strings.Join(lines[start:end], "")
-	return map[string]any{
+	result := map[string]any{
 		"path": path, "content": content, "sha256": hashBytes(data), "size": len(data), "offset": offset,
 		"line_count": end - start, "next_offset": end + 1, "truncated": end < len(lines),
-	}, nil
+	}
+	if delivery == "file" {
+		name := filepath.Base(path)
+		if start != 0 || end != len(lines) {
+			name += fmt.Sprintf(".lines-%d-%d.txt", offset, end)
+		}
+		return attachReadFile(result, []byte(content), name), nil
+	}
+	return result, nil
 }
 
 func (e *nativeExecutor) writeFile(args map[string]any, requirePrecondition bool) (any, error) {

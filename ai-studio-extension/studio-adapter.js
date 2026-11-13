@@ -179,13 +179,22 @@
       modelSource=modelText(modelCopy).trim();
       parsedModel=protocol.analyzeReply(modelSource);
     }
+    let sourceError='';
+    if(parsedModel?.kind==='call'&&parsedModel.call.name==='exec_command'){
+      const exactSources=allElements('pre, code, ms-code-block, [role="code"]',modelCopy).filter(node=>{
+        const candidate=protocol.analyzeReply(codeText(node));
+        return candidate.kind==='call'&&JSON.stringify(candidate.call)===JSON.stringify(parsedModel.call);
+      });
+      if(!exactSources.length)sourceError='Command JSON was rendered as Markdown prose, which can remove operators, backslashes or emphasis markers. Resend the call inside a real fenced code block: place a blank line BEFORE the opening helper-call fence, and put its JSON on the following line. Do not place the opening fence after a sentence.';
+    }
+    const modelError=/^(?:An internal error has occurred\.?|Internal error\.?)$/i.test(modelSource.trim())?'AI Studio: An internal error has occurred. Generation failed; no new command was executed.':'';
     const user = recognized.filter((el) => role(el) === 'user').pop() || null;
     const latestUserText = user ? finalText(userBody(user)) : '';
     const latestUserOperationId = user && parseResultOperationId(latestUserText) || '';
     return {
       conversationKey: conversationKey(), generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
-      supported: !error, error, latestModel: model ? { element: model, sourceText:modelSource, text:parsedModel.kind==='call'?'```helper-call\n'+parsedModel.raw+'\n```':modelSource } : null,
+      supported: !error, error, modelError, latestModel: model ? { element: model, sourceError, sourceText:modelSource, text:parsedModel.kind==='call'?'```helper-call\n'+parsedModel.raw+'\n```':modelSource } : null,
       latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,
       modelAfterUser: !user || recognized.indexOf(model) > recognized.indexOf(user),
     };
@@ -229,6 +238,56 @@
     })().finally(() => { pendingSubmit = null; });
     pendingSubmit = promise;
     return promise;
+  };
+  let uploadOwner=null;
+  const promptScope=()=>{const editor=editors()[0];return editor?.closest?.('ms-prompt-input-wrapper')||editor?.closest?.('ms-prompt-box')||editor?.closest?.('ms-autosize-textarea')||editor?.parentElement||editor?.parent;};
+  const ownsDraft=value=>{const current=editors();return current.length===1&&ownedDraft?.value===value&&editorValue(current[0])===value;};
+  const attachFiles=async(files,{key,isCurrent=()=>true}={})=>{
+    const scope=promptScope(),view=document.defaultView||globalThis;
+    if(!scope||!files.length||!isCurrent())return{ok:false,error:'Поле прикрепления файлов недоступно'};
+    const names=files.map(file=>file.name),signature=JSON.stringify([key,...files.map(file=>[file.name,file.size])]);
+    const scopeLabels=()=>{const copy=scope.cloneNode(true);for(const node of copy.querySelectorAll('textarea,[contenteditable="true"],[hidden],[aria-hidden="true"]'))node.remove();return[copy,...allElements('*',copy)].map(node=>String(node.textContent||'').trim());};
+    if(uploadOwner&&uploadOwner.signature!==signature)return{ok:false,error:'Сначала завершите предыдущее прикрепление файлов'};
+    if(!uploadOwner){
+      const inputs=allElements('input[type="file"]',scope).filter(input=>!input.disabled);
+      const globalInputs=inputs;
+      if(globalInputs.length>1)return{ok:false,error:'Найдено несколько полей загрузки файлов; загрузка не начата'};
+      const input=globalInputs[0];
+      const existingAssets=allElements('img, video, audio, ms-prompt-attachment, ms-file-preview, ms-attachment, .attachment, .file-preview, .file-chip, [data-file-name], [data-attachment-id]',scope);
+      const removeAssets=allElements('button',scope).some(button=>labels(button).some(label=>/^(?:remove|delete|удалить)(?:\s+(?:file|attachment|asset|файл|вложение))?(?:\s|$)/i.test(label)));
+      if(input?.files?.length||existingAssets.length||removeAssets||names.some(name=>scopeLabels().includes(name)))return{ok:false,error:'В поле уже есть вложения. Они сохранены; новое прикрепление не начато'};
+      if(input&&!input.multiple&&files.length>1)return{ok:false,error:'Штатное поле принимает только один файл'};
+      const transfer=new view.DataTransfer();for(const file of files)transfer.items.add(file);
+      uploadOwner={signature,key,names,input,attempted:true,started:Date.now(),acknowledged:false};
+      try{
+        if(input){
+          input.files=transfer.files;
+          uploadOwner.inputFiles=Array.from(input.files);
+          input.dispatchEvent(new view.Event('input',{bubbles:true}));
+          input.dispatchEvent(new view.Event('change',{bubbles:true}));
+        }else{
+          for(const type of ['dragenter','dragover','drop'])scope.dispatchEvent(new view.DragEvent(type,{bubbles:true,cancelable:true,dataTransfer:transfer}));
+        }
+      }catch(error){return{ok:false,error:'Не удалось передать файл штатному загрузчику: '+error.message};}
+    }
+    while(isCurrent()){
+      const errors=elements('[role="alert"], .error-message',scope).map(text).filter(Boolean);
+      if(errors.length)return{ok:false,error:'AI Studio отклонила вложение: '+errors.join(' ')};
+      const busy=elements('[role="progressbar"], mat-progress-bar, mat-spinner, mat-progress-spinner, [aria-busy="true"]',scope).length>0;
+      const labels=scopeLabels(),named=names.every(name=>labels.includes(name));
+      if(named||busy)uploadOwner.acknowledged=true;
+      if(!uploadOwner.acknowledged&&Date.now()-uploadOwner.started>10000)return{ok:false,error:'AI Studio не подтвердила прикрепление файла. Результат сохранён; сообщение не отправлено'};
+      const run=submitButton();
+      if(named&&!busy&&run&&!run.disabled&&attr(run,'aria-disabled')!=='true')return{ok:true};
+      await new Promise(resolve=>(view.setTimeout||setTimeout)(resolve,250));
+    }
+    return{ok:false,error:'Прикрепление остановлено. Уже выбранные файлы сохранены в поле ввода'};
+  };
+  const releaseFiles=key=>{
+    if(!uploadOwner||uploadOwner.key!==key)return;
+    const input=uploadOwner.input,owned=uploadOwner.inputFiles;
+    if(input&&owned&&input.files?.length===owned.length&&Array.from(input.files).every((file,index)=>file===owned[index]))input.value='';
+    uploadOwner=null;
   };
   let systemStageError = '';
   const stageSystemInstructions = async (value) => {
@@ -427,7 +486,7 @@
     const count = Math.ceil(chars / 4);
     const model = recognized.filter(el => role(el) === 'model').pop();
     if (!model) return count;
-    const label = `Контекст загруженных сообщений: ≈ ${count} токенов (оценка)`;
+    const label = `Текст сообщений: ≈ ${count} токенов (оценка; содержимое вложений не учтено)`;
     const existing = allElements('[data-webcodex-context]', model)[0];
     if (existing && text(existing) === label) return count;
     if (existing) existing.remove();
@@ -437,5 +496,5 @@
     model.appendChild(note);
     return count;
   };
-  return { inspect, stage, submit, stageSystemInstructions, getSystemStageError: () => systemStageError, hasDelivery, deliveryTurns, cleanup, restoreCleanup, annotateContext };
+  return { inspect, stage, submit, attachFiles, ownsDraft, releaseFiles, stageSystemInstructions, getSystemStageError: () => systemStageError, hasDelivery, deliveryTurns, cleanup, restoreCleanup, annotateContext };
 });

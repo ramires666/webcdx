@@ -670,7 +670,7 @@ test('context annotation counts hidden turns and stays out of model text and rep
   assert.equal(state.adapter.annotateContext(), expected);
   const notes = state.model.querySelectorAll('[data-webcodex-context]');
   assert.equal(notes.length, 1);
-  assert.equal(notes[0].textContent, `Контекст загруженных сообщений: ≈ ${expected} токенов (оценка)`);
+  assert.equal(notes[0].textContent, `Текст сообщений: ≈ ${expected} токенов (оценка; содержимое вложений не учтено)`);
   assert.equal(state.adapter.inspect().latestModel.text, 'answer');
   assert.equal(state.adapter.annotateContext(), expected);
   assert.equal(state.model.querySelectorAll('[data-webcodex-context]').length, 1);

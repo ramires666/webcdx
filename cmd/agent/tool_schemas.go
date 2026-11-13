@@ -32,6 +32,10 @@ func localTools(version string) []mcpToolDefinition {
 		"offset": integerField("First returned line.", 1), "line_count": integerField("Returned line count.", 0),
 		"next_offset": integerField("Next line offset.", 1), "truncated": booleanField("Whether more content is available."),
 	}, "path", "content", "sha256", "size", "offset", "line_count", "next_offset", "truncated")
+	attachment := object(map[string]any{"uri": stringField("Embedded resource URI."), "name": stringField("Attachment filename."), "mimeType": stringField("MIME type."), "size": integerField("Attachment size in bytes.", 0), "sha256": stringField("Attachment SHA-256.")}, "uri", "name", "mimeType", "size", "sha256")
+	fileReadOutput["properties"].(map[string]any)["attachment"] = attachment
+	fileReadOutput["required"] = []string{"path", "sha256", "size", "offset", "line_count", "next_offset", "truncated"}
+	fileReadOutput["oneOf"] = []any{map[string]any{"required": []string{"content"}, "not": map[string]any{"required": []string{"attachment"}}}, map[string]any{"required": []string{"attachment"}, "not": map[string]any{"required": []string{"content"}}}}
 	writeOutput := object(map[string]any{
 		"path": stringField("Normalized absolute path."), "bytes_written": integerField("Bytes written.", 0),
 		"sha256": stringField("Lowercase SHA-256 of the resulting file."),
@@ -79,6 +83,7 @@ func localTools(version string) []mcpToolDefinition {
 
 	readInput := object(map[string]any{
 		"path": stringField("Absolute file path."), "offset": integerField("First line, starting at 1.", 1), "limit": integerField("Maximum number of lines.", 1),
+		"delivery": map[string]any{"type": "string", "enum": []string{"text", "file"}, "description": "Text by default. File returns exact bytes as an embedded MCP resource, including binary documents."},
 	}, "path")
 	v3WriteInput := object(map[string]any{
 		"path": stringField("Absolute file path."), "content": stringField("Exact text content; an empty string is valid."),

@@ -33,7 +33,7 @@ test('compiled local agent discovers, executes once and reconnects without Gate 
   }
   let child = start();
   let { client, init } = await discover();
-  assert.equal(init.serverInfo.version, '1.5.0-ai-studio-alpha.5');
+  assert.equal(init.serverInfo.version, '1.5.0-ai-studio-alpha.6');
   const endpoint = client.endpoint, agentIdentity = client.agentIdentity;
   const tools = await client.listTools();
   assert.ok(tools.some(tool => tool.name === 'exec_command'));
@@ -60,12 +60,21 @@ test('compiled local agent discovers, executes once and reconnects without Gate 
   assert.equal(largeWrite.status,'completed');assert.ok(fs.readFileSync(largePath,'utf8')===content,'large write must preserve exact UTF-8');
   const largeRead=await client.createOperation({key:'large-read',name:'read_file',arguments:{path:largePath},agentId:'local'});
   assert.ok(largeRead.result.structuredContent.content===content,'large HTTP result must preserve the entire file');
+  const attachmentRead=await client.createOperation({key:'large-file-attachment',name:'read_file',arguments:{path:largePath,delivery:'file'},agentId:'local'});
+  assert.equal(attachmentRead.status,'completed');
+  const resource=attachmentRead.result.content.find(item=>item.type==='resource').resource;
+  assert.equal(Buffer.from(resource.blob,'base64').toString('utf8'),content);
+  assert.equal(attachmentRead.result.structuredContent.content,undefined,'attachment is not duplicated in text JSON');
+  const pdfPath=path.join(root,'document.pdf'),pdf=Buffer.from('%PDF-1.7\n\x00\xff\xfePDF','latin1');fs.writeFileSync(pdfPath,pdf);
+  const pdfRead=await client.createOperation({key:'binary-file-attachment',name:'read_file',arguments:{path:pdfPath,delivery:'file'},agentId:'local'});
+  assert.equal(pdfRead.status,'completed');assert.equal(pdfRead.result.structuredContent.attachment.mimeType,'application/pdf');
+  assert.deepEqual(Buffer.from(pdfRead.result.content.find(item=>item.type==='resource').resource.blob,'base64'),pdf);
   client.close(); await stop(child); child = start();
   ({ client } = await discover({ endpoint, agentIdentity }));
   assert.deepEqual(await client.getOperation(op.operation_id), op);
   assert.deepEqual(await client.createOperation(args), op);
   client.close();
-  assert.match(logs, /Studio local connected: agent=1\.5\.0-ai-studio-alpha\.5 extension=0\.3\.12/);
+  assert.match(logs, /Studio local connected: agent=1\.5\.0-ai-studio-alpha\.6 extension=0\.3\.13/);
   assert.match(logs, /Gate не используется/);
   assert.doesNotMatch(logs, /connected to Gate|Не удалось получить настройки/);
   assert.equal(fs.existsSync(path.join(appdata, 'webcodex', 'studio', 'native-host.json')), false);

@@ -10,7 +10,35 @@ Main features:
 - **Multiple computers:** discover available agents and route each operation to the selected machine.
 - **Access management:** configure OAuth connections, permitted computers, and tool permissions through the web admin interface.
 
-## AI Studio Bridge (alpha 0.3.12)
+## AI Studio Bridge (alpha 0.3.13)
+
+Version `0.3.13` sends successful `read_file` results as native chat attachments.
+The agent's optional `delivery:file` mode returns exact bytes as an embedded MCP
+resource, with filename, MIME type, size and SHA-256. The extension transfers bytes
+to the bound tab in chunks, verifies them, creates real `File` objects and uses
+the prompt's file input or drag-and-drop handler. Only compact metadata enters
+the chat JSON. Existing drafts and attachments are protected; Run waits for file
+acknowledgement and upload readiness. File transfer is cancellable and does not
+repeat the agent read. Old agents retain text-read compatibility; other MCP
+clients continue to receive text unless they explicitly request file delivery.
+
+**Attach read files** is enabled by default and can be disabled for subsequent
+reads. PDF and other binary files require the newly compiled agent
+`1.5.0-ai-studio-alpha.6`, ready at `bin/ai-studio-bridge/webcodex-agent.exe`.
+Update the complete extension folder from the ZIP, including `vendor`, reload it
+in `chrome://extensions` and reload a saved AI Studio tab. Restart Jinn with its
+existing launcher to activate alpha.6; no local compilation is required. Gate
+needs no replacement or restart for this feature. Existing local/Gate settings
+and separate source policies remain in effect. A result interrupted before Run
+is cached for explicit delivery; uncertain submission is checked without replay.
+
+Executable calls rendered as ordinary Markdown are rejected before execution,
+because Markdown can remove operators inside command strings. Instructions now
+show a real multiline fenced example. AI Studio generation errors are surfaced
+instead of being labelled successful final answers. File contents still count
+towards the model's context; the extension's text estimate excludes attachments.
+Tests cover native FileList/drop in an isolated Chrome profile and actual local
+and Gate transport. The live authenticated AI Studio upload remains unverified.
 
 Version `0.3.12` replaces the handwritten JSON token scanner and duplicate-key
 reader with Microsoft's [jsonc-parser](https://github.com/microsoft/node-jsonc-parser)
@@ -93,8 +121,8 @@ An uncertain command is not automatically replayed. The live AI Studio page has
 not been verified; its DOM selectors remain alpha.
 
 The ready-to-use kit is in
-[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.12`
-and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.5`. No local
+[`bin/ai-studio-bridge`](bin/ai-studio-bridge) in this working copy: extension ZIP version `0.3.13`
+and compiled `webcodex-agent.exe` version `1.5.0-ai-studio-alpha.6`. No local
 build is required. Direct local mode does not need Gate. Replace the agent and extension, reload it in
 `chrome://extensions`, and reload an already saved AI Studio tab. Do not reload
 a tab with an unsaved conversation. Restart the agent with the existing Jinn launcher;

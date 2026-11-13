@@ -1,8 +1,16 @@
 {
   "name": "helper-ai-studio-bridge",
   "private": true,
-  "version": "0.3.12",
-  "scripts": { "build:vendor": "node build-vendor.cjs", "test": "node --test *.test.cjs" },
-  "dependencies": { "jsonc-parser": "3.3.1", "jsonrepair": "3.15.0" },
-  "devDependencies": { "esbuild": "0.28.2" }
+  "version": "0.3.13",
+  "scripts": {
+    "build:vendor": "node build-vendor.cjs",
+    "test": "node --test *.test.cjs"
+  },
+  "dependencies": {
+    "jsonc-parser": "3.3.1",
+    "jsonrepair": "3.15.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
 }

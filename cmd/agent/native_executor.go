@@ -459,6 +459,10 @@ func rpcError(id json.RawMessage, code int, message string) json.RawMessage {
 }
 
 func toolResult(id json.RawMessage, value any, callErr error) json.RawMessage {
+	if file, ok := value.(fileAttachment); ok && callErr == nil {
+		encoded, _ := json.Marshal(file.Metadata)
+		return rpcResult(id, map[string]any{"isError": false, "structuredContent": file.Metadata, "content": []map[string]any{{"type": "text", "text": string(encoded)}, {"type": "resource", "resource": file.Resource}}})
+	}
 	if img, ok := value.(browserImage); ok && callErr == nil {
 		encoded, _ := json.Marshal(img.Result)
 		return rpcResult(id, map[string]any{"isError": false, "structuredContent": img.Result, "content": []map[string]any{{"type": "text", "text": string(encoded)}, {"type": "image", "mimeType": "image/jpeg", "data": img.Data}}})

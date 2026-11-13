@@ -6,11 +6,11 @@
   window.__webcodexBridgeDispose?.();
   window.__webcodexBridgeLoaded = true;
   const adapter=WebCodexStudio.createAdapter(document,location);
-  const contentVersion='0.3.12';
+  const contentVersion='0.3.13';
   const pageInstance=Date.now()+'-'+Math.random();
   let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, newChatPending=false, newChatRequestInFlight=false, attempted=new Set(), recoverTurn='', recoverTools=[], turnless=false, turnlessRecovery=false, observedUserText='', observedResultId='', observedContext='';
   let awaitingResponse=false, generationSeen=false, generationCounter=0, baselineModelText='';
-  let deliveryPending = false, retired = false, allowedFollowupId = '';
+  let deliveryPending = false, attachmentPending=false, retired = false, allowedFollowupId = '', deliveryRevision=0;
   let hadConversation = false, emptyObservations = 0;
   let checkInstructions=false, instructionCheckPending=false, systemStagePending=false;
   let historyCandidate='', historyObservations=0, navigationRevision=0;
@@ -29,8 +29,28 @@
     return JSON.stringify([pageInstance,generation,resultId,userHash,modelHash]);
   }
   function visibleResultId(user){const parsed=parsedResult(user?.text)?.operation_id,id=typeof user?.operationId==='string'&&user.operationId?user.operationId:'';return id||parsed||'';}
-  function snapshot(operationId,conversationReplaced=false,expectedResultText){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser);const observerStatus=!s.supported?'unsupported':checkInstructions||systemStagePending?'checking':s.generating?'generating':!s.latestModel||s.modelAfterUser===false?'waiting_model':turnless&&!awaitingResponse?'waiting_request':pendingReply?'settling':'observing';return {observerStatus,supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered:operationId?resultId===operationId||adapter.hasDelivery(operationId,expectedResultText):undefined};}
+  function snapshot(operationId,conversationReplaced=false,expectedResultText){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser);const observerStatus=attachmentPending?'attaching_files':!s.supported?'unsupported':checkInstructions||systemStagePending?'checking':s.generating?'generating':!s.latestModel||s.modelAfterUser===false?'waiting_model':turnless&&!awaitingResponse?'waiting_request':pendingReply?'settling':'observing';return {observerStatus,supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered:operationId?resultId===operationId||adapter.hasDelivery(operationId,expectedResultText):undefined};}
   function reportObserverError(error){if(!retired&&sessionId)send('studio.observerError',{observerStatus:'error',observerError:String(error.message||error)}).catch(()=>{});}
+  async function attachmentFiles(message,isCurrent){
+    const files=[];
+    for(const meta of message.attachments){
+      const parts=[];let offset=0;
+      while(offset<meta.encodedLength){
+        if(!isCurrent())throw Error('Прикрепление остановлено');
+        const response=await send('studio.fileChunk',{operationId:message.operationId,attachmentId:meta.id,offset});
+        const chunk=response?.fileChunk;
+        if(!response?.accepted||!chunk||!Number.isSafeInteger(chunk.nextOffset)||chunk.nextOffset<=offset||chunk.nextOffset>meta.encodedLength)throw Error(response?.error||'Неполная передача файла');
+        const binary=atob(chunk.data);parts.push(Uint8Array.from(binary,char=>char.charCodeAt(0)));offset=chunk.nextOffset;
+      }
+      if(!isCurrent())throw Error('Прикрепление остановлено');
+      const file=new File(parts,meta.name,{type:meta.mimeType});
+      const hash=await crypto.subtle.digest('SHA-256',await file.arrayBuffer());
+      const sha=Array.from(new Uint8Array(hash),value=>value.toString(16).padStart(2,'0')).join('');
+      if(file.size!==meta.size||sha!==meta.sha256)throw Error('Контрольная сумма прикрепляемого файла не совпала');
+      files.push(file);
+    }
+    return files;
+  }
   function hello(){const s=adapter.inspect();return{pageInstance,supported:s.supported,editorEmpty:s.editorEmpty,generating:s.generating,hasHistory:!!s.latestModel||!!s.latestUser,blankChat:s.supported&&s.editorEmpty&&(!s.generating||s.controlsPending)&&!s.latestModel&&!s.latestUser};}
   function resetReply(){pendingReply=null;clearTimeout(replyTimer);replyTimer=0;}
   function replySettled(s){
@@ -94,10 +114,11 @@
   function expectResponse(){const s=adapter.inspect();awaitingResponse=true;generationSeen=false;generationCounter++;attempted.clear();lastText='';baselineText='';baselineModelText=s.latestModel?.text||'';}
   async function observe(){if(retired)return;const s=adapter.inspect();if(s.supported&&s.latestModel&&s.latestUser){hadConversation=true;emptyObservations=0;}const blank=s.supported&&(!s.generating||s.controlsPending)&&s.editorEmpty&&!s.latestModel&&!s.latestUser;if(!blank)emptyObservations=0;else if(hadConversation&&!newChatPending&&!awaitingResponse&&!deliveryPending&&!allowedFollowupId&&!inFlight&&!checkInstructions&&++emptyObservations>=2)newChatPending=true;const conversationReplaced=newChatPending&&blank;if(conversationReplaced){if(newChatRequestInFlight)return;newChatRequestInFlight=true;try{const transition={...snapshot(undefined,true),error:'Conversation was replaced'};if(sessionId)await send('studio.snapshot',transition);else await send('studio.hello',{pageInstance,...transition});}finally{newChatRequestInFlight=false;}return;}if(!sessionId||newChatPending)return;if(!s.supported){await send('studio.snapshot',snapshot());return;}
     if(systemStagePending||await ensureSavedInstructions(s))return;
-    if(turnless){const userText=s.latestUser?.text||'',resultId=visibleResultId(s.latestUser);if(resultId)observedResultId=resultId;observedUserText=userText;const context=JSON.stringify([observedResultId,observedUserText]);if(context!==observedContext){observedContext=context;attempted.clear();lastText='';baselineText='';}trackGeneration(s);if(resultId&&resultId===allowedFollowupId&&s.modelAfterUser===true&&!awaitingResponse){generationCounter++;awaitingResponse=true;generationSeen=true;baselineModelText='';}if(s.modelAfterUser===false)return;}
+    if(turnless){const userText=s.latestUser?.text||'',resultId=visibleResultId(s.latestUser);if(resultId){observedResultId=resultId;adapter.releaseFiles?.(resultId);}observedUserText=userText;const context=JSON.stringify([observedResultId,observedUserText]);if(context!==observedContext){observedContext=context;attempted.clear();lastText='';baselineText='';}trackGeneration(s);if(resultId&&resultId===allowedFollowupId&&s.modelAfterUser===true&&!awaitingResponse){generationCounter++;awaitingResponse=true;generationSeen=true;baselineModelText='';}if(s.modelAfterUser===false)return;}
     if(s.generating){resetReply();return;}
     if(stopping){resetReply();stopping=false;lastText=s.latestModel?.text||'';if(turnless){awaitingResponse=false;allowedFollowupId='';}return;}
     const model=s.latestModel;if(!model||model.text===baselineText||!model.text||model.text===lastText)return;
+    if(s.modelError&&!s.generating){await send('studio.modelError',{error:s.modelError});lastText=model.text;return;}
     if(turnless&&(!awaitingResponse||!generationSeen&&model.text===baselineModelText))return;
     const recoveringTurn=!!recoverTurn;if(recoveringTurn){try{if(!WebCodexProtocol.parseCall(model.text,recoverTurn,recoverTools))return;}catch{return;}}
     if(!replySettled(s))return;
@@ -105,7 +126,7 @@
       const contextFields=turnless?{responseKey:await responseKeyFor(callGeneration,observedResultId,observedUserText,model.text),precedingResultId:observedResultId}:{};
       const current=adapter.inspect();
       if(sessionId!==callSession||current.generating||current.latestModel?.text!==model.text||(current.latestModel?.sourceText??model.text)!==(model.sourceText??model.text)||turnless&&(callGeneration!==generationCounter||callContext!==observedContext||!awaitingResponse))return;
-      const response=await send('studio.call',{text:model.text,conversationKey,generating:false,...contextFields});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```helper-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
+      const response=await send('studio.call',{text:model.text,...(model.sourceError?{sourceError:model.sourceError}:{}),conversationKey,generating:false,...contextFields});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```helper-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
   }
   const schedule=()=>{if(retired)return;try{if(turnless&&!checkInstructions)trackGeneration(adapter.inspect());clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(reportObserverError),250);}catch(error){reportObserverError(error);}};
   document.addEventListener('click',event=>{
@@ -134,7 +155,7 @@
   window.__webcodexBridgeDispose=retire;
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
     if(retired)return;
-    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup','studio.captureWrite','studio.captureCall'].includes(m.type)){reply({ok:false});return;}
+    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup','studio.captureWrite','studio.captureCall','studio.cancelDelivery'].includes(m.type)){reply({ok:false});return;}
     if(m.type==='studio.arm'){
       const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
       if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
@@ -143,11 +164,13 @@
       sessionId=m.sessionId;conversationKey=s.conversationKey;turnless=!!m.turnless;turnlessRecovery=turnless&&!!m.recover;awaitingResponse=false;generationSeen=false;generationCounter=0;allowedFollowupId='';baselineModelText=s.latestModel?.text||'';observedUserText=s.latestUser?.text||'';observedResultId='';observedContext=JSON.stringify([observedResultId,observedUserText]);recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;newChatRequestInFlight=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
     }
     if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
+    if(m.type==='studio.cancelDelivery'){deliveryRevision++;reply({ok:true});return;}
     if(m.type==='studio.captureWrite'||m.type==='studio.captureCall'){
       const s=adapter.inspect();
       if(checkInstructions||!s.supported||s.generating||!s.latestModel){reply({ok:false,error:'Дождитесь полного ответа модели и завершения перехода в чат'});return;}
       try{
         const selected=m.type==='studio.captureWrite'?[m.tool]:m.tools||[];
+        if(s.latestModel.sourceError)throw Error(s.latestModel.sourceError);
         const call=WebCodexProtocol.parseCall(s.latestModel.text,null,selected);
         if(!call||m.type==='studio.captureWrite'&&call.name!=='write_file')throw Error('В последнем ответе нет единственного корректного выбранного вызова');
         resetReply();baselineText=s.latestModel.text;lastText=baselineText;awaitingResponse=false;allowedFollowupId='';
@@ -182,8 +205,35 @@
       if(lastDelivered===m.text){reply({ok:false,attempted:true,...state});return;}
       if(deliveryPending){reply({ok:false,attempted:true,...state});return;}
       let operationId;try{const result=JSON.parse(m.text);if(!WebCodexProtocol.isResult(result))throw Error();operationId=result.operation_id;}catch{reply({ok:false,attempted:false,...state});return;}
+      if(m.attachments?.length&&m.operationId!==operationId){reply({ok:false,attempted:false,...state,error:'File operation does not match the result'});return;}
       const deliverySession=sessionId,deliveryNavigation=navigationRevision;
       deliveryPending=true;
+      if(m.attachments?.length){
+        attachmentPending=true;
+        const revision=deliveryRevision;
+        const current=()=>sessionId===deliverySession&&navigationRevision===deliveryNavigation&&deliveryRevision===revision;
+        reply({ok:true,attempted:false,pending:true,...state});
+        (async()=>{
+          let attempted=false;
+          try{
+            const files=await attachmentFiles(m,current);
+            if(!current()||!adapter.stage(wrapped))throw Error('Поле ввода изменилось; прикрепление остановлено');
+            const stillOwned=()=>current()&&adapter.ownsDraft(wrapped)&&!adapter.inspect().generating;
+            const attached=await adapter.attachFiles(files,{key:operationId,isCurrent:stillOwned});
+            if(!attached.ok)throw Error(attached.error);
+            if(!stillOwned())throw Error('Поле ввода изменилось; сообщение не отправлено');
+            const intent=await send('studio.deliveryStarted',{operationId});
+            if(!intent?.accepted||!stillOwned())throw Error('Отправка остановлена до нажатия Run');
+            attempted=true;
+            const ok=await adapter.submit(wrapped,stillOwned);
+            if(ok){lastDelivered=m.text;if(turnless)allowedFollowupId=operationId;}
+            const proof=snapshot(operationId,false,m.text);
+            if(proof.delivered)adapter.releaseFiles?.(operationId);
+            await send('studio.deliveryComplete',{operationId,ok,attempted:ok,confirmed:ok&&proof.delivered,error:ok?undefined:'AI Studio не подтвердила отправку сообщения'});
+          }catch(error){await send('studio.deliveryComplete',{operationId,attempted,confirmed:false,error:String(error.message||error)}).catch(()=>{});}
+          finally{deliveryPending=false;attachmentPending=false;}
+        })();return;
+      }
       (async()=>{
         try{
           const ok=await adapter.submit(wrapped,()=>sessionId===deliverySession&&navigationRevision===deliveryNavigation);

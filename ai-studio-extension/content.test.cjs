@@ -9,12 +9,42 @@ const unwrapResult = text => {
   return match ? match[1] : text;
 };
 
+test('file chunks become a verified File and delivery acknowledges before waiting for native upload',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  const bytes=Buffer.from('exact file Привет\r\n'.repeat(9000)),data=bytes.toString('base64'),sha256=require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  h.setSendHandler(message=>message.type==='studio.fileChunk'?{accepted:true,fileChunk:{data:data.slice(message.offset,message.offset+65536),nextOffset:Math.min(data.length,message.offset+65536)}}:{accepted:true});
+  let release;
+  h.setUploadHandler(()=>new Promise(resolve=>{release=()=>resolve({ok:true});}));
+  const reply=await h.send({type:'studio.deliver',sessionId:'s1',operationId:'op-file',text:JSON.stringify({type:'helper-result',operation_id:'op-file',name:'read_file',result:{attachment:{name:'readme.txt'}}}),submit:true,attachments:[{id:sha256,name:'readme.txt',mimeType:'text/plain',sha256,size:bytes.length,encodedLength:data.length}]});
+  assert.equal(reply.pending,true);assert.equal(h.submitted.length,0);
+  for(let i=0;i<20&&!release;i++)await h.flush();
+  assert.ok(release,JSON.stringify(h.sent.filter(message=>message.type==='studio.deliveryComplete')));assert.equal(await h.uploaded[0][0].text(),bytes.toString('utf8'));
+  assert.equal((await h.send({type:'studio.snapshot',sessionId:'s1'})).observerStatus,'attaching_files');
+  release();await h.flush();await h.flush();
+  assert.equal(h.submitted.length,1);assert.ok(h.sent.some(message=>message.type==='studio.deliveryComplete'&&message.confirmed));
+});
+
+test('native upload cancellation never clicks Run or loses the operation result',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  const bytes=Buffer.from('file'),data=bytes.toString('base64'),sha256=require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  h.setSendHandler(message=>message.type==='studio.fileChunk'?{accepted:true,fileChunk:{data,nextOffset:data.length}}:{accepted:true});
+  let release;h.setUploadHandler(()=>new Promise(resolve=>{release=()=>resolve({ok:true});}));
+  await h.send({type:'studio.deliver',sessionId:'s1',operationId:'op-file',text:JSON.stringify({type:'helper-result',operation_id:'op-file'}),submit:true,attachments:[{id:sha256,name:'readme.txt',mimeType:'text/plain',sha256,size:bytes.length,encodedLength:data.length}]});
+  for(let i=0;i<20&&!release;i++)await h.flush();
+  await h.send({type:'studio.cancelDelivery',sessionId:'s1'});release();await h.flush();await h.flush();
+  assert.equal(h.submitted.length,0);assert.ok(h.sent.some(message=>message.type==='studio.deliveryComplete'&&message.attempted===false));
+});
+
 function harness({manualClock=false}={}) {
   const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', latestModel: { text: 'old answer' }, latestUser: null };
-  let timerId = 0, now=10000, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false, submitHandler;
+  let timerId = 0, now=10000, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false, submitHandler, uploadHandler;
+  const uploaded=[];
   class TestDate extends Date {static now(){return now;}}
   const adapter = {
     inspect: () => ({ ...state, latestModel: state.latestModel && { ...state.latestModel }, latestUser: state.latestUser && { ...state.latestUser } }),
+    ownsDraft:value=>staged[staged.length-1]===value,
+    attachFiles:async(files,options)=>{uploaded.push(files);return uploadHandler?uploadHandler(files,options):{ok:options.isCurrent()};},
+    releaseFiles(){},
     stage: text => { staged.push(text); return state.editorEmpty && !state.generating; }, stageSystemInstructions: async () => true,
     submit: async (text, isCurrent) => { if(submitHandler)return submitHandler(text,isCurrent);if(!state.editorEmpty)return false;submitted.push(text);return true; },
     hasDelivery: (operationId, expectedText) => submitted.some(text => {
@@ -30,7 +60,7 @@ function harness({manualClock=false}={}) {
   const window = {}; window.top = window;
   class MutationObserver { constructor(callback) { observerCallback = callback; } observe() {} disconnect() { disconnected = true; } }
   const context = { window, location: new URL('https://aistudio.google.com/app/prompts/one'), URL, document, chrome, WebCodexStudio: { createAdapter: () => adapter }, MutationObserver,
-    setTimeout: (fn,ms=0) => { const id = ++timerId; timers.set(id, {fn,at:now+ms}); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, Date:TestDate, TextEncoder, structuredClone, crypto:{subtle:{digest:async(_algorithm,data)=>require('node:crypto').createHash('sha256').update(data).digest()}}, WebCodexProtocol };
+    setTimeout: (fn,ms=0) => { const id = ++timerId; timers.set(id, {fn,at:now+ms}); return id; }, clearTimeout: id => timers.delete(id), setInterval: fn => { context.interval = fn; return 1; }, clearInterval: () => { cleared = true; }, Promise, JSON, String, Set, File, atob, Uint8Array, ArrayBuffer, Date:TestDate, TextEncoder, structuredClone, crypto:{subtle:{digest:async(_algorithm,data)=>require('node:crypto').createHash('sha256').update(new Uint8Array(data)).digest()}}, WebCodexProtocol };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context, { filename: 'content.js' });
   const send = message => new Promise(resolve => listeners.message(message, {}, response => resolve(structuredClone(response))));
   const flush = async () => {
@@ -43,7 +73,7 @@ function harness({manualClock=false}={}) {
     }
     throw Error('timers did not settle');
   };
-  return { state, sent, staged, submitted, send, flush, advance:ms=>{now+=ms;}, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), key: event => documentListeners.keydown(event), run: () => { const button={getAttribute:name=>name==='aria-label'?null:'',innerText:'Run\nkeyboard_return',textContent:''};documentListeners.click({target:{closest:()=>button}}); }, setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
+  return { state, sent, staged, submitted, uploaded, setUploadHandler:fn=>{uploadHandler=fn;}, send, flush, advance:ms=>{now+=ms;}, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), key: event => documentListeners.keydown(event), run: () => { const button={getAttribute:name=>name==='aria-label'?null:'',innerText:'Run\nkeyboard_return',textContent:''};documentListeners.click({target:{closest:()=>button}}); }, setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
 }
 
 test('delivery waits for async Run readiness and aborts after disarm', async () => {
