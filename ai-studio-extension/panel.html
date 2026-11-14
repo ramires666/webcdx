@@ -71,6 +71,15 @@
       <button id="approve" type="button">Одобрить вызов</button>
     </section>
 
+    <section id="reply-error" aria-labelledby="reply-error-heading" hidden>
+      <h2 id="reply-error-heading">Ошибка ответа</h2>
+      <p id="reply-error-reason"></p>
+      <label for="reply-error-source">Исходник ответа</label>
+      <textarea id="reply-error-source" rows="5" readonly></textarea>
+      <button id="retry-reply" type="button">Разобрать повторно локально</button>
+      <button id="request-correction" type="button" class="secondary">Запросить исправление у модели</button>
+    </section>
+
     <section aria-labelledby="result-heading">
       <h2 id="result-heading">Результат</h2>
       <label for="result">Текст для AI Studio</label>

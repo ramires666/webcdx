@@ -85,7 +85,8 @@ test('old scripts and corrupted Markdown commands cannot start an agent operatio
   const initial=saved();initial.session.automatic=true;initial.session.turnless=true;
   const current=harness(initial,{}, {bridgeAuto:{enabled:true,consent:true,agentId:'agent-1',toolNames:['read_file'],automatic:true}});await current.status();
   await current.message({type:'studio.call',sessionId:'session-1',responseKey:'markdown',sourceError:'Markdown changed executable source',text:JSON.stringify({v:1,name:'read_file',arguments:{path:'x'}})},current.page);
-  assert.equal(current.createCount,0);assert.match(JSON.parse(current.pageMessages.find(message=>message.type==='studio.deliver').text).transport_error,/Markdown/);
+  assert.equal(current.createCount,0);assert.equal(current.deliveryCount,0);
+  assert.equal((await current.status()).state.session.replyError.code,'extraction');
 });
 
 test('AI Studio generation failure stays visible and never repeats the previous command',async()=>{
@@ -120,26 +121,29 @@ test('file delivery is chunked, private to its operation and completes without a
   assert.deepEqual((await h.status()).state.session.attachments,[]);
 });
 
-test('uncertain validation feedback is checked without a resend or any agent operation',async()=>{
+test('explicit uncertain validation feedback is checked without a resend or any agent operation',async()=>{
   const initial=saved();Object.assign(initial.session,{turnless:true,automatic:true});
-  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.deliver'?{ok:true,attempted:true,confirmed:false,supported:true}:msg.type==='studio.snapshot'?{supported:true,delivered:false}:{ok:true,supported:true}}, {bridgeAuto:{enabled:true,consent:true,agentId:'agent-1',toolNames:['read_file'],automatic:true}});
+  const text='{"v":1,"name":"read_file","arguments":';
+  const h=harness(initial,{sendMessage:async(_id,msg)=>msg.type==='studio.readReply'?{ok:true,text,responseKey:'invalid-one',conversationKey:'chat-1'}:msg.type==='studio.deliver'?{ok:true,attempted:true,confirmed:false,supported:true}:msg.type==='studio.snapshot'?{supported:true,delivered:false}:{ok:true,supported:true}}, {bridgeAuto:{enabled:true,consent:true,agentId:'agent-1',toolNames:['read_file'],automatic:true}});
   await h.status();
   const result=await h.message({type:'studio.call',sessionId:'session-1',responseKey:'invalid-one',text:'{"v":1,"name":"read_file","arguments":',generating:false},h.page);
   assert.equal(result.accepted,true);
+  assert.equal((await h.message({type:'bridge.requestCorrection'})).ok,true);
   await h.alarm();await h.alarm();
   const state=(await h.status()).state.session;
   assert.equal(state.phase,'delivery_uncertain');assert.match(state.operationId,/^validation-/);
   assert.equal(h.createCount,0);assert.equal(h.pageMessages.filter(message=>message.type==='studio.deliver').length,1);
 });
 
-test('validation feedback cannot bypass automatic mode or revoked consent',async()=>{
+test('local validation sends zero feedback in manual mode and with revoked consent',async()=>{
   for(const [automatic,consent]of [[false,true],[true,false]]){
     const initial=saved();Object.assign(initial.session,{turnless:true,automatic});
     const h=harness(initial,{}, {bridgeAuto:{enabled:true,consent,agentId:'agent-1',toolNames:['read_file'],automatic}});
     await h.status();
     const result=await h.message({type:'studio.call',sessionId:'session-1',responseKey:'invalid-one',text:'{"v":1,"name":"read_file","arguments":',generating:false},h.page);
-    assert.equal(result.accepted,false);assert.equal(h.createCount,0);
+    assert.equal(result.accepted,true);assert.equal(h.createCount,0);
     assert.equal(h.pageMessages.some(message=>message.type==='studio.deliver'),false);
+    if(!consent)assert.equal((await h.message({type:'bridge.requestCorrection'})).ok,false);
   }
 });
 

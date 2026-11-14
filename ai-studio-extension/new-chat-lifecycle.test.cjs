@@ -64,7 +64,8 @@ function harness({manualClock=false,tools=[tool]}={}) {
   const clearChatWithoutClick=()=>{model=null;latestUser=null;modelAfterUser=false;editorEmpty=true;historyAnchor=null;historyStart='';};
   const openSavedChat=(userText,modelText)=>{context.document.click({target:{closest:()=>({getAttribute:name=>name==='href'?'/prompts/saved-chat':null})}});historyAnchor={};historyStart=userText;latestUser={text:userText};model={text:modelText,element:{}};modelAfterUser=true;};
   const setSupported=value=>{supported=value;};
-  return { chrome, local, messages, staged, db, operations, rerenderHistory: text=>{historyAnchor={};historyStart=text;observerCallback();}, clearChatWithoutClick, openSavedChat, setSupported, replyImmediatelyAfterDelivery: text => autoReplies.push(text), renderModelFragment: text => {model={text,element:{}};modelAfterUser=true;observerCallback();}, missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() {
+  const panel=type=>new Promise(resolve=>bgListeners[0]({type},{url:chrome.runtime.getURL('panel.html')},resolve));
+  return { panel, chrome, local, messages, staged, db, operations, rerenderHistory: text=>{historyAnchor={};historyStart=text;observerCallback();}, clearChatWithoutClick, openSavedChat, setSupported, replyImmediatelyAfterDelivery: text => autoReplies.push(text), renderModelFragment: text => {model={text,element:{}};modelAfterUser=true;observerCallback();}, missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() {
     for(const fn of intervals.values())fn();await this.flush();
     for(let round=0;round<20&&timers.size;round++){
       if(!manualClock)now=Math.max(now,Math.min(...[...timers.values()].map(timer=>timer.at)));
@@ -129,24 +130,28 @@ test('a new chat runs repeated calls without inserting an ID or replaying an old
   }
 });
 
-test('a damaged tool envelope asks the model to correct the unsent call instead of stalling',async()=>{
+test('a damaged tool envelope retains its source locally with zero correction requests',async()=>{
   const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
   h.userMessage('Read a file');h.modelMessage('Проверю файл.\n{"v":1,"name":"read_file","arguments":{"path":"safe.txt"}');
   await h.tick();
   assert.equal(h.state.phase,'waiting_model');
-  const feedback=h.messages.find(message=>message.type==='studio.deliver');
-  assert.match(JSON.parse(feedback.text).transport_error,/BEFORE execution/);
+  assert.equal(h.messages.filter(message=>message.type==='studio.deliver').length,0);
+  assert.equal(h.state.replyError.code,'incomplete');
+  assert.match(h.state.replyError.sourceText,/safe.txt/);
   assert.equal(h.operations.length,0);
 });
 
-test('invalid call feedback accepts an immediate corrected Windows-path followup exactly once',async()=>{
+test('explicit correction accepts an immediate corrected Windows-path followup exactly once',async()=>{
   const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
   const stages=h.staged.length;
   h.replyImmediatelyAfterDelivery(String.raw`Просмотрим папку. `+'```helper-call\n'+String.raw`{"v":1,"name":"read_file","arguments":{"path":"W:\algo\agents.py"}}`);
   h.userMessage('Read rules');h.modelMessage('{"v":1,"name":"read_file","arguments":{"path":');
-  await h.tick();await h.tick();await h.tick();
+  await h.tick();
+  assert.equal(h.operations.length,0);
+  const requested=await h.panel('bridge.requestCorrection');assert.equal(requested.ok,true,requested.error);
+  await h.tick();await h.tick();
   assert.equal(h.operations.length,1);assert.equal(h.operations[0].arguments.path,'W:\\algo\\agents.py');
   assert.equal(h.state.phase,'waiting_model');assert.equal(h.state.error,'');
   assert.equal(h.staged.length,stages,'correction never reinitializes the chat');
@@ -155,14 +160,38 @@ test('invalid call feedback accepts an immediate corrected Windows-path followup
   assert.equal(JSON.parse(deliveries[1].text).name,'read_file');
 });
 
-test('an identical invalid correction is detected as a loop without running or resending anything',async()=>{
+test('alternating invalid answers never ask the model for corrections automatically',async()=>{
   const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
   await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
   const broken='{"v":1,"name":"read_file","arguments":{"path":';
-  h.replyImmediatelyAfterDelivery(broken);h.userMessage('Read');h.modelMessage(broken);
-  await h.tick();await h.tick();await h.tick();
-  assert.equal(h.operations.length,0);assert.equal(h.messages.filter(message=>message.type==='studio.deliver').length,1);
-  assert.equal(h.state.phase,'paused');assert.match(h.state.error,/повторила/);
+  for(const text of [broken,broken+'false',broken,broken+'false']){
+    h.userMessage('Read');h.modelMessage(text);await h.tick();await h.tick();
+  }
+  assert.equal(h.operations.length,0);assert.equal(h.messages.filter(message=>message.type==='studio.deliver').length,0);
+  assert.equal(h.state.phase,'waiting_model');assert.ok(h.state.replyError);
+});
+
+test('local reparse retains the same rejection and manual correction can be requested only once',async()=>{
+  const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  h.userMessage('Read');h.modelMessage('{"v":1,"name":"read_file","arguments":{"path":');await h.tick();
+  const first=h.state.replyError;
+  assert.equal((await h.panel('bridge.retryReply')).ok,true);
+  assert.equal(h.state.replyError.responseKey,first.responseKey);
+  assert.equal(h.messages.filter(message=>message.type==='studio.deliver').length,0);
+  assert.equal((await h.panel('bridge.requestCorrection')).ok,true);
+  assert.equal((await h.panel('bridge.requestCorrection')).ok,false);
+  assert.equal(h.messages.filter(message=>message.type==='studio.deliver').length,1);
+  assert.equal(h.operations.length,0);
+});
+
+test('manual correction refuses an answer changed since local rejection',async()=>{
+  const h=harness();await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  h.userMessage('Read');h.modelMessage('{"v":1,"name":"read_file","arguments":{"path":');await h.tick();
+  h.renderModelFragment('A different answer');
+  const reply=await h.panel('bridge.requestCorrection');assert.equal(reply.ok,false);
+  assert.equal(h.messages.filter(message=>message.type==='studio.deliver').length,0);
 });
 
 test('an automatic followup waits for a fully rendered path even if generation controls report idle',async()=>{
@@ -211,7 +240,8 @@ test('malformed, duplicated and injected calls extracted from generic DOM never 
     const state=setup();state.chunk.remove();state.model.children[0].add(new Node('future-renderer',{},raw));
     h.userMessage('Read file');h.modelMessage(state.adapter.inspect().latestModel.text);await h.tick();await h.tick();
     assert.equal(h.operations.length,0);assert.equal(h.state.phase,'waiting_model');
-    assert.ok(h.messages.some(message=>message.type==='studio.deliver'&&JSON.parse(message.text).name==='call_validation'));
+    assert.equal(h.messages.filter(message=>message.type==='studio.deliver').length,0);
+    assert.ok(h.state.replyError);
   }
 });
 

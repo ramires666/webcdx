@@ -70,6 +70,20 @@ test('resuming clears a resolved session error from the panel', async () => {
   assert.equal(p.get('error').textContent,'');
 });
 
+test('reply diagnostics expose exact source and require explicit correction action',async()=>{
+  const p=createPanel();
+  const session={phase:'waiting_model',replyError:{code:'format',message:'Damaged reply',sourceText:'raw \\n\n  ',correctionRequested:false}};
+  await p.update({connected:true,session,autoSettings:{consent:true}});
+  assert.equal(p.get('reply-error').hidden,false);
+  assert.equal(p.get('reply-error-source').value,session.replyError.sourceText);
+  assert.equal(p.get('request-correction').disabled,false);
+  await p.click('retry-reply');await p.click('request-correction');
+  assert.deepEqual(p.messages.filter(m=>m.type!=='bridge.status').map(m=>m.type),['bridge.retryReply','bridge.requestCorrection']);
+  session.replyError.correctionRequested=true;
+  await p.update({connected:true,session,autoSettings:{consent:true}});
+  assert.equal(p.get('request-correction').disabled,true);
+});
+
 test('idle connection can arm after consent; safe tools initialize once and empty selection stays empty', async () => {
   const p = createPanel();
   await p.update({ connected: false, session: { phase: 'idle' }, tools: [], agents: [] });

@@ -83,6 +83,13 @@
     if (session.instructions !== undefined && document.activeElement !== $('instructions')) $('instructions').value = session.instructions;
     if (session.error || page?.observerError || previousError) showError(session.error||page?.observerError);
     $('result').value = session.resultText || '';
+    const rejected=session.replyError;
+    $('reply-error').hidden=!rejected;
+    $('reply-error-reason').textContent=rejected?`[${rejected.code}] ${rejected.message}`:'';
+    $('reply-error-source').value=rejected?.sourceText||'';
+    const canRetry=!!rejected&&next.connected&&saved.consent===true&&!session.paused&&['waiting_model','ready'].includes(session.phase)&&!session.resumeBlocked&&!(session.pendingCall||session.operationKey||session.operationId||session.resultText);
+    $('retry-reply').disabled=!canRetry;
+    $('request-correction').disabled=!canRetry||!!rejected?.correctionRequested;
     $('hide-service').checked = !!next.hideServiceMessages;
     if (session.phase && !['idle', 'stopped'].includes(session.phase)) $('automatic').checked = !!session.automatic;
     const autoStatus=typeof next.autoStatus==='string'?next.autoStatus:next.autoStatus?.message||'';
@@ -139,6 +146,8 @@
   $('save-instructions').addEventListener('click', () => act('bridge.instructions', { submit: false }));
   $('approve').addEventListener('click', () => act('bridge.approve'));
   $('deliver').addEventListener('click', () => act('bridge.deliver', { submit: true }));
+  $('retry-reply').addEventListener('click', () => act('bridge.retryReply'));
+  $('request-correction').addEventListener('click', () => act('bridge.requestCorrection'));
   $('pause').addEventListener('click', () => act('bridge.pause'));
   $('resume').addEventListener('click', () => act('bridge.resume'));
   $('save-from-reply').addEventListener('click', () => act('bridge.saveFromReply'));

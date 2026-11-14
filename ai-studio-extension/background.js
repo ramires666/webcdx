@@ -148,6 +148,24 @@ async function command(m) {
     case 'bridge.instructions': if(m.submit!==false) throw Error('submit must be false');await stageInstructions();await save();break;
     case 'bridge.approve': await approve();break;
     case 'bridge.deliver': if(m.submit!==true) throw Error('submit must be true');await deliver(true);break;
+    case 'bridge.retryReply':
+    case 'bridge.requestCorrection': {
+      const s=state.session,rejected=s.replyError;
+      if(!rejected||!state.connected||state.autoSettings?.consent!==true||s.paused||!['waiting_model','ready'].includes(s.phase)||s.pendingCall||s.operationKey||s.operationId||s.resultText||s.resumeBlocked)throw Error('Повторный разбор доступен для текущего невыполненного ответа');
+      if(m.type==='bridge.requestCorrection'&&rejected.correctionRequested)throw Error('Исправление для этого ответа уже запрошено');
+      const captured=await chrome.tabs.sendMessage(s.tabId,{type:'studio.readReply',sessionId:s.sessionId});
+      if(!captured?.ok||captured.conversationKey!==s.conversationKey||captured.responseKey!==rejected.responseKey)throw Error(captured?.error||'Ответ или чат изменился, дождитесь новой локальной проверки');
+      if(m.type==='bridge.retryReply'){
+        delete s.lastResponseKey;
+        await studioMessage({...captured,type:'studio.call',sessionId:s.sessionId,generating:false,contentVersion:chrome.runtime.getManifest?.().version},{tab:{id:s.tabId}});
+      }else{
+        rejected.correctionRequested=true;s.nextTurn=uuid();s.operationId='validation-'+uuid();
+        s.resultText=WebCodexProtocol.buildResult({turnless:!!s.turnless,turn:s.turn,nextTurn:s.nextTurn,operationId:s.operationId,name:'call_validation',error:'The call was rejected BEFORE execution. '+rejected.message+'. Send exactly one complete corrected call using the selected tool schema. Do not repeat previous successful operations.'});
+        s.phase='result_ready';s.error='';s.notice='Пользователь запросил исправление ответа.';
+        await save();await deliver(true);
+      }
+      break;
+    }
     case 'bridge.pause': await chrome.tabs.sendMessage(state.session.tabId,{type:'studio.cancelDelivery',sessionId:state.session.sessionId}).catch(()=>{});await disableAuto();if(state.session.phase!=='paused')state.session.pausedPhase=state.session.phase;if(state.session.phase==='delivery_uncertain'||state.session.resumeBlocked)state.session.resumeBlocked=true;state.session.paused=true;state.session.userPaused=true;state.session.phase='paused';break;
     case 'bridge.resume':
       if(state.session.phase==='stopped'||state.session.resumeBlocked||state.session.phase==='delivery_uncertain'||state.session.pausedPhase==='delivery_uncertain'||state.session.error?.includes('outcome is unknown'))throw Error('Resolve the uncertain operation or re-arm this chat before resuming');
@@ -397,7 +415,7 @@ async function studioMessage(m,sender) {
       catch(e){await rejectUnsentCall(m,e);await save();return {accepted:!s.paused};}
       try {
         if(s.turnless)s.lastResponseKey=m.responseKey;
-        delete s.rejectedCallFingerprint;
+        delete s.rejectedCallFingerprint;delete s.replyError;
         s.notice='';
         if(!call){s.resultText='';s.finalText=m.text;s.phase='ready';await chrome.tabs.sendMessage(s.tabId,{type:'studio.cleanup',sessionId:s.sessionId,enabled:!!state.hideServiceMessages,final:true,operationIds:s.completedOperationIds||[]}).catch(()=>{});}
         else {s.pendingCall={...call,turn:s.turn};s.phase=SAFE.has(call.name)?'ready':s.autoApprove?'ready':'waiting_approval';s.error='';if(s.phase==='ready'){await save();await dispatch();}}
@@ -410,15 +428,10 @@ async function studioMessage(m,sender) {
 }
 async function rejectUnsentCall(m,error){
   const s=state.session,message=String(error.message||error);
-  const canCorrect=s.turnless&&s.automatic&&state.autoSettings?.consent===true&&state.connected&&!s.pendingCall&&!s.operationKey&&!s.operationId&&!s.resultText&&!s.resumeBlocked;
-  if(!canCorrect){s.paused=true;s.phase='paused';s.error=message;return;}
-  const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(m.text));
-  const fingerprint=Array.from(new Uint8Array(hash),byte=>byte.toString(16).padStart(2,'0')).join('');
-  if(s.rejectedCallFingerprint===fingerprint){s.paused=true;s.phase='paused';s.error='Модель повторила тот же повреждённый вызов после сообщения об ошибке. Ничего не выполнено: '+message;return;}
-  s.rejectedCallFingerprint=fingerprint;s.lastResponseKey=m.responseKey;s.nextTurn=uuid();s.operationId='validation-'+uuid();
-  s.resultText=WebCodexProtocol.buildResult({turnless:true,operationId:s.operationId,name:'call_validation',error:'The call was rejected BEFORE execution. No operation was sent to the agent. '+message+'. Resend exactly one complete corrected call using the selected tool schema. Use forward slashes in Windows paths, for example W:/algo. Use a raw helper-file block for file contents. Do not repeat any previous successful operation.'});
-  s.phase='result_ready';s.error='';s.notice='Вызов не выполнен; модели отправлен запрос исправления.';await save();
-  try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}
+  const code=m.sourceError?'extraction':/incomplete|missing end|no complete/i.test(message)?'incomplete':/ambiguous|duplicate|more than one/i.test(message)?'ambiguous':/arguments|schema|Unknown tool|field|type/i.test(message)?'schema':'format';
+  const previous=s.replyError;
+  s.replyError={code,message,text:m.text,sourceText:m.sourceText??m.text,responseKey:m.responseKey,correctionRequested:previous?.responseKey===m.responseKey&&!!previous.correctionRequested};
+  s.lastResponseKey=m.responseKey;s.error=message;s.notice='Ошибка ответа сохранена. Доступен локальный повторный разбор.';
 }
 async function approve(){const s=state.session;if(s.phase!=='waiting_approval'||!s.pendingCall||s.paused)throw Error('No pending approval');await dispatch();}
 async function expireAuth(e){if(e?.status!==401) return false;await chrome.storage.local.remove('bridgeAuth');state.connected=false;client=null;token='';state.accessToken='';state.session.pausedPhase=state.session.phase;state.session.phase='paused';state.session.paused=true;state.session.resumeBlocked=true;state.session.error='Gate authorization expired; stop this session, reconnect, then re-arm this chat';await save();return true;}

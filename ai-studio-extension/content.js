@@ -58,8 +58,8 @@
     // original answer at the deadline; normalized call text can hide ongoing edits.
     const model=s.latestModel,source=model.sourceText??model.text;
     const key=JSON.stringify([sessionId,generationCounter,observedContext,source]);
-    if(pendingReply?.key!==key)pendingReply={key,since:Date.now()};
-    const parsed=WebCodexProtocol.analyzeReply(model.text);
+    if(pendingReply?.key!==key)pendingReply={key,since:Date.now(),parsed:WebCodexProtocol.analyzeReply(model.text)};
+    const parsed=pendingReply.parsed;
     const quietMs=parsed.kind==='error'?invalidReplyQuietMs:replyQuietMs;
     const remaining=quietMs-(Date.now()-pendingReply.since);
     clearTimeout(replyTimer);replyTimer=0;
@@ -126,7 +126,7 @@
       const contextFields=turnless?{responseKey:await responseKeyFor(callGeneration,observedResultId,observedUserText,model.text),precedingResultId:observedResultId}:{};
       const current=adapter.inspect();
       if(sessionId!==callSession||current.generating||current.latestModel?.text!==model.text||(current.latestModel?.sourceText??model.text)!==(model.sourceText??model.text)||turnless&&(callGeneration!==generationCounter||callContext!==observedContext||!awaitingResponse))return;
-      const response=await send('studio.call',{text:model.text,...(model.sourceError?{sourceError:model.sourceError}:{}),conversationKey,generating:false,...contextFields});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```helper-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
+      const response=await send('studio.call',{text:model.text,sourceText:model.sourceText??model.text,...(model.sourceError?{sourceError:model.sourceError}:{}),conversationKey,generating:false,...contextFields});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```helper-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
   }
   const schedule=()=>{if(retired)return;try{if(turnless&&!checkInstructions)trackGeneration(adapter.inspect());clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(reportObserverError),250);}catch(error){reportObserverError(error);}};
   document.addEventListener('click',event=>{
@@ -155,7 +155,7 @@
   window.__webcodexBridgeDispose=retire;
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
     if(retired)return;
-    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup','studio.captureWrite','studio.captureCall','studio.cancelDelivery'].includes(m.type)){reply({ok:false});return;}
+    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup','studio.captureWrite','studio.captureCall','studio.readReply','studio.cancelDelivery'].includes(m.type)){reply({ok:false});return;}
     if(m.type==='studio.arm'){
       const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
       if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
@@ -165,6 +165,16 @@
     }
     if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
     if(m.type==='studio.cancelDelivery'){deliveryRevision++;reply({ok:true});return;}
+    if(m.type==='studio.readReply'){
+      const s=adapter.inspect(),model=s.latestModel,revision=navigationRevision;
+      if(checkInstructions||!s.supported||s.generating||!model||s.modelAfterUser===false){reply({ok:false,error:'Дождитесь полного ответа в текущем чате'});return;}
+      (async()=>{
+        const responseKey=await responseKeyFor(generationCounter,observedResultId,observedUserText,model.text);
+        const current=adapter.inspect();
+        if(sessionId!==m.sessionId||navigationRevision!==revision||current.generating||current.latestModel?.text!==model.text||(current.latestModel?.sourceText??current.latestModel?.text)!==(model.sourceText??model.text))throw Error('Ответ изменился во время чтения');
+        reply({ok:true,text:model.text,sourceText:model.sourceText??model.text,sourceError:model.sourceError,responseKey,conversationKey:s.conversationKey});
+      })().catch(error=>reply({ok:false,error:String(error.message||error)}));return true;
+    }
     if(m.type==='studio.captureWrite'||m.type==='studio.captureCall'){
       const s=adapter.inspect();
       if(checkInstructions||!s.supported||s.generating||!s.latestModel){reply({ok:false,error:'Дождитесь полного ответа модели и завершения перехода в чат'});return;}
