@@ -1,0 +1,50 @@
+[
+  {
+    "id": "literal-windows-path",
+    "category": "format",
+    "text": "{\"v\":1,\"name\":\"read_file\",\"arguments\":{\"path\":\"W:\\algo\\agents.py\"}}",
+    "expected": {"name":"read_file","arguments":{"path":"W:\\algo\\agents.py"}}
+  },
+  {
+    "id": "trailing-comma",
+    "category": "format",
+    "text": "{\"v\":1,\"name\":\"read_file\",\"arguments\":{\"path\":\"safe.txt\",},}",
+    "expected": {"name":"read_file","arguments":{"path":"safe.txt"}}
+  },
+  {
+    "id": "incomplete-envelope",
+    "category": "incomplete",
+    "text": "{\"v\":1,\"name\":\"read_file\",\"arguments\":{\"path\":",
+    "error": true
+  },
+  {
+    "id": "duplicate-field",
+    "category": "ambiguous",
+    "text": "{\"v\":1,\"name\":\"read_file\",\"arguments\":{\"path\":\"a\",\"path\":\"b\"}}",
+    "error": true
+  },
+  {
+    "id": "wrong-scalar-type",
+    "category": "schema",
+    "text": "{\"v\":1,\"name\":\"read_file\",\"arguments\":{\"path\":42}}",
+    "error": true
+  },
+  {
+    "id": "injected-key",
+    "category": "schema",
+    "text": "{\"v\":1,\"name\":\"read_file\",\"arguments\":{\"path\":\"a\",\"request_key\":\"foreign\"}}",
+    "error": true
+  },
+  {
+    "id": "opaque-file-body",
+    "category": "data",
+    "text": "{\"v\":1,\"name\":\"write_file\",\"arguments\":{\"path\":\"a.txt\",\"if_absent\":true},\"content_source\":\"sample\"}\n<<<HELPER_FILE_BEGIN:sample>>>\n{bad JSON} \\n \"кавычки\"\n\n<<<HELPER_FILE_END:sample>>>",
+    "expected": {"name":"write_file","arguments":{"path":"a.txt","if_absent":true,"content":"{bad JSON} \\n \"кавычки\"\n"}}
+  },
+  {
+    "id": "ordinary-answer",
+    "category": "prose",
+    "text": "Готово. Файл прочитан.",
+    "expected": null
+  }
+]
