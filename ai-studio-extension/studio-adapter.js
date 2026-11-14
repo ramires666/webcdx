@@ -95,7 +95,8 @@
     if(String(node.tagName||node.tag||'').toLowerCase()==='br')return '\n';
     return node.childNodes?Array.from(node.childNodes,codeText).join(''):String(node.textContent||'');
   };
-  const modelText = (node) => {
+  const modelText = (node,excluded) => {
+    if(excluded?.has(node))return '';
     if(node.nodeType===3)return node.textContent||'';
     if(node.nodeType===8)return '';
     const tag=String(node.tagName||node.tag||'').toLowerCase();
@@ -103,7 +104,7 @@
     // Code widgets contain the exact source as text nodes. Their layout adds a
     // boundary around the source, never between syntax-highlighted code tokens.
     if(tag==='pre'||tag==='code')return '\n'+codeText(node)+'\n';
-    const value=node.childNodes?Array.from(node.childNodes,modelText).join(''):String(node.textContent||'');
+    const value=node.childNodes?Array.from(node.childNodes,child=>modelText(child,excluded)).join(''):String(node.textContent||'');
     return blockTags.has(tag)||node.helperBlockBoundary?'\n'+value+'\n':value;
   };
   const finalText = (el) => String(answerCopy(el).textContent||'').trim();
@@ -114,7 +115,7 @@
     return match?.[1];
   }).filter(Boolean);
   const sourceBlocks = copy => {
-    if(!copy)return [];
+    if(!copy)return {blocks:[],remainder:''};
     const candidates=allElements('pre, code, [role="code"], ms-code-block',copy);
     // PRE/CODE nesting is one source. Independent equal blocks retain their IDs.
     const roots=candidates.filter(node=>{
@@ -123,7 +124,7 @@
       }
       return String(node.tagName||node.tag||'').toLowerCase()!=='ms-code-block'||!allElements('pre, code, [role="code"]',node).length;
     });
-    return roots.map(node=>({id:sourceID(node.helperSourceNode||node),text:codeText(node),kind:'code'}));
+    return{blocks:roots.map(node=>({id:sourceID(node.helperSourceNode||node),text:codeText(node),kind:'code'})),remainder:modelText(copy,new Set(roots))};
   };
   const userBody = (el) => {
     const roleContent=allElements('[data-turn-role], .chat-turn-container',el).find(node=>visible(node)&&(roleValue(node)==='user'||node.matches?.('.chat-turn-container.user')));
@@ -192,26 +193,34 @@
     const modelContent = model && [...new Set(allElements('[data-turn-role], .chat-turn-container', model))]
       .find(el => visible(el)&&(roleValue(el) === 'model' || el.matches?.('.chat-turn-container.model')));
     const modelCopy=model?answerCopy(modelContent||model):null;
-    const blocks=sourceBlocks(modelCopy);
+    const {blocks,remainder}=sourceBlocks(modelCopy);
     const renderedSource=modelCopy?modelText(modelCopy):'';
     const signature=JSON.stringify([renderedSource,blocks]);
     if(model&&responseRevisions.get(model)?.signature!==signature)responseRevisions.set(model,{signature,revision:++nextRevision});
-    let modelSource=String(modelCopy?.textContent||'').trim();
-    let parsedModel=model?protocol.analyzeReply(modelSource):null;
-    // Preserve already valid JSON byte for byte, including strings spanning DOM
-    // nodes. A raw attachment additionally needs the rendered block boundaries
-    // that textContent drops between the language header and the PRE element.
-    if(model&&(parsedModel.kind!=='call'||parsedModel.fileSource)&&/<<<HELPER_FILE_(?:BEGIN|END):/.test(modelSource)){
-      modelSource=modelText(modelCopy).trim();
-      parsedModel=protocol.analyzeReply(modelSource);
-    }
-    let sourceError='';
-    if(parsedModel?.kind==='call'&&parsedModel.call.name==='exec_command'){
-      const exactSources=allElements('pre, code, ms-code-block, [role="code"]',modelCopy).filter(node=>{
-        const candidate=protocol.analyzeReply(codeText(node));
-        return candidate.kind==='call'&&JSON.stringify(candidate.call)===JSON.stringify(parsedModel.call);
-      });
-      if(!exactSources.length)sourceError='Command JSON was rendered as Markdown prose, which can remove operators, backslashes or emphasis markers. Resend the call inside a real fenced code block: place a blank line BEFORE the opening helper-call fence, and put its JSON on the following line. Do not place the opening fence after a sentence.';
+    const observation=model?responseRevisions.get(model):{};
+    let {modelSource,parsedModel,sourceError}=observation.analysis||{};
+    if(!observation.analysis){
+      modelSource=String(modelCopy?.textContent||'').trim();
+      parsedModel=model?protocol.analyzeReply(modelSource):null;
+      const textFrames=blocks.filter(block=>/^\s*HELPER(?:_|\s|$)/.test(block.text));
+      if(textFrames.length){modelSource=textFrames.map(block=>block.text).join('\n');parsedModel=protocol.analyzeReply(modelSource);}
+      // Preserve already valid JSON byte for byte, including strings spanning DOM
+      // nodes. A raw attachment additionally needs the rendered block boundaries
+      // that textContent drops between the language header and the PRE element.
+      if(model&&(parsedModel.kind!=='call'||parsedModel.fileSource)&&/<<<HELPER_FILE_(?:BEGIN|END):/.test(modelSource)){
+        modelSource=modelText(modelCopy).trim();
+        parsedModel=protocol.analyzeReply(modelSource);
+      }
+      sourceError='';
+      if(parsedModel?.kind==='call'&&parsedModel.call.name==='exec_command'){
+        const exactSources=allElements('pre, code, ms-code-block, [role="code"]',modelCopy).filter(node=>{
+          const candidate=protocol.analyzeReply(codeText(node));
+          return candidate.kind==='call'&&JSON.stringify(candidate.call)===JSON.stringify(parsedModel.call);
+        });
+        if(!exactSources.length)sourceError='Command JSON was rendered as Markdown prose, which can remove operators, backslashes or emphasis markers. Resend the call inside a real fenced code block: place a blank line BEFORE the opening helper-call fence, and put its JSON on the following line. Do not place the opening fence after a sentence.';
+      }
+      if(parsedModel?.kind==='frame'&&parsedModel.body!==undefined&&!textFrames.length&&!/^\s*(?:`{3,}|~{3,})/.test(modelSource))sourceError='Raw tool data requires an exact code source boundary';
+      observation.analysis={modelSource,parsedModel,sourceError};
     }
     const modelError=/^(?:An internal error has occurred\.?|Internal error\.?)$/i.test(modelSource.trim())?'AI Studio: An internal error has occurred. Generation failed; no new command was executed.':'';
     const user = recognized.filter((el) => role(el) === 'user').pop() || null;
@@ -220,7 +229,7 @@
     return {
       conversationKey: conversationKey(), chatMarkers:chatMarkers(recognized), chatAddress:/^\/(?:app\/)?prompts\/(?!new_chat\b|new\b)[^/]+\/?$/.test(location.pathname||'')?location.pathname:'', generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
-      supported: !error, error, modelError, latestModel: model ? { element: model, sourceError, sourceText:modelSource, sourceBlocks:blocks, renderedSource, sourceRevision:responseRevisions.get(model).revision, text:parsedModel.kind==='call'?'```helper-call\n'+parsedModel.raw+'\n```':modelSource } : null,
+      supported: !error, error, modelError, latestModel: model ? { element: model, sourceError, sourceText:modelSource, sourceBlocks:blocks, sourceRemainder:remainder, recoveryRules:parsedModel?.recoveryRules||[], renderedSource, sourceRevision:responseRevisions.get(model).revision, text:parsedModel.kind==='call'?'```helper-call\n'+parsedModel.raw+'\n```':modelSource } : null,
       latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,
       modelAfterUser: !user || recognized.indexOf(model) > recognized.indexOf(user),
     };

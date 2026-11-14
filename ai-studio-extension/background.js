@@ -194,7 +194,7 @@ async function command(m) {
       if(!['waiting_model','ready','paused'].includes(s.phase)||s.resumeBlocked||s.pendingCall||s.operationId||s.operationKey||s.resultText||s.error?.includes('outcome is unknown'))throw Error('Сначала завершите проверку предыдущей операции');
       const captured=await chrome.tabs.sendMessage(s.tabId,{type:writeOnly?'studio.captureWrite':'studio.captureCall',sessionId:s.sessionId,...(writeOnly?{tool:selected[0]}:{tools:selected})});
       if(!captured?.ok||captured.conversationKey!==s.conversationKey)throw Error(captured?.error||'Не удалось прочитать последний ответ в текущем чате');
-      const call=WebCodexProtocol.parseCall(captured.text,null,selected);
+      const call=WebCodexProtocol.parseCall(captured.text,null,selected,{...captured,sessionMarker:s.sessionMarker,allowUnmarked:true});
       if(!call||writeOnly&&call.name!=='write_file')throw Error('В последнем ответе нет корректного выбранного вызова');
       const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(captured.text));
       const recoveryId=captured.pageInstance+':'+Array.from(new Uint8Array(digest),n=>n.toString(16).padStart(2,'0')).join('');
@@ -378,7 +378,7 @@ async function arm(m) {
   } catch(e){await chrome.tabs.sendMessage(m.tabId,{type:'studio.disarm',sessionId:state.session.sessionId}).catch(()=>{});state.session.phase='stopped';state.session.error=String(e.message||e);await save();throw e;}
 }
 async function clearSession(){const s=state.session;if(s?.tabId&&s.sessionId)await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});state.session={phase:'idle',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null};await save();}
-async function stageInstructions({ensureOnly=false}={}){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=ensureOnly||s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text,...(ensureOnly?{ensureOnly:true}:{})});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
+async function stageInstructions({ensureOnly=false}={}){const s=state.session;const selected=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);const systemText=WebCodexProtocol.buildSystemInstructions({agentId:s.agentId,tools:selected,turnless:!!s.turnless,replyFormat:s.sessionMarker?'v2':'v1',instructions:[state.gateInstructions,s.customInstructions].filter(Boolean).join('\n\n')});const text=ensureOnly||s.turnless?'':WebCodexProtocol.buildSessionInstructions({turn:s.turn});s.instructions=[systemText,text].filter(Boolean).join('\n\n');const r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.stage',sessionId:s.sessionId,systemText,text,...(ensureOnly?{ensureOnly:true}:{})});if(!r?.ok)throw Error(r?.error||'Could not stage instructions without changing existing text');}
 async function studioMessage(m,sender) {
   const s=state.session;if(m.sessionId!==s.sessionId)throw Error('Stale Studio session');
   if(m.type==='studio.modelError'){
@@ -426,21 +426,21 @@ async function studioMessage(m,sender) {
     if(s.phase==='delivery_uncertain'&&!m.generating&&s.nextTurn){
       const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);
       const delivered=s.turnless&&typeof m.precedingResultId==='string'&&!!m.precedingResultId&&m.precedingResultId===(s.operationId||s.operationKey);
-      try{if((!s.turnless||delivered)&&WebCodexProtocol.parseCall(m.text,s.turnless?null:s.nextTurn,tools)){completeDelivery();await save();}}catch{}
+      try{if((!s.turnless||delivered)&&WebCodexProtocol.parseCall(m.text,s.turnless?null:s.nextTurn,tools,{...m,sessionMarker:s.sessionMarker,allowUnmarked:!!m.responseKey})){completeDelivery();await save();}}catch{}
       if(s.paused)return {accepted:false};
     }
     if(!['waiting_model','ready'].includes(s.phase))return {accepted:false};
     if(m.generating){if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error='Generation still active';}
     else if(s.phase==='waiting_model'||s.phase==='ready'){
       let call;
-      try{if(m.sourceError)throw Error(m.sourceError);const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);call=WebCodexProtocol.parseCall(m.text,s.turnless?null:s.turn,tools);}
+      try{if(m.sourceError)throw Error(m.sourceError);const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);call=WebCodexProtocol.parseCall(m.text,s.turnless?null:s.turn,tools,{...m,sessionMarker:s.sessionMarker,allowUnmarked:!!m.responseKey});}
       catch(e){await rejectUnsentCall(m,e);await save();return {accepted:!s.paused};}
       try {
         if(s.turnless)s.lastResponseKey=m.responseKey;
         delete s.rejectedCallFingerprint;delete s.replyError;
         s.notice='';
         if(!call){s.resultText='';s.finalText=m.text;s.phase='ready';await chrome.tabs.sendMessage(s.tabId,{type:'studio.cleanup',sessionId:s.sessionId,enabled:!!state.hideServiceMessages,final:true,operationIds:s.completedOperationIds||[]}).catch(()=>{});}
-        else {s.pendingCall={...call,turn:s.turn};s.phase=SAFE.has(call.name)?'ready':s.autoApprove?'ready':'waiting_approval';s.error='';if(s.phase==='ready'){await save();await dispatch();}}
+        else {s.replyRecovery=call.recoveryRules||[];s.pendingCall={...call,turn:s.turn};s.phase=SAFE.has(call.name)?'ready':s.autoApprove?'ready':'waiting_approval';s.error='';if(s.phase==='ready'){await save();await dispatch();}}
       } catch(e){s.paused=true;s.phase='paused';s.error=String(e.message||e);}
     }
     await save();return {accepted:!s.paused};

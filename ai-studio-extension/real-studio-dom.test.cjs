@@ -69,6 +69,16 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   }
   userChunk.append(paragraph);user.append(userHeader,userChunk);
   if(adapter.inspect().chatMarkers.join(',')!==liveMarker)throw Error('rendered user header or BR hid the session marker');cases++;
+  for(const tag of ['pre','code','div'])for(const br of [false,true])for(const body of ['','line\\n','line\\r\\n']){
+    answer.replaceChildren();
+    const source=document.createElement(tag);if(tag==='div')source.setAttribute('role','code');
+    const value='HELPER_'+liveMarker+' write_file\\npath: W:/test.txt\\nif_absent: TRUE\\n---\\n'+body+'\\nEND_'+liveMarker;
+    if(br)value.split('\\n').forEach((line,i)=>{if(i)source.append(document.createElement('br'));const token=document.createElement('span');token.textContent=line;source.append(token);});
+    else source.textContent=value;
+    answer.append(source);const current=adapter.inspect().latestModel;
+    const parsed=WebCodexProtocol.parseCall(current.text,null,tools,{...current,sessionMarker:liveMarker});
+    if(parsed.arguments.content!==body)throw Error('v2 data changed '+JSON.stringify({tag,br,body}));cases++;
+  }
   const resultWidget=document.createElement('ms-code-block'),resultHeader=document.createElement('header'),resultBody=document.createElement('pre');
   resultHeader.textContent='Helper-result';resultBody.textContent=JSON.stringify({type:'helper-result',operation_id:'op-visible',result:{ok:true}});
   resultWidget.append(resultHeader,resultBody);user.append(resultWidget);
@@ -111,5 +121,5 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});
   assert.equal(code,0);
   const result=/<output id="check">([^<]*)<\/output>/.exec(output)?.[1];
-  assert.equal(result,'PASS:62');t.diagnostic('62 scenarios passed in installed Chrome, including native FileList and drag-and-drop upload');
+  assert.equal(result,'PASS:80');t.diagnostic('80 scenarios passed in installed Chrome, including native FileList and drag-and-drop upload');
 });

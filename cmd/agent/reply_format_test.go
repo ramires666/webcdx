@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"testing"
 )
 
@@ -46,5 +48,20 @@ func TestReplyExamplesCoverToolCatalog(t *testing.T) {
 		if !seen[tool.Name] {
 			t.Errorf("missing reply example for %s", tool.Name)
 		}
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node is required to verify the extension parser against agent schemas")
+	}
+	catalog := localTools("v5")
+	catalog = append(catalog, mcpToolDefinition{Name: "list_agents", InputSchema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}})
+	schemas, err := json.Marshal(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(node, "../../ai-studio-extension/verify-reply-examples.cjs")
+	command.Stdin = bytes.NewReader(schemas)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("reply format/schema integration failed: %v\n%s", err, output)
 	}
 }

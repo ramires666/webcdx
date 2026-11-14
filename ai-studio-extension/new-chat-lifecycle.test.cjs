@@ -65,7 +65,7 @@ function harness({manualClock=false,tools=[tool]}={}) {
   const openSavedChat=(userText,modelText)=>{context.document.click({target:{closest:()=>({getAttribute:name=>name==='href'?'/prompts/saved-chat':null})}});historyAnchor={};historyStart=userText;latestUser={text:userText};model={text:modelText,element:{}};modelAfterUser=true;};
   const setSupported=value=>{supported=value;};
   const panel=type=>new Promise(resolve=>bgListeners[0]({type},{url:chrome.runtime.getURL('panel.html')},resolve));
-  return { panel, chrome, local, messages, staged, db, operations, rerenderHistory: text=>{historyAnchor={};historyStart=text;observerCallback();}, clearChatWithoutClick, openSavedChat, setSupported, replyImmediatelyAfterDelivery: text => autoReplies.push(text), renderModelFragment: text => {model={text,element:{}};modelAfterUser=true;observerCallback();}, missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model={text,element:{}};modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() {
+  return { panel, chrome, local, messages, staged, db, operations, rerenderHistory: text=>{historyAnchor={};historyStart=text;observerCallback();}, clearChatWithoutClick, openSavedChat, setSupported, replyImmediatelyAfterDelivery: text => autoReplies.push(text), renderModelFragment: text => {model=typeof text==='string'?{text,element:{}}:text;modelAfterUser=true;observerCallback();}, missLegacyDeliveryProof: () => { legacyProofMissing=true; }, saveChat: () => { currentPath='/prompts/saved-chat'; }, navigate: path => { currentPath=path; }, saveDuringDelivery: () => { saveOnSubmit=true; }, userMessage: text => { latestUser={text};modelAfterUser=false; }, modelMessage: text => { context.document.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'Run':'',innerText:'Run',querySelector:()=>null})}}); generating=true;observerCallback();model=typeof text==='string'?{text,element:{}}:text;modelAfterUser=true;generating=false;observerCallback(); }, armExisting: () => chrome.tabs.sendMessage(7, {type:'studio.arm',sessionId:'old-session'}), clickNewChat() { context.document.click({ target: { closest: () => ({ getAttribute: name => name === 'aria-label' ? 'New chat' : '', innerText: '' }) } }); model = null; }, async flush() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }, async tick() {
     for(const fn of intervals.values())fn();await this.flush();
     for(let round=0;round<20&&timers.size;round++){
       if(!manualClock)now=Math.max(now,Math.min(...[...timers.values()].map(timer=>timer.at)));
@@ -140,6 +140,22 @@ test('a damaged tool envelope retains its source locally with zero correction re
   assert.equal(h.state.replyError.code,'incomplete');
   assert.match(h.state.replyError.sourceText,/safe.txt/);
   assert.equal(h.operations.length,0);
+});
+
+test('a v2 raw file reaches normal dispatch once and preserves every raw byte',async()=>{
+  const write={name:'write_file',inputSchema:{type:'object',properties:{path:{type:'string'},content:{type:'string'},if_absent:{type:'boolean',const:true}},required:['path','content','if_absent'],additionalProperties:false}};
+  const h=harness({tools:[write]});h.local.bridgeAuto.autoApprove=true;
+  await h.flush();await h.armExisting();h.clickNewChat();
+  await h.tick();h.advance(6000);await h.tick();h.advance(6000);await h.tick();
+  const marker=h.state.sessionMarker,body='quoted "😀" \\n\r\n\n';
+  const source='HELPER_'+marker+' write_file\npath: W:/test.txt\nif_absent= TRUE\n---\n'+body+'\nEND_'+marker;
+  const rendered=require('./test-fixtures/studio-dom.cjs').setup();rendered.chunk.remove();rendered.model.children[0].add(new (require('./test-fixtures/studio-dom.cjs').Node)('pre',{},source));
+  h.userMessage('Write');h.modelMessage(rendered.adapter.inspect().latestModel);
+  await h.tick();await h.tick();
+  assert.equal(h.operations.length,1);assert.equal(h.operations[0].arguments.content,body);
+  assert.deepEqual(h.state.replyRecovery,['parameter_equals','boolean_case_or_spacing']);
+  assert.equal(h.messages.filter(message=>message.type==='studio.deliver').length,1);
+  assert.equal(JSON.parse(h.messages.find(message=>message.type==='studio.deliver').text).name,'write_file');
 });
 
 test('explicit correction accepts an immediate corrected Windows-path followup exactly once',async()=>{

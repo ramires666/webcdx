@@ -34,3 +34,14 @@ test('library repair cannot dispatch incomplete, duplicate or schema-invalid cal
 test('model instructions avoid backslash-dependent Windows paths',()=>{
   assert.match(buildSystemInstructions({tools,turnless:true}),/Windows paths using forward slashes/);
 });
+
+test('repair preserves scalar types, array ordering and key bindings or rejects the source',()=>{
+  const selected=[{name:'scalar_test',inputSchema:{type:'object',additionalProperties:true}}];
+  const args={number:-1.5e20,zero:-0,enabled:false,missing:null,items:[true,2,'three'],nested:{first:1,second:2}};
+  const raw=JSON.stringify({v:1,name:'scalar_test',arguments:args});
+  const damaged=raw.replace(',"name"',' "name"');
+  assert.deepEqual(parseCall(damaged,null,selected).arguments,JSON.parse(JSON.stringify(args)));
+  for(const broken of ['{"number":1e}', '{"number":01}', '{"enabled":True}', '{"missing":undefined}', '{"value":NaN}', '{"first":,"second":2}']){
+    assert.throws(()=>parseCall('{"v":1,"name":"scalar_test","arguments":'+broken+'}',null,selected));
+  }
+});
