@@ -4,6 +4,34 @@ const createAdapter = require('./studio-adapter.js');
 
 const { Node, Textarea, setup } = require('./test-fixtures/studio-dom.cjs');
 
+test('session context accompanies the existing user request once and preserves its exact text',()=>{
+  const marker='a'.repeat(32),request='  Моя задача\r\n\\literal "text"\n';
+  const state=setup({draft:request,empty:true});
+  assert.equal(state.adapter.prepareSessionMessage(marker),true);
+  const staged=state.editor.value;
+  assert.ok(staged.startsWith('[Helper session '+marker+']\n'));
+  assert.ok(staged.endsWith('\n\n'+request));
+  assert.equal(state.run.clicked,undefined);
+  assert.equal(state.adapter.prepareSessionMessage(marker),true);
+  assert.equal(state.editor.value,staged);
+  const user=state.root.add(new Node('ms-chat-turn',{'data-turn-role':'User'},staged));
+  assert.deepEqual(state.adapter.inspect().chatMarkers,[marker]);
+  state.editor.value='Next request';state.adapter.prepareSessionMessage(marker);
+  assert.equal(state.editor.value,'Next request');
+  user.textContent='Example\n'+staged;
+  assert.deepEqual(state.adapter.inspect().chatMarkers,[]);
+});
+
+test('session context stays isolated across tabs and preserves extension-owned results',()=>{
+  const left=setup({draft:'Left',empty:true}),right=setup({draft:'Right',empty:true});
+  left.adapter.prepareSessionMessage('a'.repeat(32));right.adapter.prepareSessionMessage('b'.repeat(32));
+  assert.ok(!left.editor.value.includes('b'.repeat(32)));
+  assert.ok(!right.editor.value.includes('a'.repeat(32)));
+  const result=setup({empty:true});assert.equal(result.adapter.stage('```helper-result\n{}\n```'),true);
+  result.adapter.prepareSessionMessage('a'.repeat(32));
+  assert.equal(result.editor.value,'```helper-result\n{}\n```');
+});
+
 test('source blocks preserve exact raw bytes, provenance and stable revisions',()=>{
   const state=setup();state.chunk.remove();
   const widget=state.model.children[0].add(new Node('ms-code-block'));

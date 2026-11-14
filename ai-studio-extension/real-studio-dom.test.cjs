@@ -59,6 +59,16 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   const sources=adapter.inspect().latestModel;
   if(sources.sourceBlocks.length!==2||sources.sourceBlocks.some(block=>block.text!==raw)||sources.sourceBlocks[0].id===sources.sourceBlocks[1].id)throw Error('code source boundaries or CRLF changed');
   if(adapter.inspect().latestModel.sourceRevision!==sources.sourceRevision)throw Error('unchanged source revision drifted');cases++;
+  const liveMarker='0123456789abcdef0123456789abcdef';
+  const userHeader=document.createElement('h3');userHeader.textContent='User 6:40 PM';
+  const userChunk=document.createElement('ms-prompt-chunk');userChunk.className='text-chunk';
+  const paragraph=document.createElement('p');
+  for(const line of ['[Helper session '+liveMarker+']','Session marker for this chat is '+liveMarker+'. Follow the Helper system instructions.','[/Helper session]']){
+    if(paragraph.childNodes.length)paragraph.append(document.createElement('br'));
+    paragraph.append(document.createTextNode(line));
+  }
+  userChunk.append(paragraph);user.append(userHeader,userChunk);
+  if(adapter.inspect().chatMarkers.join(',')!==liveMarker)throw Error('rendered user header or BR hid the session marker');cases++;
   const resultWidget=document.createElement('ms-code-block'),resultHeader=document.createElement('header'),resultBody=document.createElement('pre');
   resultHeader.textContent='Helper-result';resultBody.textContent=JSON.stringify({type:'helper-result',operation_id:'op-visible',result:{ok:true}});
   resultWidget.append(resultHeader,resultBody);user.append(resultWidget);
@@ -101,5 +111,5 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});
   assert.equal(code,0);
   const result=/<output id="check">([^<]*)<\/output>/.exec(output)?.[1];
-  assert.equal(result,'PASS:61');t.diagnostic('61 scenarios passed in installed Chrome, including native FileList and drag-and-drop upload');
+  assert.equal(result,'PASS:62');t.diagnostic('62 scenarios passed in installed Chrome, including native FileList and drag-and-drop upload');
 });

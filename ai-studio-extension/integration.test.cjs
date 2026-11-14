@@ -70,6 +70,31 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
 }
 function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
 
+test('known chat markers survive reopen while copied histories receive a fresh binding',async()=>{
+  const marker='a'.repeat(32),address='/prompts/saved';
+  const initial=saved();initial.session.turnless=true;
+  const h=harness(initial,{}, {bridgeAuto:{enabled:true,consent:true,agentId:'agent-1',toolNames:['read_file']},bridgeChatBindings:{[marker]:{tabId:7,address}}});
+  await h.status();
+  const bind=chatAddress=>h.message({type:'studio.ensureInstructions',sessionId:'session-1',chatAddress,chatMarkers:[marker]},h.page);
+  assert.equal((await bind(address)).accepted,true);
+  assert.equal((await h.status()).state.session.sessionMarker,marker);
+  assert.equal((await bind('/prompts/copy')).accepted,true);
+  const fresh=(await h.status()).state.session.sessionMarker;
+  assert.match(fresh,/^[a-f0-9]{32}$/);assert.notEqual(fresh,marker);
+  assert.equal((await bind(address)).accepted,true);
+  assert.equal((await h.status()).state.session.sessionMarker,marker);
+  assert.equal(h.deliveryCount,0);assert.equal(h.createCount,0);
+});
+
+test('saving an unsaved chat retains its marker and binds the observed saved address',async()=>{
+  const marker='b'.repeat(32),initial=saved();Object.assign(initial.session,{turnless:true,sessionMarker:marker,bindingAddress:''});
+  const h=harness(initial,{}, {bridgeChatBindings:{[marker]:{tabId:7,address:''}}});await h.status();
+  await h.message({type:'studio.tick',sessionId:'session-1',supported:true,chatAddress:'/prompts/newly-saved',chatMarkers:[marker]},h.page);
+  assert.equal((await h.status()).state.session.sessionMarker,marker);
+  assert.equal(h.localData.bridgeChatBindings[marker].address,'/prompts/newly-saved');
+  assert.equal(h.deliveryCount,0);
+});
+
 test('the first synchronous file result already knows the current content-script version',async()=>{
   const initial=saved();initial.session.automatic=true;initial.session.turnless=true;let observedVersion;
   const h=harness(initial,{manifestVersion:'0.3.13',immediateResult:true,toolResult:{isError:false,structuredContent:{path:'W:/x.txt',content:'file',offset:1,truncated:false}},sendMessage:async(_id,message)=>{if(message.type==='studio.deliver'){observedVersion=h.db[KEY].pageScript.version;return{ok:true,pending:true,supported:true};}return{ok:true,supported:true};}},{bridgeAuto:{enabled:true,consent:true,agentId:'agent-1',toolNames:['read_file'],automatic:true}});

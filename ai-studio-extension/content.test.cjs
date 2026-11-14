@@ -253,7 +253,7 @@ test('explicit capture accepts only the latest selected call and consumes its au
 
 test('ignores history and sends one completed new reply as a call', async () => {
   const h = harness();
-  assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: undefined });
+  assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', chatMarkers: [], chatAddress: '', error: undefined, deliveredOperationId: '', delivered: undefined });
   h.state.latestModel = { text: 'new answer' }; h.state.generating = true; h.mutate(); await h.flush();
   assert.equal(h.sent.some(m => m.type === 'studio.call'), false);
   h.state.generating = false; h.mutate(); await h.flush();
@@ -334,7 +334,7 @@ test('safe draft, submitted result, delivery confirmation and disarm', async () 
   const duplicate = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true });
   assert.equal(duplicate.attempted, true); assert.equal(h.submitted.length, 1);
   assert.equal(h.submitted[0], `\`\`\`helper-result\n${text}\n\`\`\``);
-  assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', error: undefined, deliveredOperationId: '', delivered: true });
+  assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', chatMarkers: [], chatAddress: '', error: undefined, deliveredOperationId: '', delivered: true });
   assert.deepEqual(await h.send({ type: 'studio.disarm', sessionId: 's1' }), { ok: true });
 });
 

@@ -107,6 +107,12 @@
     return blockTags.has(tag)||node.helperBlockBoundary?'\n'+value+'\n':value;
   };
   const finalText = (el) => String(answerCopy(el).textContent||'').trim();
+  const chatMarkers = recognized => recognized.filter(el=>role(el)==='user').map(el=>{
+    const body=userBody(el),chunks=allElements('ms-prompt-chunk.text-chunk',body);
+    const raw=modelText(answerCopy(chunks[0]||body)).trimStart();
+    const match=/^\[Helper session ([a-f0-9]{32})\]\r?\n/.exec(stripUserHeader(raw));
+    return match?.[1];
+  }).filter(Boolean);
   const sourceBlocks = copy => {
     if(!copy)return [];
     const candidates=allElements('pre, code, [role="code"], ms-code-block',copy);
@@ -212,27 +218,41 @@
     const latestUserText = user ? finalText(userBody(user)) : '';
     const latestUserOperationId = user && parseResultOperationId(latestUserText) || '';
     return {
-      conversationKey: conversationKey(), generating, controlsPending,
+      conversationKey: conversationKey(), chatMarkers:chatMarkers(recognized), chatAddress:/^\/(?:app\/)?prompts\/(?!new_chat\b|new\b)[^/]+\/?$/.test(location.pathname||'')?location.pathname:'', generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
       supported: !error, error, modelError, latestModel: model ? { element: model, sourceError, sourceText:modelSource, sourceBlocks:blocks, renderedSource, sourceRevision:responseRevisions.get(model).revision, text:parsedModel.kind==='call'?'```helper-call\n'+parsedModel.raw+'\n```':modelSource } : null,
       latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,
       modelAfterUser: !user || recognized.indexOf(model) > recognized.indexOf(user),
     };
   };
-  const stage = (value) => {
-    const state = inspect();
-    const candidateEditors = editors();
-    if (!state.supported || (state.generating && !(state.controlsPending && !state.latestModel)) || candidateEditors.length !== 1 || !state.editorEmpty) return false;
-    const editor = candidateEditors[0];
+  const setEditorValue = (editor,value) => {
     if ('value' in editor) {
       const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), 'value')?.set;
       if (setter) setter.call(editor, String(value)); else editor.value = String(value);
     } else editor.textContent = String(value);
     const EventCtor = document.defaultView && document.defaultView.InputEvent;
     if (editor.dispatchEvent && EventCtor) editor.dispatchEvent(new EventCtor('input', { bubbles: true, inputType: 'insertText', data: String(value) }));
-    const staged = editorValue(editor) === String(value);
+    return editorValue(editor) === String(value);
+  };
+  const stage = (value) => {
+    const state = inspect();
+    const candidateEditors = editors();
+    if (!state.supported || (state.generating && !(state.controlsPending && !state.latestModel)) || candidateEditors.length !== 1 || !state.editorEmpty) return false;
+    const staged = setEditorValue(candidateEditors[0],value);
     if (staged) ownedDraft = { value: String(value) };
     return staged;
+  };
+  const prepareSessionMessage = marker => {
+    if(!/^[a-f0-9]{32}$/.test(marker))return false;
+    const state=inspect(),current=editors();
+    if(!state.supported||state.generating&&!state.controlsPending||current.length!==1)return false;
+    if(state.chatMarkers.includes(marker))return true;
+    const value=editorValue(current[0]);
+    if(!value)return false;
+    if(ownedDraft?.value===value)return true;
+    const prefix='[Helper session '+marker+']\nSession marker for this chat is '+marker+'. Follow the Helper system instructions.\n[/Helper session]\n\n';
+    if(value.startsWith(prefix))return true;
+    return setEditorValue(current[0],prefix+value);
   };
   const submit = (value, isCurrent = () => true) => {
     if (pendingSubmit) return Promise.resolve(false);
@@ -516,5 +536,5 @@
     model.appendChild(note);
     return count;
   };
-  return { inspect, stage, submit, attachFiles, ownsDraft, releaseFiles, stageSystemInstructions, getSystemStageError: () => systemStageError, hasDelivery, deliveryTurns, cleanup, restoreCleanup, annotateContext };
+  return { inspect, stage, submit, prepareSessionMessage, attachFiles, ownsDraft, releaseFiles, stageSystemInstructions, getSystemStageError: () => systemStageError, hasDelivery, deliveryTurns, cleanup, restoreCleanup, annotateContext };
 });

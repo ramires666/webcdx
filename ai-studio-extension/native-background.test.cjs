@@ -100,8 +100,8 @@ test('saved-chat instruction checks only stage system text and preserve pending 
     await new Promise(resolve=>setTimeout(resolve,0));
     const response=await new Promise(resolve=>h.listeners.message({type:'studio.ensureInstructions',sessionId:'current-session'},{url:'https://aistudio.google.com/app/prompts/saved',frameId:0,tab:{id:1}},resolve));
     assert.equal(response.accepted,!pending);
-    assert.equal(staged.length,pending?0:1);
-    if(!pending){assert.equal(staged[0].type,'studio.stage');assert.equal(staged[0].text,'');assert.equal(staged[0].ensureOnly,true);}
+    assert.equal(staged.length,pending?0:2);
+    if(!pending){const system=staged.find(message=>message.type==='studio.stage');assert.equal(system.text,'');assert.equal(system.ensureOnly,true);assert.match(staged.find(message=>message.type==='studio.bindMarker').sessionMarker,/^[a-f0-9]{32}$/);}
     assert.equal(h.sessionStore.webcodexState.session.sessionId,'current-session');
     assert.equal(h.calls.gate,0);
   }

@@ -8,6 +8,7 @@
   const adapter=WebCodexStudio.createAdapter(document,location);
   const contentVersion='0.3.13';
   const pageInstance=Date.now()+'-'+Math.random();
+  let sessionMarker='';
   let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, newChatPending=false, newChatRequestInFlight=false, attempted=new Set(), recoverTurn='', recoverTools=[], turnless=false, turnlessRecovery=false, observedUserText='', observedResultId='', observedContext='';
   let awaitingResponse=false, generationSeen=false, generationCounter=0, baselineModelText='';
   let deliveryPending = false, attachmentPending=false, retired = false, allowedFollowupId = '', deliveryRevision=0;
@@ -29,7 +30,7 @@
     return JSON.stringify([pageInstance,generation,resultId,userHash,modelHash]);
   }
   function visibleResultId(user){const parsed=parsedResult(user?.text)?.operation_id,id=typeof user?.operationId==='string'&&user.operationId?user.operationId:'';return id||parsed||'';}
-  function snapshot(operationId,conversationReplaced=false,expectedResultText){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser);const observerStatus=attachmentPending?'attaching_files':!s.supported?'unsupported':checkInstructions||systemStagePending?'checking':s.generating?'generating':!s.latestModel||s.modelAfterUser===false?'waiting_model':turnless&&!awaitingResponse?'waiting_request':pendingReply?'settling':'observing';return {observerStatus,supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered:operationId?resultId===operationId||adapter.hasDelivery(operationId,expectedResultText):undefined};}
+  function snapshot(operationId,conversationReplaced=false,expectedResultText){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser);const observerStatus=attachmentPending?'attaching_files':!s.supported?'unsupported':checkInstructions||systemStagePending?'checking':s.generating?'generating':!s.latestModel||s.modelAfterUser===false?'waiting_model':turnless&&!awaitingResponse?'waiting_request':pendingReply?'settling':'observing';return {observerStatus,supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,chatMarkers:s.chatMarkers||[],chatAddress:s.chatAddress||'',error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered:operationId?resultId===operationId||adapter.hasDelivery(operationId,expectedResultText):undefined};}
   function reportObserverError(error){if(!retired&&sessionId)send('studio.observerError',{observerStatus:'error',observerError:String(error.message||error)}).catch(()=>{});}
   async function attachmentFiles(message,isCurrent){
     const files=[];
@@ -51,7 +52,7 @@
     }
     return files;
   }
-  function hello(){const s=adapter.inspect();return{pageInstance,supported:s.supported,editorEmpty:s.editorEmpty,generating:s.generating,hasHistory:!!s.latestModel||!!s.latestUser,blankChat:s.supported&&s.editorEmpty&&(!s.generating||s.controlsPending)&&!s.latestModel&&!s.latestUser};}
+  function hello(){const s=adapter.inspect();return{pageInstance,chatMarkers:s.chatMarkers||[],chatAddress:s.chatAddress||'',supported:s.supported,editorEmpty:s.editorEmpty,generating:s.generating,hasHistory:!!s.latestModel||!!s.latestUser,blankChat:s.supported&&s.editorEmpty&&(!s.generating||s.controlsPending)&&!s.latestModel&&!s.latestUser};}
   function resetReply(){pendingReply=null;clearTimeout(replyTimer);replyTimer=0;}
   function replySettled(s){
     // Run/Stop can switch before the last code tokens reach the DOM. Re-read the
@@ -94,7 +95,7 @@
     instructionCheckPending=true;
     const requestSession=sessionId,requestGeneration=generationCounter,requestNavigation=navigationRevision;
     try{
-      const response=await send('studio.ensureInstructions');
+      const response=await send('studio.ensureInstructions',{chatMarkers:s.chatMarkers||[],chatAddress:s.chatAddress||''});
       if(response?.accepted&&sessionId===requestSession&&navigationRevision===requestNavigation){
         const current=adapter.inspect();
         const currentSignature=JSON.stringify([current.latestUser?.text||'',current.latestModel?.sourceText??current.latestModel?.text??'']);
@@ -139,7 +140,7 @@
     const label=labels.join(' ');
     if(labels.some(value=>/^(new chat|new prompt|create (?:a )?new (?:chat|prompt)|новый чат|новый запрос)$/.test(value)))newChatPending=true;
     else {const navigation=chatLinkKind(event);if(navigation==='new')newChatPending=true;else if(navigation==='saved')requestInstructionCheck();}
-    if(turnless&&labels.some(value=>/^(run|send|запустить|отправить)$/.test(value)))expectResponse();
+    if(turnless&&labels.some(value=>/^(run|send|запустить|отправить)$/.test(value))){if(sessionId&&sessionMarker&&!checkInstructions&&!systemStagePending)adapter.prepareSessionMessage?.(sessionMarker);expectResponse();}
     if(adapter.inspect().generating&&(/\b(stop|cancel)\b|остановить|отмена/.test(label)||button?.querySelector?.('.stoppable-spinner, ms-stoppable-spinner')))stopping=true;
   },true);
   window.addEventListener?.('popstate',requestInstructionCheck);
@@ -147,7 +148,7 @@
     if(retired)return;
     if(event.key==='Escape'&&adapter.inspect().generating)stopping=true;
     const editor=event.target?.closest?.('textarea,[contenteditable="true"]');
-    if(turnless&&event.key==='Enter'&&(event.ctrlKey||event.metaKey)&&!event.shiftKey&&!event.altKey&&editor&&editor.getAttribute?.('placeholder')!=='Optional tone and style instructions for the model'&&!editor.closest?.('ms-system-instructions,[role="dialog"]'))expectResponse();
+    if(turnless&&event.key==='Enter'&&(event.ctrlKey||event.metaKey)&&!event.shiftKey&&!event.altKey&&editor&&editor.getAttribute?.('placeholder')!=='Optional tone and style instructions for the model'&&!editor.closest?.('ms-system-instructions,[role="dialog"]')){if(sessionId&&sessionMarker&&!checkInstructions&&!systemStagePending)adapter.prepareSessionMessage?.(sessionMarker);expectResponse();}
   },true);
   const observer=new MutationObserver(schedule);observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true});
   const tickTimer=setInterval(()=>{if(retired)return;try{if(newChatPending)observe().catch(reportObserverError);else if(sessionId){send('studio.tick',snapshot()).catch(reportObserverError);observe().catch(reportObserverError);}else{send('studio.hello',hello()).catch(()=>{});}}catch(error){reportObserverError(error);}},2000);
@@ -155,15 +156,16 @@
   window.__webcodexBridgeDispose=retire;
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
     if(retired)return;
-    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup','studio.captureWrite','studio.captureCall','studio.readReply','studio.cancelDelivery'].includes(m.type)){reply({ok:false});return;}
+    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup','studio.captureWrite','studio.captureCall','studio.readReply','studio.bindMarker','studio.cancelDelivery'].includes(m.type)){reply({ok:false});return;}
     if(m.type==='studio.arm'){
       const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
       if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
       hadConversation=!!s.latestModel&&!!s.latestUser;emptyObservations=0;
       resetReply();rememberHistory();
-      sessionId=m.sessionId;conversationKey=s.conversationKey;turnless=!!m.turnless;turnlessRecovery=turnless&&!!m.recover;awaitingResponse=false;generationSeen=false;generationCounter=0;allowedFollowupId='';baselineModelText=s.latestModel?.text||'';observedUserText=s.latestUser?.text||'';observedResultId='';observedContext=JSON.stringify([observedResultId,observedUserText]);recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;newChatRequestInFlight=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
+      sessionId=m.sessionId;sessionMarker=m.sessionMarker||'';conversationKey=s.conversationKey;turnless=!!m.turnless;turnlessRecovery=turnless&&!!m.recover;awaitingResponse=false;generationSeen=false;generationCounter=0;allowedFollowupId='';baselineModelText=s.latestModel?.text||'';observedUserText=s.latestUser?.text||'';observedResultId='';observedContext=JSON.stringify([observedResultId,observedUserText]);recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;newChatRequestInFlight=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
     }
     if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
+    if(m.type==='studio.bindMarker'){sessionMarker=m.sessionMarker||'';reply({ok:true});return;}
     if(m.type==='studio.cancelDelivery'){deliveryRevision++;reply({ok:true});return;}
     if(m.type==='studio.readReply'){
       const s=adapter.inspect(),model=s.latestModel,revision=navigationRevision;
@@ -188,7 +190,7 @@
       }catch(error){reply({ok:false,error:String(error.message||error)});}return;
     }
     if(m.type==='studio.cleanup'){if(m.final)adapter.annotateContext();if(!m.enabled)adapter.restoreCleanup();else if(m.final)adapter.cleanup({turns:[...serviceNodes],operationIds:m.operationIds||[]});reply({ok:true});return;}
-    if(m.type==='studio.disarm'){resetReply();sessionId='';inFlight='';allowedFollowupId='';reply({ok:true});return;}
+    if(m.type==='studio.disarm'){resetReply();sessionId='';sessionMarker='';inFlight='';allowedFollowupId='';reply({ok:true});return;}
     if(m.type==='studio.stage'){
       if(systemStagePending){reply({ok:false,error:'System instructions are already being checked'});return;}
       systemStagePending=true;
