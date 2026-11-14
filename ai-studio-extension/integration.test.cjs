@@ -23,7 +23,7 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
   class TestDate extends Date { static now() { return clock; } }
   const chrome = {
     runtime: { id: 'test-id', getManifest:()=>({version:tabBehavior.manifestVersion||''}), getURL: p => 'chrome-extension://test-id/' + p, onMessage: { addListener: fn => { listeners.message = fn; } } },
-    storage: { session: { setAccessLevel: async () => {}, get: async k => ({ [k]: db[k] && structuredClone(db[k]) }), set: async x => { if(tabBehavior.sessionQuota&&JSON.stringify(x).length>tabBehavior.sessionQuota)throw Error('QUOTA_BYTES exceeded');for (const [k,v] of Object.entries(x)) db[k] = structuredClone(v); } }, local: { get: async k => ({[k]:localData[k]}), set: async x => Object.assign(localData,x), remove: async k => {delete localData[k];}, setAccessLevel: async () => {} } },
+    storage: { session: { setAccessLevel: async () => {}, get: async k => ({ [k]: db[k] && structuredClone(db[k]) }), set: async x => { if(tabBehavior.sessionQuota&&JSON.stringify(x).length>tabBehavior.sessionQuota)throw Error('QUOTA_BYTES exceeded');for (const [k,v] of Object.entries(x)) db[k] = structuredClone(v); } }, local: { get: async k => ({[k]:localData[k]}), set: async x => {if(tabBehavior.localSet)await tabBehavior.localSet(x);Object.assign(localData,structuredClone(x));}, remove: async k => {delete localData[k];}, setAccessLevel: async () => {} } },
     action: { onClicked: { addListener: () => {} } }, sidePanel: { open: async () => {} }, alarms: { create: () => {}, onAlarm: { addListener: fn => { listeners.alarm = fn; } } },
     permissions: { contains: async () => true },
     tabs: { get: async id => ({ id, url: 'https://aistudio.google.com/app/prompts/test' }), sendMessage: async (id, msg) => {
@@ -48,6 +48,7 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
     }
     if (u.pathname === '/bridge/v1/operations' && method === 'POST') {
       createCount++; calls.push({ url: u.pathname, method, body: JSON.parse(init.body) });
+      if(tabBehavior.beforeCreateResponse)await tabBehavior.beforeCreateResponse();
       if (tabBehavior.expireAuth) return json({}, 401);
       if(tabBehavior.immediateResult)return json({id:'op-1',status:'completed',result:tabBehavior.toolResult},202);
       return json({ id: 'op-1', status: 'dispatching' }, 202);
@@ -59,7 +60,7 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
     throw Error('Unexpected fetch ' + method + ' ' + url);
   };
   const mcp = { createClient: options => WebCodexMCP.createClient({ ...options, fetchImpl: fetch }) };
-  const context = { chrome, crypto: require('node:crypto').webcrypto, URL, URLSearchParams, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, JSON, Promise, Set, Map, Date:TestDate, AbortSignal, Math, Error, String, Object, Number, RegExp, console, btoa: s => Buffer.from(s, 'binary').toString('base64'), fetch, WebCodexProtocol, WebCodexAttachments:require('./attachments.js'), WebCodexMCP: mcp, importScripts() {}, setTimeout, clearTimeout };
+  const context = { chrome, crypto: require('node:crypto').webcrypto, URL, URLSearchParams, TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, JSON, Promise, Set, Map, Date:TestDate, AbortSignal, Math, Error, String, Object, Number, RegExp, console, btoa: s => Buffer.from(s, 'binary').toString('base64'), fetch, WebCodexProtocol, WebCodexSession:require('./session-state.js'), WebCodexAttachments:require('./attachments.js'), WebCodexMCP: mcp, importScripts() {}, setTimeout, clearTimeout };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'background.js'), 'utf8'), context, { filename: 'background.js' });
   const panel = { url: 'chrome-extension://test-id/panel.html' }, page = { url: 'https://aistudio.google.com/app/prompts/test', frameId: 0, tab: { id: 7 } };
   const message = (msg, sender = panel) => new Promise(resolve => { const async = listeners.message(msg, sender, resolve); if (async !== true) resolve(undefined); });
@@ -69,6 +70,98 @@ function harness(initial = saved(), tabBehavior = {}, initialLocalData = {}) {
   return { localData, chrome, message, status, call, alarm, listeners, panel, page, calls, pageMessages, db, token: TOKEN, advanceTime(ms){clock+=ms;}, get createCount() { return createCount; }, get deliveryCount() { return deliveryCount; } };
 }
 function json(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
+
+test('durable state restores the same operation after the session cache is lost',async()=>{
+  const initial=saved('recovering');
+  Object.assign(initial.session,{pendingCall:{name:'read_file',arguments:{path:'safe.txt'}},operationKey:'same-key',operationId:'op-1',dispatchArgs:{path:'safe.txt'}});
+  const h=harness(saved('idle'),{}, {webcodexDurableState:{version:1,state:initial}});
+  await h.status();assert.equal((await h.status()).state.session.operationKey,'same-key');
+  await h.alarm();assert.equal(h.createCount,0);
+  assert.equal((await h.status()).state.session.phase,'result_ready');
+});
+
+test('unsupported durable state remains intact and blocks execution',async()=>{
+  const durable={version:999,state:saved('recovering')};
+  const h=harness(saved('idle'),{}, {webcodexDurableState:durable});
+  const result=await h.status();assert.equal(result.state.session.reasonCode,'state_incompatible');
+  assert.deepEqual(h.localData.webcodexDurableState,durable);
+  assert.equal((await h.message({type:'bridge.arm',consent:true,tabId:7,agentId:'agent-1',toolNames:['read_file']})).ok,false);
+  assert.equal(h.createCount,0);
+});
+
+test('a pause received during intent persistence prevents the operation from being sent',async()=>{
+  let entered,release;
+  const waiting=new Promise(resolve=>{entered=resolve;}),resume=new Promise(resolve=>{release=resolve;});
+  let held=false;
+  const h=harness(saved(),{localSet:async values=>{
+    if(!held&&values.webcodexDurableState?.state.session.effect?.kind==='create_operation'){
+      held=true;entered();await resume;
+    }
+  }});
+  await h.status();const call=h.call('turn-1');await waiting;
+  const paused=h.message({type:'bridge.pause'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(h.localData.webcodexInterruption.reason,'user_pause');
+  release();await call;await paused;
+  assert.equal(h.createCount,0);assert.equal((await h.status()).state.session.phase,'paused');
+});
+
+test('an accepted operation keeps polling after pause and retains its result locally',async()=>{
+  let entered,release;
+  const waiting=new Promise(resolve=>{entered=resolve;}),resume=new Promise(resolve=>{release=resolve;});
+  const initial=saved();initial.session.automatic=true;
+  const h=harness(initial,{beforeCreateResponse:async()=>{entered();await resume;}},{bridgeAuto:{consent:true,automatic:true}});
+  await h.status();const call=h.call('turn-1');await waiting;
+  const paused=h.message({type:'bridge.pause'});release();await call;await paused;
+  await h.alarm();const session=(await h.status()).state.session;
+  assert.equal(h.createCount,1);assert.equal(session.phase,'paused');assert.equal(session.pausedPhase,'result_ready');
+  assert.ok(session.resultText);assert.equal(h.deliveryCount,0);
+});
+
+test('an interrupted consent revocation survives a worker restart before its queued command',async()=>{
+  const initial=saved();initial.session.automatic=true;
+  const h=harness(saved('idle'),{}, {webcodexDurableState:{version:1,state:initial},bridgeAuto:{consent:true,enabled:true,automatic:true},webcodexInterruption:{id:'interrupt',sessionId:'session-1',reason:'permission_revoked',preferenceChanges:{consent:false}}});
+  const result=await h.status();
+  assert.equal(result.state.session.phase,'paused');assert.equal(result.state.autoSettings.consent,false);
+  assert.equal(h.localData.bridgeAuto.enabled,false);assert.equal(h.createCount,0);assert.equal(h.deliveryCount,0);
+});
+
+test('a field preference patch cannot overwrite other fields from a stale panel snapshot',async()=>{
+  const h=harness(saved(),{}, {bridgeAuto:{enabled:true,consent:true,agentId:'agent-1',toolNames:['read_file'],autoApprove:true,automatic:true,attachFiles:true}});
+  await h.status();
+  const first=await h.message({type:'bridge.preferences',field:'attachFiles',attachFiles:false,consent:false,agentId:'old-agent',autoApprove:false,automatic:false,toolNames:[]});
+  assert.equal(first.ok,true);assert.equal(first.state.autoSettings.attachFiles,false);
+  assert.equal(first.state.autoSettings.consent,true);assert.equal(first.state.autoSettings.agentId,'agent-1');
+  assert.equal(first.state.autoSettings.autoApprove,true);assert.equal(first.state.session.paused,false);
+  const revision=first.state.autoSettings.revision;
+  const second=await h.message({type:'bridge.preferences',field:'automatic',automatic:false,attachFiles:true,consent:true});
+  assert.equal(second.state.autoSettings.attachFiles,false);assert.equal(second.state.autoSettings.automatic,false);
+  assert.ok(second.state.autoSettings.revision>revision);
+});
+
+test('failure to persist an operation intent prevents sending it',async()=>{
+  const h=harness(saved(),{localSet:async values=>{if(values.webcodexDurableState?.state.session.effect?.kind==='create_operation')throw Error('storage failed');}});
+  await h.status();await h.call('turn-1');assert.equal(h.createCount,0);
+  assert.match((await h.status()).state.session.error,/storage failed/);
+});
+
+test('revoking automatic approval during persistence waits for explicit approval with the same key',async()=>{
+  let entered,release;
+  const waiting=new Promise(resolve=>{entered=resolve;}),resume=new Promise(resolve=>{release=resolve;});
+  let held=false;
+  const initial=saved('waiting_model','write_file');initial.session.autoApprove=true;
+  const h=harness(initial,{localSet:async values=>{
+    if(!held&&values.webcodexDurableState?.state.session.effect?.kind==='create_operation'){held=true;entered();await resume;}
+  }},{bridgeAuto:{consent:true,autoApprove:true,agentId:'agent-1',toolNames:['write_file']}});
+  await h.status();const call=h.call('turn-1',h.page,'write_file');await waiting;
+  const revoked=h.message({type:'bridge.preferences',field:'autoApprove',autoApprove:false});
+  await new Promise(resolve=>setImmediate(resolve));release();await call;await revoked;
+  const before=(await h.status()).state.session;
+  assert.equal(h.createCount,0);assert.equal(before.phase,'waiting_approval');
+  const key=before.operationKey;assert.ok(key);
+  assert.equal((await h.message({type:'bridge.approve'})).ok,true);
+  assert.equal(h.createCount,1);assert.equal(h.calls.find(call=>call.method==='POST').body.key,key);
+});
 
 test('known chat markers survive reopen while copied histories receive a fresh binding',async()=>{
   const marker='a'.repeat(32),address='/prompts/saved';
@@ -550,10 +643,10 @@ test('one-time migration selects a sole online agent and safe tools without a cl
     const h=harness(initial,{listAgents:()=>[{id:'agent-1',online}],listTools:()=>[tool(),tool('write_file')]},{bridgeAutoSetupV1:false});
     let oauth=0;h.chrome.identity.launchWebAuthFlow=async()=>{oauth++;throw Error('unexpected OAuth');};
     const status=await h.status();
-    if(startOnline){assert.deepEqual(status.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true});assert.equal(h.localData.bridgeAutoSetupV1,true);}
+    if(startOnline){assert.deepEqual(status.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true,revision:status.state.autoSettings.revision});assert.equal(h.localData.bridgeAutoSetupV1,true);}
     else {assert.equal(h.localData.bridgeAutoSetupV1,false);assert.equal(h.localData.bridgeAuto,undefined);}
     assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,startOnline);
-    if(!startOnline){online=true;h.advanceTime(5001);const returned=await h.status();assert.deepEqual(returned.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true});assert.equal(h.localData.bridgeAutoSetupV1,true);assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,true);}
+    if(!startOnline){online=true;h.advanceTime(5001);const returned=await h.status();assert.deepEqual(returned.state.autoSettings,{enabled:true,agentId:'agent-1',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true,revision:returned.state.autoSettings.revision});assert.equal(h.localData.bridgeAutoSetupV1,true);assert.equal((await h.message({type:'studio.hello'},h.page)).accepted,true);}
     assert.equal(oauth,0);
   }
 });
@@ -862,7 +955,7 @@ test('an explicit save recovers a large write from the existing answer and persi
  const h=harness(initial,{sessionQuota:65536,listTools:()=>[largeWriteTool],sendMessage:async(_id,msg)=>msg.type==='studio.captureWrite'?{ok:true,text,pageInstance:'page-large',conversationKey:'chat-1'}:{ok:true,supported:true,delivered:true,conversationKey:'chat-1'}},{bridgeAuto:{enabled:true,consent:true,autoApprove:true,agentId:'agent-1',toolNames:['write_file']}});
  await h.status();assert.equal((await h.message({type:'bridge.saveFromReply'})).ok,true);
  assert.equal(h.createCount,1);assert.equal(h.calls.find(call=>call.method==='POST').body.arguments.content,content);
- assert.equal(h.db[KEY].largeState,true);assert.equal(h.localData.webcodexLargeSessionState.session.pendingCall.arguments.content,content);
+ assert.equal(h.db[KEY].durableState,true);assert.equal(h.localData.webcodexDurableState.state.session.pendingCall.arguments.content,content);
  await h.alarm();assert.equal((await h.status()).state.session.phase,'result_ready');
 });
 test('explicit file recovery never bypasses consent, selected tools or unfinished operations',async()=>{

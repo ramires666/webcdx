@@ -47,6 +47,7 @@
   }
   function render(next) {
     if (!next) return;
+    if(Number.isInteger(next.autoSettings?.revision)&&Number.isInteger(state?.autoSettings?.revision)&&next.autoSettings.revision<state.autoSettings.revision)next={...next,autoSettings:state.autoSettings};
     const previousError = state?.session?.error||state?.pageScript?.observerError;
     state = next;
     const session = next.session || {};
@@ -159,8 +160,8 @@
     const visibleTools = new Set([...$('tools').querySelectorAll('input')].map(input => input.value));
     const toolNames = [...new Set([...savedTools.filter(name => !visibleTools.has(name)), ...selected($('tools'))])];
     const preferences = { agentId: selected($('agents'))[0] || state?.autoSettings?.agentId || '', toolNames, consent: $('consent').checked, automatic: $('automatic').checked, attachFiles:$('attach-files').checked, autoApprove: $('auto-approve').checked };
-    if (state) state.autoSettings = preferences;
-    send('bridge.preferences', preferences).catch(showError);
+    if (state) state.autoSettings = {...state.autoSettings,...preferences};
+    send('bridge.preferences', {...preferences,field}).catch(showError);
   }
   $('agents').addEventListener('change', () => savePreferences('agentId'));
   $('tools').addEventListener('change', () => savePreferences('toolNames'));

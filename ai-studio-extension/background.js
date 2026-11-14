@@ -1,27 +1,78 @@
-importScripts('vendor/json-tools.js', 'protocol.js', 'attachments.js', 'mcp-client.js', 'local-client.js');
-const KEY = 'webcodexState', LARGE_KEY='webcodexLargeSessionState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
+importScripts('vendor/json-tools.js', 'protocol.js', 'session-state.js', 'attachments.js', 'mcp-client.js', 'local-client.js');
+const KEY = 'webcodexState', LARGE_KEY='webcodexLargeSessionState', DURABLE_KEY='webcodexDurableState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
 let state = {connected:false,transport:'',localError:'',gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',transport:'',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
 let token = '', client = null, localClient = null, gateClient = null, serial = Promise.resolve(), demo = false, connecting = false, lastAutoRefresh = 0, lastAutoRefreshOK = false, autoToolsAvailable = true;
+let restoreError='',authorizationRevision=0,approvalRevision=0,automaticRevision=0,interruptWrites=Promise.resolve();
 const uuid = () => crypto.randomUUID();
+const coordinatorId=uuid();
 const clone = x => JSON.parse(JSON.stringify(x));
 function publicState() { const s=clone({...state,session:{...state.session,attachments:state.session.attachments?.map(({data,...metadata})=>metadata)}}); delete s.accessToken; s.connecting=connecting; return s; }
 async function save() {
+  if(restoreError)throw Error(restoreError);
+  await chrome.storage.local.set({[DURABLE_KEY]:{version:1,coordinatorId,state}});
   try {await chrome.storage.session.set({[KEY]:state});await chrome.storage.local.remove?.(LARGE_KEY);}
   catch(error){
     if(!/quota|QUOTA_BYTES|size/i.test(String(error.message||error)))throw error;
-    // Session storage has a Chrome-owned quota; keep large operation payloads in
-    // extension-local storage with unlimitedStorage and a session-only pointer.
-    await chrome.storage.local.set({[LARGE_KEY]:state});
-    await chrome.storage.session.set({[KEY]:{largeState:true}});
+    await chrome.storage.session.set({[KEY]:{durableState:true}});
   }
   if(state.connected&&state.accessToken&&!state.demoMode)await chrome.storage.local.set({bridgeAuth:{gateUrl:state.gateUrl,clientId:state.clientId,accessToken:state.accessToken}});
 }
 function enqueue(fn) { const p=serial.then(fn); serial=p.catch(()=>{}); return p; }
+async function saveAutoSettings(settings,{setup=false}={}){
+  const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
+  if(!setup&&JSON.stringify({...settings,revision:0})===JSON.stringify({...previous,revision:0})){settings.revision=previous.revision||0;return;}
+  settings.revision=(previous.revision||0)+1;
+  await chrome.storage.local.set({bridgeAuto:settings,...(setup?{bridgeAutoSetupV1:true}:{})});
+}
+function transitionSession(event){
+  const result=WebCodexSession.transition(state.session,event);
+  if(result.accepted){
+    for(const key of Object.keys(state.session))if(!Object.hasOwn(result.session,key))delete state.session[key];
+    Object.assign(state.session,result.session);
+  }
+  return result;
+}
+function ensureActionCurrent(session,revision){
+  if(state.session!==session||authorizationRevision!==revision||session.paused||state.autoSettings?.consent===false||session.effect?.coordinatorId&&session.effect.coordinatorId!==coordinatorId){
+    const error=Error('The action was cancelled before sending');error.code='ACTION_CANCELLED';throw error;
+  }
+}
+async function acceptInterruption(record){
+  if(!record)return;
+  if(record.preferenceChanges){
+    const {bridgeAuto={}}=await chrome.storage.local.get('bridgeAuto');
+    const settings={...bridgeAuto,...record.preferenceChanges};
+    if(settings.consent===false)settings.enabled=false;
+    await saveAutoSettings(settings);state.autoSettings=settings;
+    for(const field of ['autoApprove','automatic'])if(record.preferenceChanges[field]===false)state.session[field]=false;
+  }
+  if(record.sessionId&&record.sessionId!==state.session.sessionId&&!record.preferenceChanges){state.lastInterruptionId=record.id;await save();return;}
+  if(record.reason==='approval_revoked'||record.reason==='automatic_disabled'){
+    const field=record.reason==='approval_revoked'?'autoApprove':'automatic';
+    state.session[field]=false;
+    if(field==='autoApprove'&&state.session.effect?.requiresAutoApproval&&!state.session.operationId)state.session.phase='waiting_approval';
+  }else{
+    transitionSession({type:'pause',reason:record.reason});
+    state.session.error='Сеанс приостановлен по запросу пользователя';
+  }
+  state.session.lastInterruptionId=record.id;
+  state.lastInterruptionId=record.id;
+  await save();
+}
 async function restore() {
   try {
     const data=await chrome.storage.session.get(KEY);
-    if(data[KEY]?.largeState){const large=await chrome.storage.local.get(LARGE_KEY);if(!large[LARGE_KEY])throw Error('Saved operation payload is unavailable');state=large[LARGE_KEY];}
+    const durable=(await chrome.storage.local.get(DURABLE_KEY))[DURABLE_KEY];
+    if(durable){
+      if(durable.version!==1||!durable.state?.session){restoreError='Saved state version is unsupported or damaged; restore compatible extension code';throw Error(restoreError);}
+      state=durable.state;
+    }
+    else if(data[KEY]?.durableState)throw Error('Saved durable operation state is unavailable');
+    else if(data[KEY]?.largeState){const large=await chrome.storage.local.get(LARGE_KEY);if(!large[LARGE_KEY])throw Error('Saved operation payload is unavailable');state=large[LARGE_KEY];}
     else if(data[KEY])state=data[KEY];
+    const interruption=(await chrome.storage.local.get('webcodexInterruption')).webcodexInterruption;
+    if(interruption&&state.lastInterruptionId!==interruption.id&&state.session.lastInterruptionId!==interruption.id)await acceptInterruption(interruption);
+    state.session.reasonCode ||= WebCodexSession.legacyReason(state.session.error);
     if(state.session.conversationKey?.startsWith('/'))state.session.conversationKey='active-chat';
     delete state.session.temporaryConversationKey;
     const {bridgeAuto}=await chrome.storage.local.get('bridgeAuto');state.autoSettings=bridgeAuto?{...bridgeAuto,autoApprove:!!bridgeAuto.autoApprove}:{enabled:false,autoApprove:false};
@@ -47,6 +98,7 @@ async function restore() {
       }
     }
   } catch(e) {
+    if(restoreError){state.connected=false;state.session={...state.session,phase:'paused',paused:true,resumeBlocked:true,reasonCode:'state_incompatible',error:restoreError};return;}
     if(e?.status===401)await chrome.storage.local.remove('bridgeAuth');
     state.connected=false;client=null;token='';state.accessToken='';state.session.paused=true;state.session.resumeBlocked=true;state.session.phase='paused';state.session.error='Could not restore Gate connection; reconnect to Gate';await save();
   }
@@ -59,23 +111,23 @@ async function initializeLocal(){
     localClient=next;client=next;state.connected=true;state.transport='local';state.localError='';state.localEndpoint=next.endpoint;state.localAgentIdentity=next.agentIdentity;state.agentVersion=init?.serverInfo?.version||'';state.agents=agents;state.tools=tools;state.gateInstructions=init?.instructions||'';
     if(pinned){s.localEndpoint=next.endpoint;s.localAgentIdentity=next.agentIdentity;}
     const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
-    if(agents.length===1&&String(agents[0].id??agents[0].name)==='local'&&previous.enabled){const safe=tools.map(t=>t.name),names=(previous.toolNames||[]).filter(n=>safe.includes(n));state.autoSettings={...previous,gateAgentId:previous.gateAgentId||(previous.agentId&&previous.agentId!=='local'?previous.agentId:''),agentId:'local',toolNames:names};await chrome.storage.local.set({bridgeAuto:state.autoSettings});}
+    if(agents.length===1&&String(agents[0].id??agents[0].name)==='local'&&previous.enabled){const safe=tools.map(t=>t.name),names=(previous.toolNames||[]).filter(n=>safe.includes(n));state.autoSettings={...previous,gateAgentId:previous.gateAgentId||(previous.agentId&&previous.agentId!=='local'?previous.agentId:''),agentId:'local',toolNames:names};await saveAutoSettings(state.autoSettings);}
     await migrateAutoSetup();return next;
   }catch(e){try{next.close?.();}catch{}if(localClient===next)localClient=null;throw e;}
 }
 async function selectGateFallbackAgent(){
   const {bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');
   const agents=state.agents.filter(a=>a.online!==false),agentId=settings.gateAgentId||'';
-  if(!agentId&&agents.length===1){settings.gateAgentId=String(agents[0].id??agents[0].name);await chrome.storage.local.set({bridgeAuto:settings});}
+  if(!agentId&&agents.length===1){settings.gateAgentId=String(agents[0].id??agents[0].name);await saveAutoSettings(settings);}
   state.autoSettings={...settings,agentId:settings.gateAgentId||settings.agentId||''};
-  if(settings.gateAgentId)await chrome.storage.local.set({bridgeAuto:state.autoSettings});
+  if(settings.gateAgentId)await saveAutoSettings(state.autoSettings);
   state.gateFallbackAgents=agents.length>1&&!settings.gateAgentId?agents:[];
   if(state.gateFallbackAgents.length)state.localError='Choose a Gate agent before using the Gate fallback';
 }
 async function usePinnedClient(s=state.session){
   if(s.transport==='local'){
     if(localClient){client=localClient;return client;}
-    try{await initializeLocal();}catch(e){state.localError=String(e.message||e);throw Error('Local agent disconnected; its saved operation was not sent to Gate');}
+    try{await initializeLocal();}catch(e){state.localError=String(e.message||e);const error=Error('Local agent disconnected; its saved operation was not sent to Gate');error.code='PINNED_LOCAL_UNAVAILABLE';throw error;}
     client=localClient;return client;
   }
   if(s.transport==='gate'){
@@ -101,10 +153,34 @@ chrome.action.onClicked.addListener(tab=>{ if(tab?.windowId!==undefined) chrome.
 chrome.alarms.create('webcodex-recover',{periodInMinutes:0.5});
 chrome.alarms.onAlarm.addListener(a=>{if(a.name==='webcodex-recover') enqueue(async()=>{await ready;await recover();});});
 chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
+  const panelSender=sender.url===chrome.runtime.getURL('panel.html');
+  const pageSender=sender.frameId===0&&sender.tab?.id===state.session.tabId&&sender.url?.startsWith('https://aistudio.google.com/');
+  const preferenceUpdate=msg?.field?{[msg.field]:msg[msg.field]}:msg;
+  const preferenceRevoked=msg?.type==='bridge.preferences'&&preferenceUpdate.consent===false;
+  const approvalRevoked=panelSender&&msg?.type==='bridge.preferences'&&preferenceUpdate.autoApprove===false&&state.session.autoApprove;
+  const automaticDisabled=panelSender&&msg?.type==='bridge.preferences'&&preferenceUpdate.automatic===false&&state.session.automatic;
+  let reason='';
+  if(panelSender){
+    reason=({'bridge.pause':'user_pause','bridge.stop':'user_stop','bridge.disconnect':'permission_revoked'})[msg?.type]||'';
+    if(preferenceRevoked)reason='permission_revoked';
+    else if(approvalRevoked)reason='approval_revoked';
+    else if(automaticDisabled)reason='automatic_disabled';
+  }else if(pageSender&&msg?.conversationReplaced)reason='conversation_changed';
+  let interruption,interruptionSaved;
+  if(reason){
+    if(approvalRevoked)approvalRevision++;
+    if(automaticDisabled)automaticRevision++;
+    if(!['approval_revoked','automatic_disabled'].includes(reason))authorizationRevision++;
+    interruption={id:uuid(),sessionId:state.session.sessionId,reason};
+    if(msg.type==='bridge.preferences')interruption.preferenceChanges=Object.fromEntries(['consent','autoApprove','automatic'].filter(key=>preferenceUpdate[key]===false).map(key=>[key,false]));
+    interruptionSaved=interruptWrites=interruptWrites.catch(()=>{}).then(()=>chrome.storage.local.set({webcodexInterruption:interruption}));
+    if(reason!=='approval_revoked')interruptionSaved.then(()=>chrome.tabs.sendMessage(state.session.tabId,{type:'studio.cancelDelivery',sessionId:interruption.sessionId})).catch(()=>{});
+  }
   if(connecting&&msg?.type==='bridge.status'&&sender.url===chrome.runtime.getURL('panel.html')){ready.then(()=>reply({ok:true,state:publicState()})).catch(()=>reply({ok:false,error:'Не удалось загрузить состояние'}));return true;}
   if(msg?.type?.startsWith('studio.')) {
     enqueue(async()=>{
       await ready;
+      if(interruption){await interruptionSaved;await acceptInterruption(interruption);}
       if(sender.frameId!==0||!Number.isInteger(sender.tab?.id)||new URL(sender.url||'').origin!=='https://aistudio.google.com')throw Error('Untrusted Studio sender');
       rememberPageScript(msg,sender.tab.id);
       let result;
@@ -118,9 +194,10 @@ chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
   const connectRequest=msg?.type==='bridge.connect'&&sender.url===chrome.runtime.getURL('panel.html');
   if(connectRequest&&connecting){reply({ok:false,error:'Вход в Gate уже выполняется. Завершите или закройте окно входа.'});return;}
   if(connectRequest)connecting=true;
-  enqueue(async()=>{await ready;if(sender.url!==chrome.runtime.getURL('panel.html'))throw Error('Panel sender required');return command(msg)}).then(s=>reply({ok:true,state:s||publicState()})).catch(e=>reply({ok:false,error:String(e.message||e)})).finally(()=>{if(connectRequest)connecting=false;}); return true;
+  enqueue(async()=>{await ready;if(sender.url!==chrome.runtime.getURL('panel.html'))throw Error('Panel sender required');if(interruption){await interruptionSaved;await acceptInterruption(interruption);}return command(msg)}).then(s=>reply({ok:true,state:s||publicState()})).catch(e=>reply({ok:false,error:String(e.message||e)})).finally(()=>{if(connectRequest)connecting=false;}); return true;
 });
 async function command(m) {
+  if(restoreError){if(m.type==='bridge.status')return publicState();throw Error(restoreError);}
   switch(m.type) {
     case 'bridge.status': await refreshForAutoStart(state.autoSettings);await migrateAutoSetup();updateAutoStatus();return publicState();
     case 'bridge.cleanupPreference':
@@ -134,10 +211,14 @@ async function command(m) {
     case 'bridge.arm': await arm(m);await rememberAuto(state.session);break;
     case 'bridge.preferences':
       {const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
+      if(m.field){
+        if(!['agentId','toolNames','consent','automatic','attachFiles','autoApprove'].includes(m.field))throw Error('Unknown preference field');
+        m={...previous,type:m.type,[m.field]:m[m.field]};
+      }
       const agentId=m.agentId??previous.agentId??'',toolNames=Array.isArray(m.toolNames)?m.toolNames:previous.toolNames||[],consent=m.consent===true;
       const autoApprove=!!(m.autoApprove??previous.autoApprove??false),wasAutoApproving=!!state.session.autoApprove;
       const settings={attachFiles:m.attachFiles??previous.attachFiles??true,enabled:consent&&!!agentId&&toolNames.length>0,agentId,gateAgentId:state.transport==='gate'&&agentId!=='local'?agentId:previous.gateAgentId||(previous.agentId&&previous.agentId!=='local'?previous.agentId:''),toolNames,automatic:m.automatic??previous.automatic??false,autoApprove,consent};
-      await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;
+      await saveAutoSettings(settings,{setup:true});state.autoSettings=settings;
       if(m.automatic!==undefined)state.session.automatic=!!m.automatic;
       state.session.autoApprove=autoApprove;
       if(!wasAutoApproving&&m.autoApprove===true&&autoApprove&&consent&&settings.enabled&&settings.agentId===state.session.agentId&&state.session.toolNames?.includes(state.session.pendingCall?.name)&&state.session.phase==='waiting_approval'&&state.session.pendingCall&&!state.session.paused)await dispatch();
@@ -168,21 +249,17 @@ async function command(m) {
     }
     case 'bridge.pause': await chrome.tabs.sendMessage(state.session.tabId,{type:'studio.cancelDelivery',sessionId:state.session.sessionId}).catch(()=>{});await disableAuto();if(state.session.phase!=='paused')state.session.pausedPhase=state.session.phase;if(state.session.phase==='delivery_uncertain'||state.session.resumeBlocked)state.session.resumeBlocked=true;state.session.paused=true;state.session.userPaused=true;state.session.phase='paused';break;
     case 'bridge.resume':
-      if(state.session.phase==='stopped'||state.session.resumeBlocked||state.session.phase==='delivery_uncertain'||state.session.pausedPhase==='delivery_uncertain'||state.session.error?.includes('outcome is unknown'))throw Error('Resolve the uncertain operation or re-arm this chat before resuming');
+      if(state.session.phase==='stopped'||state.session.resumeBlocked||state.session.phase==='delivery_uncertain'||state.session.pausedPhase==='delivery_uncertain'||state.session.reasonCode==='outcome_unknown')throw Error('Resolve the uncertain operation or re-arm this chat before resuming');
       if(state.autoSettings?.consent===false)throw Error('Grant consent before resuming');
       {
-        const oldSizeResult=state.session.error==='Result exceeds 32 KiB; reduce the tool output before delivery.'&&!!state.session.resultText&&!!state.session.nextTurn&&!!state.session.operationId;
+        const oldSizeResult=state.session.reasonCode==='legacy_size_limit'&&!!state.session.resultText&&!!state.session.nextTurn&&!!state.session.operationId;
         if(oldSizeResult){
           state.session.userPaused=false;
           const restored=await reattachDelivery({tab:{id:state.session.tabId}},{pageInstance:state.session.pageInstance});
           if(!restored.accepted)throw Error(state.session.error);
           break;
         }
-        state.session.paused=false;state.session.userPaused=false;state.session.count=0;
-        state.session.phase=state.session.pausedPhase|| (state.session.pendingCall?(state.session.operationKey?'recovering':'waiting_approval'):(state.session.resultText?'result_ready':'waiting_model'));
-        if(state.session.phase==='ready'&&state.session.pendingCall&&!SAFE.has(state.session.pendingCall.name)&&!state.session.autoApprove)state.session.phase='waiting_approval';
-        state.session.pausedPhase='';
-        if(state.session.error==='Session operation limit reached; resume to continue.')state.session.error='';
+        if(!transitionSession({type:'resume',consent:state.autoSettings?.consent,safe:SAFE.has(state.session.pendingCall?.name)}).accepted)throw Error('Session cannot be resumed in its current state');
         if(state.session.phase==='ready'&&state.session.pendingCall&&!state.session.operationKey&&!state.session.operationId&&!state.session.resultText)await dispatch();
       }
       break;
@@ -191,7 +268,7 @@ async function command(m) {
       const s=state.session,writeOnly=m.type==='bridge.saveFromReply';
       const selected=state.tools.filter(t=>s.toolNames?.includes(t.name)&&(!writeOnly||t.name==='write_file'));
       if(!state.connected||state.autoSettings?.consent!==true||!selected.length)throw Error('Выберите нужные инструменты и разрешите операции с локальным агентом');
-      if(!['waiting_model','ready','paused'].includes(s.phase)||s.resumeBlocked||s.pendingCall||s.operationId||s.operationKey||s.resultText||s.error?.includes('outcome is unknown'))throw Error('Сначала завершите проверку предыдущей операции');
+      if(!['waiting_model','ready','paused'].includes(s.phase)||s.resumeBlocked||s.pendingCall||s.operationId||s.operationKey||s.resultText||s.reasonCode==='outcome_unknown')throw Error('Сначала завершите проверку предыдущей операции');
       const captured=await chrome.tabs.sendMessage(s.tabId,{type:writeOnly?'studio.captureWrite':'studio.captureCall',sessionId:s.sessionId,...(writeOnly?{tool:selected[0]}:{tools:selected})});
       if(!captured?.ok||captured.conversationKey!==s.conversationKey)throw Error(captured?.error||'Не удалось прочитать последний ответ в текущем чате');
       const call=WebCodexProtocol.parseCall(captured.text,null,selected,{...captured,sessionMarker:s.sessionMarker,allowUnmarked:true});
@@ -199,8 +276,8 @@ async function command(m) {
       const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(captured.text));
       const recoveryId=captured.pageInstance+':'+Array.from(new Uint8Array(digest),n=>n.toString(16).padStart(2,'0')).join('');
       if((s.lastRecoveredCall||s.lastRecoveredFile)===recoveryId)break;
-      s.lastRecoveredCall=recoveryId;s.paused=false;s.userPaused=false;s.pausedPhase='';s.error='';s.pendingCall={...call,turn:s.turn};
-      await dispatch();break;
+      s.lastRecoveredCall=recoveryId;s.paused=false;s.userPaused=false;s.pausedPhase='';s.phase='ready';s.error='';s.pendingCall={...call,turn:s.turn};
+      await dispatch({explicit:true});break;
     }
     case 'bridge.stop': await disableAuto();await stop();break;
     default: throw Error('Unknown bridge command');
@@ -223,13 +300,13 @@ async function connect({gateUrl,clientId,configureGate=false}) {
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);let response,text;try{response=await fetch(url.origin+'/bridge/v1/token',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:clientId,code:callback.searchParams.get('code'),redirect_uri:redirect,code_verifier:verifier})});if(!response.ok)throw Error('OAuth token exchange failed');text=await response.text();}finally{clearTimeout(timeout);}let data;try{data=JSON.parse(text);}catch{throw Error('Invalid OAuth response');}if(typeof data.access_token!=='string'||!data.access_token)throw Error('OAuth response missing access token');
     const gateToken=data.access_token,configuredGate=WebCodexMCP.createClient({baseUrl:url.origin,token:gateToken}),init=await configuredGate.initialize();
   if(configureGate&&state.transport==='local'){
-    const gateAgents=await configuredGate.listAgents(),{bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');if(!settings.gateAgentId&&gateAgents.filter(a=>a.online!==false).length===1)settings.gateAgentId=String(gateAgents.find(a=>a.online!==false).id??gateAgents.find(a=>a.online!==false).name);await chrome.storage.local.set({bridgeAuto:settings});await configuredGate.close?.();gateClient=WebCodexMCP.createClient({baseUrl:url.origin,token:gateToken});token=gateToken;state.accessToken=token;state.gateUrl=url.origin;state.clientId=clientId;state.gateVersion=init?.serverInfo?.version||'';state.connected=true;state.transport='local';client=localClient;await chrome.storage.local.set({bridgeAuth:{gateUrl:url.origin,clientId,accessToken:gateToken}});return;
+    const gateAgents=await configuredGate.listAgents(),{bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');if(!settings.gateAgentId&&gateAgents.filter(a=>a.online!==false).length===1)settings.gateAgentId=String(gateAgents.find(a=>a.online!==false).id??gateAgents.find(a=>a.online!==false).name);await saveAutoSettings(settings);await configuredGate.close?.();gateClient=WebCodexMCP.createClient({baseUrl:url.origin,token:gateToken});token=gateToken;state.accessToken=token;state.gateUrl=url.origin;state.clientId=clientId;state.gateVersion=init?.serverInfo?.version||'';state.connected=true;state.transport='local';client=localClient;await chrome.storage.local.set({bridgeAuth:{gateUrl:url.origin,clientId,accessToken:gateToken}});return;
   }
   gateClient=configuredGate;token=gateToken;state.accessToken=token;client=gateClient;state.gateVersion=init?.serverInfo?.version||'';state.gateInstructions=typeof init?.instructions==='string'?init.instructions:'';const all=await client.listTools();state.tools=all.filter(t=>!t.name.startsWith('browser_'));state.agents=await client.listAgents();state.connected=true;state.transport='gate';state.gateUrl=url.origin;state.clientId=clientId;state.session.phase='idle';demo=false;
 }
 function base64url(bytes){return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
-async function rememberAuto(m){if(!demo){const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');const settings={attachFiles:m.attachFiles??previous.attachFiles??true,enabled:true,agentId:m.agentId,gateAgentId:previous.gateAgentId||(m.agentId!=='local'?m.agentId:''),toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,consent:true};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus(settings);}}
-async function disableAuto(){const {bridgeAuto={}}=await chrome.storage.local.get('bridgeAuto');const settings={...bridgeAuto,enabled:false};await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;updateAutoStatus();}
+async function rememberAuto(m){if(!demo){const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');const settings={attachFiles:m.attachFiles??previous.attachFiles??true,enabled:true,agentId:m.agentId,gateAgentId:previous.gateAgentId||(m.agentId!=='local'?m.agentId:''),toolNames:m.toolNames,automatic:!!m.automatic,autoApprove:!!m.autoApprove,consent:true};await saveAutoSettings(settings,{setup:true});state.autoSettings=settings;updateAutoStatus(settings);}}
+async function disableAuto(){const {bridgeAuto={}}=await chrome.storage.local.get('bridgeAuto');const settings={...bridgeAuto,enabled:false};await saveAutoSettings(settings,{setup:true});state.autoSettings=settings;updateAutoStatus();}
 async function migrateAutoSetup(){
   const {bridgeAutoSetupV1}=await chrome.storage.local.get('bridgeAutoSetupV1');
   const {bridgeAuto:previous={}}=await chrome.storage.local.get('bridgeAuto');
@@ -242,7 +319,7 @@ async function migrateAutoSetup(){
   const selected=tools.length?tools:safe;
   if(!agent||agent.online===false||!selected.length)return;
   const settings={enabled:true,agentId:String(agent.id??agent.name),toolNames:selected,automatic:true,autoApprove:!!previous.autoApprove,consent:true};
-  await chrome.storage.local.set({bridgeAuto:settings,bridgeAutoSetupV1:true});state.autoSettings=settings;
+  await saveAutoSettings(settings,{setup:true});state.autoSettings=settings;
 }
 function updateAutoStatus(settings=state.autoSettings||{enabled:false}) {
   if(!settings.enabled)return state.autoStatus='';
@@ -276,6 +353,7 @@ async function refreshForAutoStart(settings) {
   return lastAutoRefreshOK;
 }
 async function autoStart(sender,m){
+  if(restoreError)return{accepted:false};
   let {bridgeAuto:settings}=await chrome.storage.local.get('bridgeAuto');
   state.autoSettings=settings||state.autoSettings||{enabled:false};
   if(settings?.enabled&&!state.connected&&!demo){
@@ -304,21 +382,21 @@ async function autoStart(sender,m){
     const existing=await chrome.tabs.get(s.tabId).catch(()=>null);
     if(existing&&!((m.hasHistory===true||m.blankChat===true&&m.editorEmpty===true)&&m.supported===true&&sender.tab.active===true&&sender.tab.windowId===existing.windowId))return {accepted:false};
   }
-  const changedWithoutPending=s.tabId===sender.tab.id&&s.error==='Conversation changed'&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId;
+  const changedWithoutPending=s.tabId===sender.tab.id&&s.reasonCode==='conversation_changed'&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId;
   if((s.paused&&s.phase!=='stopped'&&!changedWithoutPending&&!((m.conversationReplaced||freshBlank||freshSaved)&&!s.userPaused))||s.userPaused)return {accepted:false};
   await clearSession();
   try{await arm({...settings,tabId:sender.tab.id});state.session.pageInstance=m.pageInstance;await save();return {accepted:true};}
   catch(e){return {accepted:false};}
 }
 function recoverableDelivery(s){
-  const recoverablePause=s.phase==='paused'&&!s.userPaused&&(s.error==='Conversation changed'||s.pausedPhase!=='delivery_uncertain'&&s.error==='AI Studio session is unavailable; stop and re-arm this chat'||!s.resumeBlocked&&s.error==='Result exceeds 32 KiB; reduce the tool output before delivery.');
+  const recoverablePause=s.phase==='paused'&&!s.userPaused&&(s.reasonCode==='conversation_changed'||s.pausedPhase!=='delivery_uncertain'&&s.reasonCode==='page_unavailable'||!s.resumeBlocked&&s.reasonCode==='legacy_size_limit');
   return !!(s.resultText&&s.nextTurn&&s.operationId&&(s.phase==='delivery_uncertain'||s.phase==='attaching_files'||s.phase==='result_ready'&&!!s.attachments?.length||recoverablePause));
 }
 async function reattachDelivery(sender,m){
   const s=state.session;
   const unsentFiles=(s.phase==='result_ready'||s.phase==='attaching_files')&&!!s.attachments?.length;
-  const unsentSizeResult=s.phase==='paused'&&!s.userPaused&&!s.resumeBlocked&&s.error==='Result exceeds 32 KiB; reduce the tool output before delivery.';
-  const retainUnsent=()=>{s.phase='paused';s.paused=true;s.resumeBlocked=false;s.error='Result exceeds 32 KiB; reduce the tool output before delivery.';};
+  const unsentSizeResult=s.phase==='paused'&&!s.userPaused&&!s.resumeBlocked&&s.reasonCode==='legacy_size_limit';
+  const retainUnsent=()=>{s.phase='paused';s.paused=true;s.resumeBlocked=false;s.reasonCode='legacy_size_limit';s.error='Result exceeds 32 KiB; reduce the tool output before delivery.';};
   try{
     const armed=await armPage(sender.tab.id,{type:'studio.arm',sessionId:s.sessionId,sessionMarker:s.sessionMarker,turnless:!!s.turnless,recover:true,recoverTurn:s.nextTurn,toolNames:s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean)});
     if(!armed?.supported){s.error='AI Studio page is not ready; delivery remains uncertain';if(unsentSizeResult)retainUnsent();await save();return {accepted:false};}
@@ -407,14 +485,14 @@ async function studioMessage(m,sender) {
   if(m.type==='studio.ensureInstructions'){
     const {bridgeAuto:settings={}}=await chrome.storage.local.get('bridgeAuto');
     if(!settings.enabled||!settings.consent||s.userPaused||!state.connected||demo)return {accepted:false};
-    if(s.pendingCall||s.operationKey||s.operationId||s.resultText||s.phase==='delivery_uncertain'||s.error?.includes('outcome is unknown'))return {accepted:false};
+    if(s.pendingCall||s.operationKey||s.operationId||s.resultText||s.phase==='delivery_uncertain'||s.reasonCode==='outcome_unknown')return {accepted:false};
     try{await bindChatMarker(m,{select:true});await stageInstructions({ensureOnly:true});s.error='';if(s.paused){s.paused=false;s.resumeBlocked=false;s.phase='waiting_model';}await save();return {accepted:true};}
     catch(e){s.error=String(e.message||e);await save();return {accepted:false};}
   }
-  if(!m.conversationReplaced&&s.phase==='paused'&&s.error==='Conversation changed'&&recoverableDelivery(s)&&(m.type==='studio.call'||m.supported)){
+  if(!m.conversationReplaced&&s.phase==='paused'&&s.reasonCode==='conversation_changed'&&recoverableDelivery(s)&&(m.type==='studio.call'||m.supported)){
     s.phase='delivery_uncertain';s.paused=false;s.resumeBlocked=false;s.pausedPhase='';s.error='Checking whether the saved result reached this chat';
   }
-  if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(!m.conversationReplaced&&m.supported&&s.sessionMarker&&(m.chatMarkers||[]).includes(s.sessionMarker))await bindChatMarker(m);if(m.conversationReplaced||!m.supported){if(m.conversationReplaced&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&s.phase!=='delivery_uncertain'){const restarted=await autoStart(sender,{pageInstance:s.pageInstance,conversationReplaced:true});if(restarted.accepted)return restarted;}if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.error=m.error||'AI Studio session is unavailable';await save();return {accepted:true};}if(!s.paused&&s.phase==='delivery_uncertain'&&typeof m.deliveredOperationId==='string'&&!!m.deliveredOperationId&&m.deliveredOperationId===(s.operationId||s.operationKey)){completeDelivery();await save();}await recover();return {accepted:true,conversationKey:s.conversationKey};}
+  if(m.type==='studio.snapshot'||m.type==='studio.tick'){if(!m.conversationReplaced&&m.supported&&s.sessionMarker&&(m.chatMarkers||[]).includes(s.sessionMarker))await bindChatMarker(m);if(m.conversationReplaced||!m.supported){if(m.conversationReplaced&&!s.userPaused&&!s.pendingCall&&!s.operationKey&&!s.resultText&&!s.operationId&&s.phase!=='delivery_uncertain'){const restarted=await autoStart(sender,{pageInstance:s.pageInstance,conversationReplaced:true});if(restarted.accepted)return restarted;}if(s.phase!=='paused')s.pausedPhase=s.phase;s.paused=true;s.phase='paused';s.resumeBlocked=true;s.reasonCode=m.reasonCode||WebCodexSession.legacyReason(m.error)||'page_unavailable';s.error=m.error||'AI Studio session is unavailable';await save();return {accepted:true};}if(!s.paused&&s.phase==='delivery_uncertain'&&typeof m.deliveredOperationId==='string'&&!!m.deliveredOperationId&&m.deliveredOperationId===(s.operationId||s.operationKey)){completeDelivery();await save();}await recover();return {accepted:true,conversationKey:s.conversationKey};}
     if(m.type==='studio.call'){
     if(s.paused)return {accepted:false};
     const requiredVersion=chrome.runtime.getManifest?.().version;
@@ -426,7 +504,7 @@ async function studioMessage(m,sender) {
     if(s.phase==='delivery_uncertain'&&!m.generating&&s.nextTurn){
       const tools=s.toolNames.map(n=>state.tools.find(t=>t.name===n)).filter(Boolean);
       const delivered=s.turnless&&typeof m.precedingResultId==='string'&&!!m.precedingResultId&&m.precedingResultId===(s.operationId||s.operationKey);
-      try{if((!s.turnless||delivered)&&WebCodexProtocol.parseCall(m.text,s.turnless?null:s.nextTurn,tools,{...m,sessionMarker:s.sessionMarker,allowUnmarked:!!m.responseKey})){completeDelivery();await save();}}catch{}
+      try{if((!s.turnless||delivered)&&WebCodexProtocol.parseCall(m.text,s.turnless?null:s.nextTurn,tools,{...m,sessionMarker:s.sessionMarker,allowUnmarked:!!m.responseKey})){completeDelivery(undefined,{legacyTurnProof:!s.turnless});await save();}}catch{}
       if(s.paused)return {accepted:false};
     }
     if(!['waiting_model','ready'].includes(s.phase))return {accepted:false};
@@ -440,7 +518,7 @@ async function studioMessage(m,sender) {
         delete s.rejectedCallFingerprint;delete s.replyError;
         s.notice='';
         if(!call){s.resultText='';s.finalText=m.text;s.phase='ready';await chrome.tabs.sendMessage(s.tabId,{type:'studio.cleanup',sessionId:s.sessionId,enabled:!!state.hideServiceMessages,final:true,operationIds:s.completedOperationIds||[]}).catch(()=>{});}
-        else {s.replyRecovery=call.recoveryRules||[];s.pendingCall={...call,turn:s.turn};s.phase=SAFE.has(call.name)?'ready':s.autoApprove?'ready':'waiting_approval';s.error='';if(s.phase==='ready'){await save();await dispatch();}}
+        else {s.replyRecovery=call.recoveryRules||[];transitionSession({type:'call_received',sessionId:s.sessionId,call:{...call,turn:s.turn},safe:SAFE.has(call.name),responseRevision:m.sourceRevision});if(s.phase==='ready'){await save();await dispatch();}}
       } catch(e){s.paused=true;s.phase='paused';s.error=String(e.message||e);}
     }
     await save();return {accepted:!s.paused};
@@ -455,27 +533,27 @@ async function rejectUnsentCall(m,error){
   s.replyError={code,message,text:m.text,sourceText:m.sourceText??m.text,responseKey:m.responseKey,correctionRequested:previous?.responseKey===m.responseKey&&!!previous.correctionRequested};
   s.lastResponseKey=m.responseKey;s.error=message;s.notice='Ошибка ответа сохранена. Доступен локальный повторный разбор.';
 }
-async function approve(){const s=state.session;if(s.phase!=='waiting_approval'||!s.pendingCall||s.paused)throw Error('No pending approval');await dispatch();}
+async function approve(){const s=state.session;if(s.phase!=='waiting_approval'||!s.pendingCall||s.paused)throw Error('No pending approval');await dispatch({explicit:true});}
 async function expireAuth(e){if(e?.status!==401) return false;await chrome.storage.local.remove('bridgeAuth');state.connected=false;client=null;token='';state.accessToken='';state.session.pausedPhase=state.session.phase;state.session.phase='paused';state.session.paused=true;state.session.resumeBlocked=true;state.session.error='Gate authorization expired; stop this session, reconnect, then re-arm this chat';await save();return true;}
-async function dispatch(){const s=state.session,p=s.pendingCall;if(!p)throw Error('No pending call');const tool=state.tools.find(t=>t.name===p.name);if(!tool)throw Error('Tool unavailable');
+async function dispatch({explicit=false}={}){const revision=authorizationRevision,approval=approvalRevision,deliveryPermission=automaticRevision,s=state.session,p=s.pendingCall;if(!p)throw Error('No pending call');const tool=state.tools.find(t=>t.name===p.name);if(!tool)throw Error('Tool unavailable');
   if(!s.operationKey)s.operationKey=Date.now()+'-'+uuid();const args={...p.arguments};s.attachmentDelivery??=state.autoSettings?.attachFiles!==false;if(tool.inputSchema.properties?.request_key)args.request_key=s.operationKey;
   if(p.name==='read_file'&&tool.inputSchema.properties?.delivery)args.delivery=s.attachmentDelivery?'file':'text';
-  s.pendingCall={...p,arguments:p.arguments};s.dispatchArgs=args;s.phase='recovering';await save();
+  const requiresAutoApproval=!explicit&&!SAFE.has(p.name);
+  const intent=transitionSession({type:'dispatch_intent',coordinatorId,sessionId:s.sessionId,key:s.operationKey,arguments:args,authorizationRevision:revision,requiresAutoApproval});if(!intent.accepted)throw Error('Dispatch transition is no longer allowed');await save();
   try{let result;if(demo){if(p.name!=='read_file')throw Error('Demo only supports read_file');result={content:[{type:'text',text:'DEMO MODE: sample content for '+String(args.path)}],isError:false};}
-    else result=await (await usePinnedClient(s)).createOperation({key:s.operationKey,name:p.name,arguments:args,agentId:s.agentId});
-    await finishResult(result);
-  }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);if(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED'){localClient=null;s.phase='recovering';s.paused=false;s.resumeBlocked=false;}else if(s.error.includes('saved operation was not sent')){s.phase='recovering';s.paused=false;s.resumeBlocked=false;}else s.phase='recovering';await save();}
+    else {const pinned=await usePinnedClient(s);ensureActionCurrent(s,revision);if(requiresAutoApproval&&approval!==approvalRevision){const error=Error('Automatic approval was revoked before sending');error.code='APPROVAL_CHANGED';throw error;}result=await pinned.createOperation({key:s.operationKey,name:p.name,arguments:args,agentId:s.agentId});}
+    await finishResult(result,revision,deliveryPermission);
+  }catch(e){if(e?.code==='APPROVAL_CHANGED'){s.phase='waiting_approval';s.executionStatus='not_sent';s.reasonCode='approval_revoked';await save();return;}if(e?.code==='ACTION_CANCELLED'){transitionSession({type:'pause',reason:'action_cancelled'});s.executionStatus='not_sent';s.error=e.message;await save();return;}if(await expireAuth(e))return;s.error=String(e.message||e);if(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED'){localClient=null;s.phase='recovering';s.paused=false;s.resumeBlocked=false;}else if(e?.code==='PINNED_LOCAL_UNAVAILABLE'){s.phase='recovering';s.paused=false;s.resumeBlocked=false;}else s.phase='recovering';await save();}
 }
-async function recover(){const s=state.session;if(s.paused)return;if(s.phase==='delivery_uncertain'||s.phase==='attaching_files'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey,expectedResultText:s.resultText});if(!chk?.supported){s.error='AI Studio session is unavailable; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
-  if(s.phase!=='recovering'||!s.pendingCall)return;
-  try{let result;if(demo)result={content:[{type:'text',text:'DEMO MODE: sample content'}],isError:false};else {const pinned=await usePinnedClient(s);result=s.operationId?await pinned.getOperation(s.operationId):await pinned.createOperation({key:s.operationKey,name:s.pendingCall.name,arguments:s.dispatchArgs,agentId:s.agentId});}
-    if(['accepted','dispatching','starting','running'].includes(result?.status)){s.operationId=result.operation_id||result.id||s.operationId;await save();return;}
-    await finishResult(result);
+async function recover(){if(restoreError)return;const revision=authorizationRevision,deliveryPermission=automaticRevision,s=state.session;const pausedOperation=s.paused&&s.pausedPhase==='recovering'&&!!s.operationId&&!!s.pendingCall;if(s.paused&&!pausedOperation)return;if(s.phase==='delivery_uncertain'||s.phase==='attaching_files'){try{const chk=await chrome.tabs.sendMessage(s.tabId,{type:'studio.snapshot',sessionId:s.sessionId,operationId:s.operationId||s.operationKey,expectedResultText:s.resultText});if(!chk?.supported){s.error='AI Studio session is unavailable; delivery remains uncertain';await save();return;}if(chk?.delivered){completeDelivery();await save();}}catch(e){s.error='AI Studio session is unavailable; delivery remains uncertain until this chat reconnects';await save();}return;}
+  if(s.phase!=='recovering'&&!pausedOperation||!s.pendingCall)return;
+  try{let result;if(demo)result={content:[{type:'text',text:'DEMO MODE: sample content'}],isError:false};else {const pinned=await usePinnedClient(s);if(s.operationId)result=await pinned.getOperation(s.operationId);else{transitionSession({type:'dispatch_intent',coordinatorId,sessionId:s.sessionId,key:s.operationKey,arguments:s.dispatchArgs,authorizationRevision:revision,requiresAutoApproval:s.effect?.requiresAutoApproval});await save();ensureActionCurrent(s,revision);result=await pinned.createOperation({key:s.operationKey,name:s.pendingCall.name,arguments:s.dispatchArgs,agentId:s.agentId});}}
+    await finishResult(result,revision,deliveryPermission);
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);if(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED')localClient=null;await save();}
 }
-async function finishResult(result){const s=state.session;s.operationId=result?.operation_id||result?.id||s.operationId;if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let prepared;try{prepared=await WebCodexAttachments.prepare({name:s.pendingCall.name,result:toolResult,enabled:s.attachmentDelivery??(state.autoSettings?.attachFiles!==false)});}catch(error){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='File received but attachment verification failed: '+String(error.message||error);await save();return;}s.attachments=prepared.attachments;const deliveredResult=prepared.result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:deliveredResult,error:transportError});s.phase='result_ready';await save();if(s.automatic&&!s.paused)try{await deliver(true);}catch(e){s.error=String(e.message||e);await save();}}
-async function deliver(submit){
-  const s=state.session;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');
+async function finishResult(result,revision=authorizationRevision,deliveryPermission=automaticRevision){const s=state.session;const status=transitionSession({type:'operation_status',operationKey:s.operationKey,operationId:result?.operation_id||result?.id,status:result?.status||'completed'});if(!status.accepted){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.reasonCode='operation_identity_conflict';s.error='Operation identity changed during recovery';await save();return;}if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.reasonCode='outcome_unknown';s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let prepared;try{prepared=await WebCodexAttachments.prepare({name:s.pendingCall.name,result:toolResult,enabled:s.attachmentDelivery??(state.autoSettings?.attachFiles!==false)});}catch(error){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='File received but attachment verification failed: '+String(error.message||error);await save();return;}s.attachments=prepared.attachments;const deliveredResult=prepared.result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:deliveredResult,error:transportError});transitionSession({type:'result_ready',operationKey:s.operationKey,status:result?.status||(toolResult?.isError?'failed':'completed')});await save();if(s.automatic&&!s.paused&&revision===authorizationRevision&&deliveryPermission===automaticRevision)try{await deliver(true,{automatic:true,revision:deliveryPermission});}catch(e){s.error=String(e.message||e);await save();}}
+async function deliver(submit,{automatic=false,revision:deliveryPermission=automaticRevision}={}){
+  const revision=authorizationRevision,s=state.session,deliveryOperationId=s.operationId||s.operationKey;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');
   let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a helper-result can be delivered');}
   if(!WebCodexProtocol.isResult(envelope))throw Error('Only a helper-result can be delivered');
   if(['delivery_uncertain','attaching_files'].includes(s.phase))throw Error('Delivery is already in progress or uncertain; it will not be sent again');
@@ -483,16 +561,17 @@ async function deliver(submit){
   const requiredVersion=chrome.runtime.getManifest?.().version;
   if(attachments.length&&requiredVersion&&state.pageScript?.version!==requiredVersion){s.phase='result_ready';await save();throw Error('Обновите сохранённую вкладку AI Studio: требуется скрипт '+requiredVersion+' для прикрепления файла');}
   if(attachments.length&&!submit)throw Error('File attachments require explicit delivery');
-  if(submit){s.phase=attachments.length?'attaching_files':'delivery_uncertain';if(attachments.length)s.notice='Прикрепляются файлы: '+attachments.map(file=>file.name).join(', ');await save();}
+  if(submit){const intent=transitionSession({type:'delivery_intent',coordinatorId,attachments:attachments.length>0,authorizationRevision:revision});if(!intent.accepted)throw Error('Delivery transition is no longer allowed');if(attachments.length)s.notice='Прикрепляются файлы: '+attachments.map(file=>file.name).join(', ');await save();}
+  try{ensureActionCurrent(s,revision);if(automatic&&deliveryPermission!==automaticRevision)throw Error('Automatic result delivery was disabled before sending');}catch(error){s.phase='result_ready';s.deliveryStatus='not_sent';s.reasonCode='action_cancelled';await save();throw error;}
   let r;try{r=await chrome.tabs.sendMessage(s.tabId,{type:'studio.deliver',sessionId:s.sessionId,text:s.resultText,submit,...(attachments.length?{operationId:s.operationId||s.operationKey,attachments}:{})});}
   catch{throw Error('Delivery status is unknown; do not send again');}
   if(!r?.supported){if(!r?.attempted){s.phase='result_ready';await save();}throw Error('AI Studio session is unavailable; delivery is blocked');}
   if(!r?.ok){if(!r?.attempted){s.phase='result_ready';await save();}throw Error(r?.error||(r?.attempted?'Delivery status is unknown; do not send again':'AI Studio draft could not be safely delivered'));}
   if(r.pending)return;
   if(!submit){s.phase='result_ready';await save();return;}
-  if(r.confirmed){completeDelivery();await save();}
+  if(r.confirmed){completeDelivery(deliveryOperationId);await save();}
 }
-function completeDelivery(){const s=state.session;if(s.operationId||s.operationKey)(s.completedOperationIds||=[]).push(s.operationId||s.operationKey);s.error='';if(s.notice?.startsWith('Прикрепляются файлы:'))s.notice='';s.phase='waiting_model';s.turn=s.nextTurn;s.pendingCall=null;s.resultText='';s.attachments=[];delete s.attachmentDelivery;s.operationKey='';s.operationId='';s.dispatchArgs=null;s.count++;}
+function completeDelivery(operationId=state.session.operationId||state.session.operationKey,{legacyTurnProof=false}={}){return transitionSession({type:'delivery_confirmed',sessionId:state.session.sessionId,operationId,legacyTurnProof}).accepted;}
 async function stop(){
   const s=state.session;
   await chrome.tabs.sendMessage(s.tabId,{type:'studio.disarm',sessionId:s.sessionId}).catch(()=>{});
@@ -503,5 +582,5 @@ async function stop(){
       if(result?.isError===true)s.error='Command cancellation was rejected by Gate.';
     } catch(e){s.error='Command cancellation could not be confirmed: '+String(e.message||e);}
   }
-  s.phase='stopped';s.paused=true;await save();
+  transitionSession({type:'stop'});await save();
 }

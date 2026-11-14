@@ -84,6 +84,15 @@ test('reply diagnostics expose exact source and require explicit correction acti
   assert.equal(p.get('request-correction').disabled,true);
 });
 
+test('older preference snapshots cannot replace a newer acknowledged revision',async()=>{
+  const p=createPanel();
+  await p.update({connected:true,session:{phase:'idle'},autoSettings:{revision:4,attachFiles:false,consent:true}});
+  await p.update({connected:true,session:{phase:'idle'},autoSettings:{revision:3,attachFiles:true,consent:false}});
+  assert.equal(p.get('attach-files').checked,false);assert.equal(p.get('consent').checked,true);
+  await p.change('attach-files',true);
+  assert.equal(p.messages.filter(m=>m.type==='bridge.preferences').at(-1).field,'attachFiles');
+});
+
 test('idle connection can arm after consent; safe tools initialize once and empty selection stays empty', async () => {
   const p = createPanel();
   await p.update({ connected: false, session: { phase: 'idle' }, tools: [], agents: [] });

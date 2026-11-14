@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $source = (Resolve-Path -LiteralPath $PSScriptRoot).Path
 $files = @(
     'manifest.json', 'panel.html', 'panel.css', 'panel.js',
-    'background.js', 'content.js', 'protocol.js', 'attachments.js', 'studio-adapter.js', 'mcp-client.js', 'local-client.js',
+    'background.js', 'content.js', 'protocol.js', 'session-state.js', 'attachments.js', 'studio-adapter.js', 'mcp-client.js', 'local-client.js',
     'vendor/json-tools.js', 'vendor/LICENSES.txt'
 )
 

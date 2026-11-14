@@ -16,7 +16,7 @@ function harness(stored={}, failInitialize=false, localStore={}, clientOverride=
     permissions:{contains:async()=>true},tabs:{get:async()=>({url:'https://aistudio.google.com/app/prompts/abc'}),sendMessage:async()=>({supported:true,conversationKey:'c',ok:true})},
     identity:{getRedirectURL:()=> 'https://test.chromiumapp.org/webcodex',launchWebAuthFlow:async()=>''}};
   const context={chrome,crypto:require('node:crypto').webcrypto,URL,URLSearchParams,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,JSON,Promise,Set,Map,Date,AbortSignal,Math,Error,String,Object,Number,RegExp,console,btoa:s=>Buffer.from(s,'binary').toString('base64'),fetch:async()=>{throw Error('fetch unexpected')},
-    WebCodexProtocol, WebCodexAttachments:require('./attachments.js'),WebCodexMCP:clientOverride|| (failInitialize?{createClient:()=>({initialize:async()=>{throw Error('expired')}})}:WebCodexMCP),importScripts(){},setTimeout,clearTimeout};
+    WebCodexProtocol, WebCodexSession:require('./session-state.js'), WebCodexAttachments:require('./attachments.js'),WebCodexMCP:clientOverride|| (failInitialize?{createClient:()=>({initialize:async()=>{throw Error('expired')}})}:WebCodexMCP),importScripts(){},setTimeout,clearTimeout};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'background.js'),'utf8'),context,{filename:'background.js'});
   return {listeners,data,sent,chrome};
 }
@@ -29,7 +29,8 @@ test('browser restart restores only credentials, refreshes tools and never start
   const reply=await message(h,{type:'bridge.status'},panel);
   assert.equal(reply.state.connected,true);assert.equal(reply.state.session.phase,'idle');
   assert.equal(reply.state.tools[0].name,'read_file');
-  assert.deepEqual(reply.state.autoSettings,auto);
+  assert.deepEqual(reply.state.autoSettings,{...auto,revision:reply.state.autoSettings.revision});
+  assert.ok(Number.isInteger(reply.state.autoSettings.revision)&&reply.state.autoSettings.revision>=0);
   assert.equal(JSON.stringify(reply).includes('saved-secret'),false);
   await message(h,{type:'bridge.disconnect'},panel);
   assert.equal(localStore.bridgeAuth,undefined);
