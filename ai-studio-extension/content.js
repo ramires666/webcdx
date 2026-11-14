@@ -125,8 +125,8 @@
     const marker=sessionId+'\0'+(turnless?observedResultId+'\0'+observedUserText+'\0':'')+model.text;if(attempted.has(model.text)||inFlight===marker)return;const callSession=sessionId,callGeneration=generationCounter,callContext=observedContext;inFlight=marker;try{
       const contextFields=turnless?{responseKey:await responseKeyFor(callGeneration,observedResultId,observedUserText,model.text),precedingResultId:observedResultId}:{};
       const current=adapter.inspect();
-      if(sessionId!==callSession||current.generating||current.latestModel?.text!==model.text||(current.latestModel?.sourceText??model.text)!==(model.sourceText??model.text)||turnless&&(callGeneration!==generationCounter||callContext!==observedContext||!awaitingResponse))return;
-      const response=await send('studio.call',{text:model.text,sourceText:model.sourceText??model.text,...(model.sourceError?{sourceError:model.sourceError}:{}),conversationKey,generating:false,...contextFields});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```helper-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
+      if(sessionId!==callSession||current.generating||current.latestModel?.sourceRevision!==model.sourceRevision||current.latestModel?.text!==model.text||(current.latestModel?.sourceText??model.text)!==(model.sourceText??model.text)||turnless&&(callGeneration!==generationCounter||callContext!==observedContext||!awaitingResponse))return;
+      const response=await send('studio.call',{text:model.text,sourceText:model.sourceText??model.text,sourceBlocks:model.sourceBlocks,sourceRevision:model.sourceRevision,...(model.sourceError?{sourceError:model.sourceError}:{}),conversationKey,generating:false,...contextFields});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```helper-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
   }
   const schedule=()=>{if(retired)return;try{if(turnless&&!checkInstructions)trackGeneration(adapter.inspect());clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(reportObserverError),250);}catch(error){reportObserverError(error);}};
   document.addEventListener('click',event=>{
@@ -171,8 +171,8 @@
       (async()=>{
         const responseKey=await responseKeyFor(generationCounter,observedResultId,observedUserText,model.text);
         const current=adapter.inspect();
-        if(sessionId!==m.sessionId||navigationRevision!==revision||current.generating||current.latestModel?.text!==model.text||(current.latestModel?.sourceText??current.latestModel?.text)!==(model.sourceText??model.text))throw Error('Ответ изменился во время чтения');
-        reply({ok:true,text:model.text,sourceText:model.sourceText??model.text,sourceError:model.sourceError,responseKey,conversationKey:s.conversationKey});
+        if(sessionId!==m.sessionId||navigationRevision!==revision||current.generating||current.latestModel?.sourceRevision!==model.sourceRevision||current.latestModel?.text!==model.text||(current.latestModel?.sourceText??current.latestModel?.text)!==(model.sourceText??model.text))throw Error('Ответ изменился во время чтения');
+        reply({ok:true,text:model.text,sourceText:model.sourceText??model.text,sourceBlocks:model.sourceBlocks,sourceRevision:model.sourceRevision,sourceError:model.sourceError,responseKey,conversationKey:s.conversationKey});
       })().catch(error=>reply({ok:false,error:String(error.message||error)}));return true;
     }
     if(m.type==='studio.captureWrite'||m.type==='studio.captureCall'){

@@ -50,6 +50,15 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
     cases++;
   }
   const user=document.querySelector('ms-chat-turn[data-turn-role="User"]');user.replaceChildren();
+  answer.replaceChildren();
+  const raw='HELPER_marker write_file\\r\\npath: W:/a.txt\\r\\n---\\r\\n  "😀" \\\\n\\r\\n\\r\\nEND_marker';
+  for(let i=0;i<2;i++){
+    const pre=document.createElement('pre'),code=document.createElement('code');
+    code.textContent=raw;pre.append(code);answer.append(pre);
+  }
+  const sources=adapter.inspect().latestModel;
+  if(sources.sourceBlocks.length!==2||sources.sourceBlocks.some(block=>block.text!==raw)||sources.sourceBlocks[0].id===sources.sourceBlocks[1].id)throw Error('code source boundaries or CRLF changed');
+  if(adapter.inspect().latestModel.sourceRevision!==sources.sourceRevision)throw Error('unchanged source revision drifted');cases++;
   const resultWidget=document.createElement('ms-code-block'),resultHeader=document.createElement('header'),resultBody=document.createElement('pre');
   resultHeader.textContent='Helper-result';resultBody.textContent=JSON.stringify({type:'helper-result',operation_id:'op-visible',result:{ok:true}});
   resultWidget.append(resultHeader,resultBody);user.append(resultWidget);
@@ -92,5 +101,5 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});
   assert.equal(code,0);
   const result=/<output id="check">([^<]*)<\/output>/.exec(output)?.[1];
-  assert.equal(result,'PASS:60');t.diagnostic('60 scenarios passed in installed Chrome, including native FileList and drag-and-drop upload');
+  assert.equal(result,'PASS:61');t.diagnostic('61 scenarios passed in installed Chrome, including native FileList and drag-and-drop upload');
 });

@@ -66,10 +66,14 @@
   };
   const editorValue = (el) => el.isContentEditable || attr(el, 'contenteditable') === 'true' ? text(el) : String(el.value || '');
   let ownedDraft = null, pendingSubmit = null;
+  const sourceIDs=new WeakMap(),responseRevisions=new WeakMap();
+  let nextSourceID=0,nextRevision=0;
+  const sourceID=node=>{if(!sourceIDs.has(node))sourceIDs.set(node,++nextSourceID);return sourceIDs.get(node);};
   const answerCopy = (el) => {
     const copy=el.cloneNode?el.cloneNode(true):el;
     if(copy===el||!copy.querySelectorAll)return copy;
     const originals=[el,...el.querySelectorAll('*')],copies=[copy,...copy.querySelectorAll('*')];
+    for(let i=0;i<originals.length;i++)if(copies[i])copies[i].helperSourceNode=originals[i];
     for(let i=1;i<originals.length;i++){
       const source=originals[i];let style;
       try{style=document.defaultView?.getComputedStyle?.(source);}catch{}
@@ -103,6 +107,18 @@
     return blockTags.has(tag)||node.helperBlockBoundary?'\n'+value+'\n':value;
   };
   const finalText = (el) => String(answerCopy(el).textContent||'').trim();
+  const sourceBlocks = copy => {
+    if(!copy)return [];
+    const candidates=allElements('pre, code, [role="code"], ms-code-block',copy);
+    // PRE/CODE nesting is one source. Independent equal blocks retain their IDs.
+    const roots=candidates.filter(node=>{
+      for(let parent=node.parentElement||node.parent;parent&&parent!==copy;parent=parent.parentElement||parent.parent){
+        if(candidates.includes(parent)&&String(parent.tagName||parent.tag||'').toLowerCase()!=='ms-code-block')return false;
+      }
+      return String(node.tagName||node.tag||'').toLowerCase()!=='ms-code-block'||!allElements('pre, code, [role="code"]',node).length;
+    });
+    return roots.map(node=>({id:sourceID(node.helperSourceNode||node),text:codeText(node),kind:'code'}));
+  };
   const userBody = (el) => {
     const roleContent=allElements('[data-turn-role], .chat-turn-container',el).find(node=>visible(node)&&(roleValue(node)==='user'||node.matches?.('.chat-turn-container.user')));
     if(roleContent)return roleContent;
@@ -170,6 +186,10 @@
     const modelContent = model && [...new Set(allElements('[data-turn-role], .chat-turn-container', model))]
       .find(el => visible(el)&&(roleValue(el) === 'model' || el.matches?.('.chat-turn-container.model')));
     const modelCopy=model?answerCopy(modelContent||model):null;
+    const blocks=sourceBlocks(modelCopy);
+    const renderedSource=modelCopy?modelText(modelCopy):'';
+    const signature=JSON.stringify([renderedSource,blocks]);
+    if(model&&responseRevisions.get(model)?.signature!==signature)responseRevisions.set(model,{signature,revision:++nextRevision});
     let modelSource=String(modelCopy?.textContent||'').trim();
     let parsedModel=model?protocol.analyzeReply(modelSource):null;
     // Preserve already valid JSON byte for byte, including strings spanning DOM
@@ -194,7 +214,7 @@
     return {
       conversationKey: conversationKey(), generating, controlsPending,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
-      supported: !error, error, modelError, latestModel: model ? { element: model, sourceError, sourceText:modelSource, text:parsedModel.kind==='call'?'```helper-call\n'+parsedModel.raw+'\n```':modelSource } : null,
+      supported: !error, error, modelError, latestModel: model ? { element: model, sourceError, sourceText:modelSource, sourceBlocks:blocks, renderedSource, sourceRevision:responseRevisions.get(model).revision, text:parsedModel.kind==='call'?'```helper-call\n'+parsedModel.raw+'\n```':modelSource } : null,
       latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,
       modelAfterUser: !user || recognized.indexOf(model) > recognized.indexOf(user),
     };

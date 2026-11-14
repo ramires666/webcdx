@@ -4,6 +4,34 @@ const createAdapter = require('./studio-adapter.js');
 
 const { Node, Textarea, setup } = require('./test-fixtures/studio-dom.cjs');
 
+test('source blocks preserve exact raw bytes, provenance and stable revisions',()=>{
+  const state=setup();state.chunk.remove();
+  const widget=state.model.children[0].add(new Node('ms-code-block'));
+  widget.add(new Node('header',{},'Helper'));
+  const pre=widget.add(new Node('pre'));
+  const code=pre.add(new Node('code',{},'HELPER_marker write_file\r\n---\r\n  \\n "😀"\r\n\r\nEND_marker'));
+  widget.add(new Node('button',{},'Copy'));
+  const first=state.adapter.inspect().latestModel;
+  assert.equal(first.sourceBlocks.length,1);
+  assert.equal(first.sourceBlocks[0].text,code.textContent);
+  const same=state.adapter.inspect().latestModel;
+  assert.equal(same.sourceRevision,first.sourceRevision);
+  assert.equal(same.sourceBlocks[0].id,first.sourceBlocks[0].id);
+  code.textContent+=' changed';
+  assert.notEqual(state.adapter.inspect().latestModel.sourceRevision,first.sourceRevision);
+});
+
+test('independent identical sources stay separate while hidden copies and thoughts disappear',()=>{
+  const state=setup();state.chunk.remove();const body=state.model.children[0];
+  for(const tag of ['pre','code'])body.add(new Node(tag,{},'same source'));
+  body.add(new Node('pre',{'aria-hidden':'true'},'same source'));
+  body.add(new Node('ms-thought-chunk')).add(new Node('pre',{},'same source'));
+  const blocks=state.adapter.inspect().latestModel.sourceBlocks;
+  assert.equal(blocks.length,2);
+  assert.equal(blocks[0].text,blocks[1].text);
+  assert.notEqual(blocks[0].id,blocks[1].id);
+});
+
 test('conversation key stays bound to the active tab across URL and DOM changes', () => {
   const state = setup();
   const original = state.adapter.inspect().conversationKey;
