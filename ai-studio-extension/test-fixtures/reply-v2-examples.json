@@ -1,0 +1,154 @@
+[
+  {
+    "name": "read_file",
+    "arguments": {
+      "path": "W:/project/a.txt",
+      "offset": 1,
+      "limit": 10
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef read_file\npath: W:/project/a.txt\noffset: 1\nlimit: 10\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "write_file",
+    "arguments": {
+      "path": "W:/project/empty.txt",
+      "if_absent": true,
+      "content": ""
+    },
+    "bodyField": "content",
+    "text": "HELPER_0123456789abcdef0123456789abcdef write_file\npath: W:/project/empty.txt\nif_absent: true\n---\n\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "write_file",
+    "arguments": {
+      "path": "W:/project/a.txt",
+      "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "content": "line\r\n\"quoted\" \\n\r\n"
+    },
+    "bodyField": "content",
+    "text": "HELPER_0123456789abcdef0123456789abcdef write_file\npath: W:/project/a.txt\nexpected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nline\r\n\"quoted\" \\n\r\n\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "list_directory",
+    "arguments": {
+      "path": "W:/project",
+      "max_entries": 10
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef list_directory\npath: W:/project\nmax_entries: 10\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "search_files",
+    "arguments": {
+      "path": "W:/project",
+      "pattern": "a:b \\w+",
+      "regex": true,
+      "glob": "*.txt",
+      "max_results": 3
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef search_files\npath: W:/project\npattern: a:b \\w+\nregex: true\nglob: *.txt\nmax_results: 3\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "exec_command",
+    "arguments": {
+      "cwd": "W:/project",
+      "command": "echo \"hello\"\n"
+    },
+    "bodyField": "command",
+    "text": "HELPER_0123456789abcdef0123456789abcdef exec_command\ncwd: W:/project\n---\necho \"hello\"\n\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "exec_command",
+    "arguments": {
+      "cwd": "W:/project",
+      "argv": [
+        "cmd.exe",
+        "/c",
+        "echo a:b"
+      ],
+      "env": {
+        "TEST": "null"
+      },
+      "stdin": "",
+      "yield_time_ms": 1000,
+      "timeout_seconds": 60
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef exec_command\ncwd: W:/project\nargv: [\"cmd.exe\",\"/c\",\"echo a:b\"]\nenv: {\"TEST\":\"null\"}\nstdin: \nyield_time_ms: 1000\ntimeout_seconds: 60\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "poll_command",
+    "arguments": {
+      "session_id": "example-session",
+      "stdout_offset": 0,
+      "stderr_offset": 0,
+      "max_bytes": 1024
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef poll_command\nsession_id: example-session\nstdout_offset: 0\nstderr_offset: 0\nmax_bytes: 1024\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "cancel_command",
+    "arguments": {
+      "session_id": "example-session"
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef cancel_command\nsession_id: example-session\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "edit_file",
+    "arguments": {
+      "path": "W:/project/a.txt",
+      "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "edits": [
+        {
+          "old_text": "before",
+          "new_text": "",
+          "replace_all": false
+        }
+      ]
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef edit_file\npath: W:/project/a.txt\nexpected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nedits: [{\"old_text\":\"before\",\"new_text\":\"\",\"replace_all\":false}]\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "find_files",
+    "arguments": {
+      "path": "W:/project",
+      "name_glob": "*.txt",
+      "kind": "file",
+      "max_results": 10
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef find_files\npath: W:/project\nname_glob: *.txt\nkind: file\nmax_results: 10\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "move_path",
+    "arguments": {
+      "source": "W:/project/a.txt",
+      "destination": "W:/project/b.txt",
+      "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef move_path\nsource: W:/project/a.txt\ndestination: W:/project/b.txt\nexpected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "delete_path",
+    "arguments": {
+      "path": "W:/project/b.txt",
+      "expected_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef delete_path\npath: W:/project/b.txt\nexpected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "list_allowed_roots",
+    "arguments": {},
+    "text": "HELPER_0123456789abcdef0123456789abcdef list_allowed_roots\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "list_commands",
+    "arguments": {
+      "limit": 5,
+      "status": "running"
+    },
+    "text": "HELPER_0123456789abcdef0123456789abcdef list_commands\nlimit: 5\nstatus: running\nEND_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "name": "list_agents",
+    "arguments": {},
+    "text": "HELPER_0123456789abcdef0123456789abcdef list_agents\nEND_0123456789abcdef0123456789abcdef"
+  }
+]
