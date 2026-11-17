@@ -18,9 +18,16 @@ const V5Instructions = " For v5 exec_command, generate a unique request_key befo
 
 // AgentRequest is one raw MCP JSON-RPC message sent from the gate to the local agent.
 type AgentRequest struct {
-	ID       string          `json:"id"`
-	Request  json.RawMessage `json:"request"`
-	Deadline time.Time       `json:"deadline"`
+	TaskCaller *TaskCaller     `json:"task_caller,omitempty"`
+	ID         string          `json:"id"`
+	Request    json.RawMessage `json:"request"`
+	Deadline   time.Time       `json:"deadline"`
+}
+
+// TaskCaller is assigned inside Gate after authentication and agent selection.
+type TaskCaller struct {
+	ClientID string `json:"client_id"`
+	AgentID  string `json:"agent_id"`
 }
 
 // AgentResponse is one raw MCP JSON-RPC response sent from the local agent to the gate.

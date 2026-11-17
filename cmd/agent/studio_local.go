@@ -19,7 +19,7 @@ import (
 const studioLocalFirstPort = 47831
 const studioLocalPortCount = 10
 
-func startStudioLocalAccess(ctx context.Context) (func(), error) {
+func startStudioLocalAccess(ctx context.Context, tasks *taskService) (func(), error) {
 	roots := studioAllowedRoots()
 	if len(roots) == 0 {
 		cwd, err := os.Getwd()
@@ -32,6 +32,7 @@ func startStudioLocalAccess(ctx context.Context) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+	executor.tasks = tasks
 	closeListener, err := startStudioLocal(ctx, executor)
 	if err != nil {
 		executor.Close()
@@ -150,7 +151,8 @@ func studioLocalHandler(e *nativeExecutor, operations *studioOperations, allowed
 		// A lost HTTP response must not cancel an operation whose key was persisted.
 		scoped := *operations
 		scoped.scope = commandHash(map[string]any{"source": "local", "client": id, "agent": identity})
-		result, rpcErr := handleStudioRequest(context.WithoutCancel(r.Context()), e, &scoped, req)
+		callCtx := withTaskOwner(context.WithoutCancel(r.Context()), scoped.scope)
+		result, rpcErr := handleStudioRequest(callCtx, e, &scoped, req)
 		if req.Method == "initialize" && rpcErr == nil {
 			if values, ok := result.(map[string]any); ok {
 				values["localAgent"] = map[string]any{"id": identity}

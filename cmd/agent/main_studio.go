@@ -19,7 +19,11 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	closeLocal, err := startStudioLocalAccess(ctx)
+	tasks := startConfiguredTasks()
+	if tasks != nil {
+		defer tasks.close()
+	}
+	closeLocal, err := startStudioLocalAccess(ctx, tasks)
 	if err != nil {
 		log.Fatalf("start local AI Studio: %v", err)
 	}

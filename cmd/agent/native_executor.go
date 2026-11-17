@@ -47,6 +47,7 @@ type executorConfig struct {
 }
 
 type nativeExecutor struct {
+	tasks            *taskService
 	source           string
 	allowedRoots     []string
 	unavailableRoots []string
@@ -269,6 +270,9 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (res
 		return rpcResult(message.ID, map[string]any{}), nil
 	case "tools/list":
 		tools := localTools(version)
+		if version == "v5" && e.taskToolsAvailable(ctx) {
+			tools = append(tools, taskToolSchemas()...)
+		}
 		if version == "v5" {
 			switch e.browserBackend {
 			case "mcp":
@@ -301,6 +305,10 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (res
 		}
 		if call.Arguments == nil {
 			call.Arguments = map[string]any{}
+		}
+		if version == "v5" && isTaskTool(call.Name) {
+			result, err := e.executeTaskTool(ctx, call.Name, call.Arguments)
+			return toolResult(message.ID, result, err), nil
 		}
 		if version == "v5" && isRemoteBrowserTool(call.Name) && e.browserBackend == "mcp" {
 			if e.remoteBrowser == nil {

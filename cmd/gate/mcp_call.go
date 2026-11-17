@@ -36,7 +36,7 @@ func (s *server) executeMCPTool(ctx context.Context, client *MCPClient, request 
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.runtimeFor(agent.ID).callAgent(ctx, body, s.timeout)
+	resp, err := s.runtimeFor(agent.ID).callAgentAs(ctx, body, s.timeout, client.ID)
 	if err != nil {
 		return nil, fmt.Errorf("execution error: %w", err)
 	}

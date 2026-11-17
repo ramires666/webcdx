@@ -140,7 +140,7 @@ func selectMCPAgent(body json.RawMessage, call toolCall, agents []Agent) (*Agent
 	return nil, nil, errors.New("agent is not available to this MCP connection")
 }
 
-func (s *server) groupedTools(ctx context.Context, agents []Agent, request json.RawMessage) ([]map[string]any, error) {
+func (s *server) groupedTools(ctx context.Context, agents []Agent, request json.RawMessage, clientID string) ([]map[string]any, error) {
 	tools := []map[string]any{listAgentsTool()}
 	byName := map[string]map[string]any{}
 	computers := map[string][]string{}
@@ -149,7 +149,7 @@ func (s *server) groupedTools(ctx context.Context, agents []Agent, request json.
 		if !agent.Enabled || rt == nil || !rt.isOnline() {
 			continue
 		}
-		resp, err := rt.callAgent(ctx, request, s.timeout)
+		resp, err := rt.callAgentAs(ctx, request, s.timeout, clientID)
 		if err != nil {
 			return nil, fmt.Errorf("list tools for %s: %w", agent.ID, err)
 		}

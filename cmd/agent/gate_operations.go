@@ -95,7 +95,8 @@ func (e *nativeExecutor) callGateOperation(ctx context.Context, raw json.RawMess
 		return respond(nil, &studioRPCError{-32000, "cannot create Gate journal"})
 	}
 	// Execution survives stream loss once the durable reservation has been accepted.
-	value, err := journal.create(context.WithoutCancel(ctx), e, params.Key, params.Name, params.Arguments, "local")
+	callCtx := withTaskOwner(context.WithoutCancel(ctx), e.gateTaskOwner(params.ClientID, params.AgentID))
+	value, err := journal.create(callCtx, e, params.Key, params.Name, params.Arguments, "local")
 	if err != nil {
 		return respond(nil, &studioRPCError{-32000, err.Error()})
 	}

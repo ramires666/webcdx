@@ -137,6 +137,10 @@ func (rt *agentRuntime) enqueue(ctx context.Context, request protocol.AgentReque
 
 // callAgent forwards an MCP request to the connected agent and waits for the correlated result.
 func (rt *agentRuntime) callAgent(ctx context.Context, request json.RawMessage, timeout time.Duration) (protocol.AgentResponse, error) {
+	return rt.callAgentAs(ctx, request, timeout, "")
+}
+
+func (rt *agentRuntime) callAgentAs(ctx context.Context, request json.RawMessage, timeout time.Duration, clientID string) (protocol.AgentResponse, error) {
 	id, err := randomID()
 	if err != nil {
 		return protocol.AgentResponse{}, fmt.Errorf("create request id: %w", err)
@@ -154,7 +158,11 @@ func (rt *agentRuntime) callAgent(ctx context.Context, request json.RawMessage, 
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
 	}
-	if err := rt.enqueue(ctx, protocol.AgentRequest{ID: id, Request: request, Deadline: deadline}); err != nil {
+	envelope := protocol.AgentRequest{ID: id, Request: request, Deadline: deadline}
+	if clientID != "" {
+		envelope.TaskCaller = &protocol.TaskCaller{ClientID: clientID, AgentID: rt.id}
+	}
+	if err := rt.enqueue(ctx, envelope); err != nil {
 		return protocol.AgentResponse{}, err
 	}
 

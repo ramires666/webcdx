@@ -106,6 +106,9 @@ func handleRequest(
 	defer cancel()
 
 	callCtx = context.WithValue(callCtx, commandRequestID{}, request.ID)
+	if executor != nil && request.TaskCaller != nil {
+		callCtx = withTaskOwner(callCtx, executor.gateTaskOwner(request.TaskCaller.ClientID, request.TaskCaller.AgentID))
+	}
 	var response json.RawMessage
 	var err error
 	if executor != nil && gateOperationMethod(request.Request) {

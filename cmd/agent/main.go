@@ -74,7 +74,11 @@ func main() {
 	if !localOnly && !gateConfigured && (gateURL != "" || token != "") {
 		log.Fatal("Gate mode requires both WEBCODEX_GATE_URL and WEBCODEX_AGENT_TOKEN; use --local for local mode")
 	}
-	closeLocal, err := startStudioLocalAccess(ctx)
+	tasks := startConfiguredTasks()
+	if tasks != nil {
+		defer tasks.close()
+	}
+	closeLocal, err := startStudioLocalAccess(ctx, tasks)
 	if err != nil {
 		if localOnly || !gateConfigured {
 			log.Fatalf("start local Studio: %v", err)
@@ -111,6 +115,7 @@ func main() {
 		log.Fatalf("initialize local executor: %v", err)
 	}
 	defer executor.Close()
+	executor.tasks = tasks
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		log.Fatalf("initialize Gate journal: %v", err)

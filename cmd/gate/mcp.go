@@ -169,7 +169,7 @@ func (s *server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if msg.Method == "tools/list" {
-		tools, err := s.groupedTools(r.Context(), agents, agentRequest)
+		tools, err := s.groupedTools(r.Context(), agents, agentRequest, client.ID)
 		if err != nil {
 			writeRPCError(w, msg.ID, -32000, err.Error())
 			return
