@@ -33,7 +33,7 @@ func TestTaskServiceQueuesDeduplicatesAndCancels(t *testing.T) {
 		another.close()
 		t.Fatal("second scheduler opened the same directory")
 	}
-	specs := []taskSpec{{"first", "first output", 10}, {"second", "second output", 10}, {"third", "third output", 10}}
+	specs := []taskSpec{{Key: "first", Prompt: "first output", Timeout: 10}, {Key: "second", Prompt: "second output", Timeout: 10}, {Key: "third", Prompt: "third output", Timeout: 10}}
 	v, err := s.start("owner", "request", specs)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestTaskServiceRestartDoesNotRelaunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	specs := []taskSpec{{"a", "first", 10}, {"b", "second", 10}, {"c", "third", 10}}
+	specs := []taskSpec{{Key: "a", Prompt: "first", Timeout: 10}, {Key: "b", Prompt: "second", Timeout: 10}, {Key: "c", Prompt: "third", Timeout: 10}}
 	b := &taskBatch{ID: commandHash([]string{"caller", "same"}), Owner: "caller", Fingerprint: commandHash(specs),
 		Jobs: []taskView{{Key: "a", Status: "running"}, {Key: "b", Status: "queued"}, {Key: "c", Status: "completed", Output: "persisted"}}}
 	err = s.save(b, true)

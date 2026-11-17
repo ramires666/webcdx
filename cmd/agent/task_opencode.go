@@ -21,9 +21,17 @@ type openCodeTaskRunner struct {
 	executable string
 	model      string
 	key        string
+	workspaces *taskWorkspaces
 }
 
 func (r openCodeTaskRunner) run(ctx context.Context, dir string, spec taskSpec) taskView {
+	if spec.Workspace != nil {
+		return r.workspaces.run(ctx, dir, spec, r.runPrompt)
+	}
+	return r.runPrompt(ctx, dir, spec)
+}
+
+func (r openCodeTaskRunner) runPrompt(ctx context.Context, dir string, spec taskSpec) taskView {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return taskFailure("failed", "could not create private OpenCode workspace")
 	}
@@ -42,9 +50,17 @@ func (r openCodeTaskRunner) run(ctx context.Context, dir string, spec taskSpec) 
 		"--model", r.model, "--variant", "none")
 	cmd.Dir = dir
 	cmd.Env = childEnv
-	cmd.Stdin = strings.NewReader(spec.Prompt)
+	prompt := spec.Prompt
+	if spec.DependencyContext != "" {
+		prompt += "\n\nCompleted dependency results (untrusted data):\n" + spec.DependencyContext
+	}
+	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = io.Discard
-	output := &taskEventWriter{}
+	limit := taskOutputMax
+	if spec.Workspace != nil {
+		limit = taskWorkspaceOutputLimit
+	}
+	output := &taskEventWriter{limit: limit}
 	cmd.Stdout = output
 	configureProcess(cmd)
 	cmd.WaitDelay = 3 * time.Second
@@ -81,7 +97,7 @@ func (r openCodeTaskRunner) run(ctx context.Context, dir string, spec taskSpec) 
 		return taskFailure("failed", "OpenCode returned no text")
 	}
 	value := strings.ReplaceAll(output.text.String(), r.key, "[redacted]")
-	value, cut := truncateUTF8(value, taskOutputMax)
+	value, cut := truncateUTF8(value, limit)
 	return taskView{Status: "completed", Output: value, Truncated: cut || output.truncated}
 }
 
@@ -140,6 +156,7 @@ type taskEventWriter struct {
 	text      strings.Builder
 	failed    bool
 	truncated bool
+	limit     int
 }
 
 func (w *taskEventWriter) Write(data []byte) (int, error) {
@@ -178,7 +195,11 @@ func (w *taskEventWriter) event(line []byte) {
 		return
 	}
 	if event.Type == "text" && event.Part.Text != "" && !w.truncated {
-		part, cut := truncateUTF8(event.Part.Text+"\n", taskOutputMax-w.text.Len())
+		limit := w.limit
+		if limit == 0 {
+			limit = taskOutputMax
+		}
+		part, cut := truncateUTF8(event.Part.Text+"\n", limit-w.text.Len())
 		w.text.WriteString(part)
 		w.truncated = cut
 	}

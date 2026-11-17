@@ -24,7 +24,7 @@ var (
 	bridgeExtensionID  = regexp.MustCompile(`^[a-p]{32}$`)
 	bridgeToolName     = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 	bridgeDefaultTools = []string{"list_allowed_roots", "list_directory", "read_file", "search_files", "find_files", "list_agents"}
-	bridgeToolNames    = map[string]bool{"list_allowed_roots": true, "list_directory": true, "read_file": true, "search_files": true, "find_files": true, "list_agents": true, "exec_command": true, "poll_command": true, "cancel_command": true, "list_commands": true, "write_file": true, "edit_file": true, "move_path": true, "delete_path": true, "task_capabilities": true, "start_tasks": true, "get_tasks": true, "task_result": true, "cancel_tasks": true}
+	bridgeToolNames    = map[string]bool{"list_allowed_roots": true, "list_directory": true, "read_file": true, "search_files": true, "find_files": true, "list_agents": true, "exec_command": true, "poll_command": true, "cancel_command": true, "list_commands": true, "write_file": true, "edit_file": true, "move_path": true, "delete_path": true, "task_capabilities": true, "start_tasks": true, "get_tasks": true, "task_result": true, "cancel_tasks": true, "task_patch": true, "task_integrate": true}
 )
 
 func (s *store) initBridgeAuth(ctx context.Context) error {

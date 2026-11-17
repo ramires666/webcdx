@@ -45,13 +45,20 @@ func taskToolSchemas() []mcpToolDefinition {
 		}
 	}
 	batch := str("Batch ID returned by start_tasks.", 64)
+	list := func(description string, limit, length int) map[string]any {
+		return map[string]any{"type": "array", "items": str(description, length), "maxItems": limit}
+	}
 	return []mcpToolDefinition{
-		tool("task_capabilities", "Return the configured text-only OpenCode model and task queue limits.", object(map[string]any{}), true),
-		tool("start_tasks", "Queue independent text tasks in separate OpenCode processes. Include the necessary context in each prompt. Workers return text with OpenCode tools disabled. Reuse the same request key after a lost response.", object(map[string]any{
-			"request_key": str("Stable request key for this batch.", 128),
+		tool("task_capabilities", "Return the configured OpenCode model, workspace modes and task queue limits.", object(map[string]any{}), true),
+		tool("start_tasks", "Queue separate OpenCode jobs. Provide disjoint exact write paths for coding tasks. Git tasks read files from a pinned commit and create reviewable patches. Reuse the same request key after a lost response.", object(map[string]any{
+			"request_key":  str("Stable request key for this batch.", 128),
+			"project_root": str("Absolute configured Git repository root for tasks with files or context_files.", 4096),
 			"tasks": map[string]any{"type": "array", "minItems": 1, "maxItems": taskBatchMax, "items": object(map[string]any{
 				"key":             str("Unique task key within the batch (letters, digits, underscore, or hyphen).", 48),
 				"prompt":          str("Task instructions and input context; up to 16 KiB of UTF-8.", taskPromptMax),
+				"depends_on":      list("A task key from this batch to wait for.", taskBatchMax-1, 48),
+				"files":           list("Exact project-relative writable file path using forward slashes.", taskFileLimit, 1024),
+				"context_files":   list("Exact project-relative read-only file path using forward slashes.", taskFileLimit, 1024),
 				"timeout_seconds": map[string]any{"type": "integer", "minimum": 10, "maximum": 1800, "default": 180},
 			}, "key", "prompt")},
 		}, "request_key", "tasks"), false),
@@ -59,13 +66,24 @@ func taskToolSchemas() []mcpToolDefinition {
 		tool("task_result", "Get text output or error for one job in a batch.", object(map[string]any{
 			"batch_id": batch, "key": str("Task key within this batch.", 48),
 		}, "batch_id", "key"), true),
+		tool("task_patch", "Read a verified patch chunk after task_result or task_integrate. Use exactly one of key and integration_id.", object(map[string]any{
+			"batch_id": batch, "key": str("Task key within this batch.", 48), "integration_id": str("ID returned by task_integrate.", 64),
+			"offset":    map[string]any{"type": "integer", "minimum": 0, "maximum": taskPatchBytes},
+			"max_bytes": map[string]any{"type": "integer", "minimum": 4, "maximum": 64 << 10},
+		}, "batch_id"), true),
+		tool("task_integrate", "Combine explicitly selected patches in a private Git worktree. Use digests from task_result. Returns a combined patch for review and leaves the original checkout unchanged.", object(map[string]any{
+			"batch_id": batch,
+			"patches": map[string]any{"type": "array", "minItems": 1, "maxItems": taskBatchMax, "items": object(map[string]any{
+				"key": str("Completed task key.", 48), "sha256": str("Digest of this reviewed task patch.", 64),
+			}, "key", "sha256")},
+		}, "batch_id", "patches"), false),
 		tool("cancel_tasks", "Request cancellation of all queued and running jobs in this batch. Poll get_tasks to confirm termination.", object(map[string]any{"batch_id": batch}, "batch_id"), false),
 	}
 }
 
 func isTaskTool(name string) bool {
 	switch name {
-	case "task_capabilities", "start_tasks", "get_tasks", "task_result", "cancel_tasks":
+	case "task_capabilities", "start_tasks", "get_tasks", "task_result", "cancel_tasks", "task_patch", "task_integrate":
 		return true
 	}
 	return false
@@ -82,10 +100,14 @@ func (e *nativeExecutor) executeTaskTool(ctx context.Context, name string, args 
 		if err := onlyArgs(args); err != nil {
 			return nil, err
 		}
-		return map[string]any{"runner": "opencode", "model": s.model, "reasoning": "none", "mode": "text_only",
-			"max_parallel": s.parallel, "max_batch_size": taskBatchMax, "max_pending": taskPendingMax}, nil
+		modes := []string{"text_only"}
+		if s.workspaces != nil {
+			modes = append(modes, "git_worktree")
+		}
+		return map[string]any{"runner": "opencode", "model": s.model, "reasoning": "none", "mode": "text_only", "workspace_modes": modes,
+			"dependencies": true, "max_parallel": s.parallel, "max_batch_size": taskBatchMax, "max_pending": taskPendingMax}, nil
 	case "start_tasks":
-		if err := onlyArgs(args, "request_key", "tasks"); err != nil {
+		if err := onlyArgs(args, "request_key", "tasks", "project_root"); err != nil {
 			return nil, err
 		}
 		key, err := requiredString(args, "request_key")
@@ -96,11 +118,20 @@ func (e *nativeExecutor) executeTaskTool(ctx context.Context, name string, args 
 		if err != nil {
 			return nil, err
 		}
-		return s.start(owner, key, specs)
+		project, err := optionalString(args, "project_root")
+		if err != nil {
+			return nil, err
+		}
+		return e.startTaskGroup(ctx, owner, key, project, specs)
 	}
 	fields := []string{"batch_id"}
-	if name == "task_result" {
+	switch name {
+	case "task_result":
 		fields = append(fields, "key")
+	case "task_patch":
+		fields = append(fields, "key", "integration_id", "offset", "max_bytes")
+	case "task_integrate":
+		fields = append(fields, "patches")
 	}
 	if err := onlyArgs(args, fields...); err != nil {
 		return nil, err
@@ -109,7 +140,33 @@ func (e *nativeExecutor) executeTaskTool(ctx context.Context, name string, args 
 	if !taskIDPattern.MatchString(id) {
 		return nil, toolErr("invalid_arguments", "invalid batch_id")
 	}
-	key, _ := args["key"].(string)
+	if name == "task_integrate" {
+		selection, err := parseTaskPatchSelection(args["patches"])
+		if err != nil {
+			return nil, err
+		}
+		return e.integrateTaskPatches(ctx, owner, id, selection)
+	}
+	key, err := optionalString(args, "key")
+	if err != nil {
+		return nil, err
+	}
+	if name == "task_patch" {
+		integration, err := optionalString(args, "integration_id")
+		if err != nil || (key == "") == (integration == "") ||
+			key != "" && !taskNamePattern.MatchString(key) || integration != "" && !taskIDPattern.MatchString(integration) {
+			return nil, toolErr("invalid_arguments", "provide exactly one valid key or integration_id")
+		}
+		offset, err := optionalInt(args, "offset", 0, 0, taskPatchBytes)
+		if err != nil {
+			return nil, err
+		}
+		limit, err := optionalInt(args, "max_bytes", 32<<10, 4, 64<<10)
+		if err != nil {
+			return nil, err
+		}
+		return s.readPatch(owner, id, key, integration, offset, limit)
+	}
 	if name == "task_result" && !taskNamePattern.MatchString(key) {
 		return nil, toolErr("invalid_arguments", "invalid task key")
 	}
@@ -129,7 +186,7 @@ func parseTaskSpecs(input any) ([]taskSpec, error) {
 		if !ok {
 			return nil, toolErr("invalid_arguments", "each task must be an object")
 		}
-		if err := onlyArgs(args, "key", "prompt", "timeout_seconds"); err != nil {
+		if err := onlyArgs(args, "key", "prompt", "timeout_seconds", "depends_on", "files", "context_files"); err != nil {
 			return nil, err
 		}
 		key, _ := args["key"].(string)
@@ -146,7 +203,26 @@ func parseTaskSpecs(input any) ([]taskSpec, error) {
 		if err != nil {
 			return nil, err
 		}
-		specs = append(specs, taskSpec{Key: key, Prompt: prompt, Timeout: timeout})
+		deps, err := optionalTaskStringArray(args, "depends_on", taskBatchMax-1)
+		if err != nil {
+			return nil, err
+		}
+		writePaths, err := optionalTaskStringArray(args, "files", taskFileLimit)
+		if err != nil {
+			return nil, err
+		}
+		readPaths, err := optionalTaskStringArray(args, "context_files", taskFileLimit)
+		if err != nil {
+			return nil, err
+		}
+		spec := taskSpec{Key: key, Prompt: prompt, Timeout: timeout, DependsOn: deps}
+		if len(writePaths)+len(readPaths) > 0 {
+			spec.Workspace = &taskWorkspaceSpec{Files: writePaths, ContextFiles: readPaths}
+		}
+		specs = append(specs, spec)
+	}
+	if err := validateTaskDependencies(specs); err != nil {
+		return nil, err
 	}
 	return specs, nil
 }
