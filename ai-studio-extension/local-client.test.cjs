@@ -3,6 +3,20 @@ const assert = require('node:assert/strict');
 const { createClient, ENDPOINTS } = require('./local-client.js');
 function reply(request, result) { return new Response(JSON.stringify({ id: JSON.parse(request.body).id, result })); }
 
+test('session markers are sent only to agents that advertise support, including clearing and reconnecting',async()=>{
+  for(const supported of [true,false]){
+    const calls=[],marker='a'.repeat(32);
+    const client=createClient({endpoint:ENDPOINTS[0],agentIdentity:'one',fetchImpl:async(_url,request)=>{
+      const message=JSON.parse(request.body);calls.push(message);
+      return reply(request,message.method==='initialize'?{localAgent:{id:'one'},studioSession:{marker:supported}}:{ok:true});
+    }});
+    await client.initialize();await client.setSessionMarker(marker);await client.setSessionMarker('');
+    await client.initialize();await client.setSessionMarker(marker);
+    assert.deepEqual(calls.filter(call=>call.method==='session/set').map(call=>call.params.marker),supported?[marker,'',marker]:[]);
+    client.close();
+  }
+});
+
 test('negotiates read-only key lookup and refuses unsupported agents without sending', async () => {
   for (const supported of [true, false]) {
     const methods = [];

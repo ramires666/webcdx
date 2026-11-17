@@ -11,6 +11,17 @@ const unwrapResult = text => {
   return match ? match[1] : text;
 };
 
+test('chat width updates an unarmed page and restores only valid saved values',async()=>{
+  const h=harness({chatWidth:60});await Promise.resolve();
+  assert.ok(h.chatWidths.some(([value,restore])=>value===60&&restore===undefined));
+  const reply=await h.send({type:'studio.chatWidth',value:30});
+  assert.deepEqual(reply,{ok:true});assert.ok(h.chatWidths.some(([value])=>value===30));
+  assert.equal(h.sent.some(message=>['studio.call','studio.arm','studio.deliver'].includes(message.type)),false);
+  for(const value of [-10,110,15,20.5,'20'])assert.deepEqual(await h.send({type:'studio.chatWidth',value}),{ok:false,error:'Invalid chat width'});
+  h.setWidth(80);assert.ok(h.chatWidths.some(([value])=>value===80));
+  h.setWidth(85);assert.equal(h.chatWidths.some(([value])=>value===85),false);
+});
+
 test('file chunks become a verified File and delivery acknowledges before waiting for native upload',async()=>{
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
   const bytes=Buffer.from('exact file Привет\r\n'.repeat(9000)),data=bytes.toString('base64'),sha256=require('node:crypto').createHash('sha256').update(bytes).digest('hex');
@@ -48,10 +59,10 @@ test('a result sent with native Run is confirmed without another upload or submi
   assert.equal(h.submitted.length,0);
 });
 
-function harness({manualClock=false}={}) {
+function harness({manualClock=false,chatWidth=0}={}) {
   const listeners = {}, sent = [], timers = new Map(), state = { supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', latestModel: { text: 'old answer' }, latestUser: null };
   let timerId = 0, now=10000, submitted = [], staged = [], observerCallback, accepted = true, sendHandler, disconnected = false, cleared = false, submitHandler, uploadHandler;
-  const uploaded=[],preparedMarkers=[];let recoveryHandler;
+  const uploaded=[],preparedMarkers=[],collapsed=[],collapsedCalls=[],collapsedChats=[],chatWidths=[];let recoveryHandler;
   class TestDate extends Date {static now(){return now;}}
   const adapter = {
     recoverReplySource:async model=>recoveryHandler?recoveryHandler(model):false,
@@ -61,7 +72,7 @@ function harness({manualClock=false}={}) {
       const control=new Node('button',{'aria-label':button.getAttribute?.('aria-label')||''},button.innerText||button.textContent||'');
       return submitControls.isSubmitControl(control);
     },
-    prepareSessionMessage:marker=>{preparedMarkers.push(marker);return true;},
+    prepareSessionMessage:(marker,options)=>{preparedMarkers.push(marker);return options?.force?state.prepareMarkerOK!==false:true;},
     ownsDraft:value=>staged[staged.length-1]===value,
     attachFiles:async(files,options)=>{uploaded.push(files);return uploadHandler?uploadHandler(files,options):{ok:options.isCurrent()};},
     releaseFiles(){},
@@ -71,10 +82,14 @@ function harness({manualClock=false}={}) {
       const raw = unwrapResult(text);
       return JSON.parse(raw).operation_id === operationId && (expectedText === undefined || raw === expectedText);
     }),
+    collapseDelivery:(operationId,expectedText)=>{collapsed.push([operationId,expectedText]);return 1;},
+    collapseCall:model=>{collapsedCalls.push(model);return true;},
+    collapseChat:options=>{collapsedChats.push(options);return 1;},
+    setChatWidth:(value,restore)=>chatWidths.push([value,restore]),
     cleanup: options => cleanups.push(options), restoreCleanup: () => { restores++; }, annotateContext: () => { annotations++; }
   };
   const cleanups=[];let restores=0,annotations=0;
-  const chrome = { runtime: { sendMessage: async message => { sent.push(structuredClone(message)); return sendHandler ? sendHandler(message) : { ok: accepted, accepted }; }, onMessage: { addListener: fn => { listeners.message = fn; } } } };
+  const chrome = { runtime: { sendMessage: async message => { sent.push(structuredClone(message)); return sendHandler ? sendHandler(message) : { ok: accepted, accepted }; }, onMessage: { addListener: fn => { listeners.message = fn; } } }, storage: { local: { get: async () => ({ chatWidth }) }, onChanged: { addListener: fn => { listeners.storage = fn; }, removeListener: fn => { if (listeners.storage === fn) delete listeners.storage; } } } };
   const documentListeners = {};
   const document = { addEventListener(type, fn) { documentListeners[type] = fn; }, documentElement: {} };
   const window = {}; window.top = window;
@@ -93,8 +108,25 @@ function harness({manualClock=false}={}) {
     }
     throw Error('timers did not settle');
   };
-  return { setRecoveryHandler:fn=>{recoveryHandler=fn;}, state, sent, staged, submitted, uploaded, preparedMarkers, setUploadHandler:fn=>{uploadHandler=fn;}, send, flush, advance:ms=>{now+=ms;}, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), key: event => documentListeners.keydown(event), run: (runText='Run\nkeyboard_return') => { const button={getAttribute:name=>name==='aria-label'?null:'',innerText:runText,textContent:''};documentListeners.click({target:{closest:()=>button}}); }, setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
+  return { setRecoveryHandler:fn=>{recoveryHandler=fn;}, state, sent, staged, submitted, uploaded, preparedMarkers, collapsed, collapsedCalls, collapsedChats, chatWidths, setWidth:value=>listeners.storage?.({chatWidth:{newValue:value}},'local'), setUploadHandler:fn=>{uploadHandler=fn;}, send, flush, advance:ms=>{now+=ms;}, cleanups, get restores(){return restores;}, get annotations(){return annotations;}, setSubmitHandler: fn => { submitHandler = fn; }, tick: () => context.interval(), stopped: () => disconnected && cleared, reload: () => vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8'), context), mutate: () => observerCallback(), click: event => documentListeners.click(event), key: event => documentListeners.keydown(event), run: (runText='Run\nkeyboard_return') => { const button={getAttribute:name=>name==='aria-label'?null:'',innerText:runText,textContent:''};documentListeners.click({target:{closest:()=>button}}); }, setAccepted: value => { accepted = value; }, setSendHandler: fn => { sendHandler = fn; } };
 }
+
+test('chat folding runs at startup and during unarmed observation',async()=>{
+  const h=harness();
+  assert.deepEqual(h.collapsedChats,[undefined]);
+  h.mutate();await h.flush();
+  assert.equal(h.collapsedChats.length,2);
+  assert.equal(h.sent.some(message=>message.type==='studio.call'),false);
+});
+
+test('explicit chat folding works without an armed session or tool/model traffic',async()=>{
+  const h=harness(),reply=await h.send({type:'studio.collapseChat'});
+  assert.deepEqual(reply,{ok:true,collapsed:1});
+  assert.equal(h.collapsedChats.length,2);
+  assert.equal(h.collapsedChats[0],undefined);
+  assert.equal(h.collapsedChats[1].force,true);
+  assert.equal(h.sent.some(message=>['studio.call','studio.cleanup','studio.deliver'].includes(message.type)),false);
+});
 
 test('current Run keyboard labels prepare the chat marker before the first request',async()=>{
   for(const label of ['Run Ctrl','Run\nCtrl','Run Control','Run (Ctrl+Enter)','Run Ctrl\nkeyboard_return']){
@@ -103,6 +135,48 @@ test('current Run keyboard labels prepare the chat marker before the first reque
     h.run(label);
     assert.deepEqual(h.preparedMarkers,[marker],label);
   }
+});
+
+test('manual marker injection requires the live chat, rejects busy editors and never submits',async()=>{
+  const h=harness(),marker='a'.repeat(32);
+  const inject={type:'studio.injectMarker',sessionId:'s1',bindingAddress:'/prompts/current'};
+  assert.equal((await h.send(inject)).ok,false);
+  await h.send({type:'studio.arm',sessionId:'s1',sessionMarker:marker,turnless:true});
+  h.state.chatAddress='/prompts/current';
+  assert.equal((await h.send(inject)).ok,true);
+  assert.deepEqual(h.preparedMarkers,[marker]);
+  assert.equal((await h.send({...inject,sessionId:'old'})).ok,false);
+  for(const changes of [{generating:true},{editingReply:true},{supported:false},{chatAddress:'/prompts/other'}]){
+    const previous={...h.state};Object.assign(h.state,changes);
+    assert.equal((await h.send(inject)).ok,false);
+    Object.assign(h.state,previous);
+  }
+  assert.deepEqual(h.preparedMarkers,[marker]);
+  h.state.prepareMarkerOK=false;
+  assert.equal((await h.send(inject)).ok,false);
+  assert.equal(h.submitted.length,0);assert.equal(h.staged.length,0);
+  assert.equal(h.sent.some(msg=>msg.type==='studio.call'),false);
+});
+
+test('a result can be delivered during a transient Run transition without rerunning the tool',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1'});
+  h.state.generating=true;h.state.controlsPending=true;
+  const text=JSON.stringify({type:'helper-result',v:1,operation_id:'saved',name:'exec_command',result:{ok:true}});
+  const response=await h.send({type:'studio.deliver',sessionId:'s1',text,submit:true});
+  assert.equal(response.ok,true);assert.equal(h.submitted.length,1);
+  assert.equal(h.sent.some(message=>message.type==='studio.call'),false);
+});
+
+test('opening a new chat cancels a pending result before Run and blocks further old deliveries',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+  h.setSubmitHandler(async(_text,isCurrent)=>{
+    h.click({target:{closest:()=>({getAttribute:name=>name==='aria-label'?'New chat':'',innerText:''})}});
+    return isCurrent();
+  });
+  const delivery={type:'studio.deliver',sessionId:'s1',text:JSON.stringify({type:'helper-result',v:1,operation_id:'old',name:'exec_command',result:{ok:true}}),submit:true};
+  assert.equal((await h.send(delivery)).ok,false);
+  const blocked=await h.send(delivery);assert.equal(blocked.ok,false);assert.match(blocked.error,/новый чат/);
+  assert.equal(h.submitted.length,0);
 });
 
 test('delivery waits for async Run readiness and aborts after disarm', async () => {
@@ -282,7 +356,7 @@ test('explicit capture accepts only the latest selected call and consumes its au
 
 test('ignores history and sends one completed new reply as a call', async () => {
   const h = harness();
-  assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', chatMarkers: [], chatAddress: '', error: undefined, deliveredOperationId: '', delivered: undefined });
+  assert.deepEqual(await h.send({ type: 'studio.arm', sessionId: 's1' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', chatMarkers: [], chatAddress: '', replyMarker: '', error: undefined, deliveredOperationId: '', delivered: undefined });
   h.state.latestModel = { text: 'new answer' }; h.state.generating = true; h.mutate(); await h.flush();
   assert.equal(h.sent.some(m => m.type === 'studio.call'), false);
   h.state.generating = false; h.mutate(); await h.flush();
@@ -363,7 +437,7 @@ test('safe draft, submitted result, delivery confirmation and disarm', async () 
   const duplicate = await h.send({ type: 'studio.deliver', sessionId: 's1', text, submit: true });
   assert.equal(duplicate.attempted, true); assert.equal(h.submitted.length, 1);
   assert.equal(h.submitted[0], `\`\`\`helper-result\n${text}\n\`\`\``);
-  assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', chatMarkers: [], chatAddress: '', error: undefined, deliveredOperationId: '', delivered: true });
+  assert.deepEqual(await h.send({ type: 'studio.snapshot', sessionId: 's1', operationId: 'op-7' }), { observerStatus:'observing', supported: true, generating: false, editorEmpty: true, conversationKey: 'active-chat', chatMarkers: [], chatAddress: '', replyMarker: '', error: undefined, deliveredOperationId: '', delivered: true });
   assert.deepEqual(await h.send({ type: 'studio.disarm', sessionId: 's1' }), { ok: true });
 });
 
@@ -537,7 +611,7 @@ test('cleanup annotates final answers, hides accepted service turns, and leaves 
   assert.equal(h.cleanups.length,0);assert.equal(h.annotations,1);
   await h.send({type:'studio.cleanup',sessionId:'s1',enabled:true,final:true,operationIds:['op-1']});
   assert.equal(h.cleanups.length,1);assert.deepEqual(Array.from(h.cleanups[0].turns),[]);assert.deepEqual(h.cleanups[0].operationIds,['op-1']);assert.equal(h.annotations,2);
-  h.setAccepted(true);h.mutate();await h.flush();
+  h.setSendHandler(message=>message.type==='studio.call'?{accepted:true,toolCall:true}:{accepted:true});h.setAccepted(true);h.mutate();await h.flush();
   await h.send({type:'studio.cleanup',sessionId:'s1',enabled:true,final:true,operationIds:[]});
   assert.deepEqual(Array.from(h.cleanups[1].turns),[turn]);
   await h.send({type:'studio.cleanup',sessionId:'s1',enabled:false,final:true,operationIds:[]});
@@ -670,8 +744,10 @@ test('snapshot reports only an exactly parsed visible result as delivery proof',
   const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
   h.state.latestUser={text:'prefix '+JSON.stringify({type:'helper-result',operation_id:'op-visible'})};
   let snap=await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-visible'});assert.equal(snap.delivered,false);assert.equal(snap.deliveredOperationId,'');
+  assert.deepEqual(h.collapsed,[]);
   h.state.latestUser={text:JSON.stringify({type:'helper-result',operation_id:'op-visible'})};
   snap=await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-visible'});assert.equal(snap.delivered,true);assert.equal(snap.deliveredOperationId,'op-visible');
+  assert.equal(h.collapsed.at(-1)[0],'op-visible');
   h.state.latestUser={text:'User timestamp wrapper',operationId:'op-visible'};
   snap=await h.send({type:'studio.snapshot',sessionId:'s1',operationId:'op-visible'});assert.equal(snap.delivered,true);assert.equal(snap.deliveredOperationId,'op-visible');
   h.state.latestUser={text:'{"type":"helper-result","operation_id":'};
@@ -708,11 +784,31 @@ test('a delivered result anchors one fast automatic followup without replaying h
   assert.equal(h.sent.filter(m=>m.type==='studio.call').length,1);
 });
 
+test('auto-collapse runs only after background accepts a real tool call',async()=>{
+  for(const [text,toolCall,expected] of [['ordinary final prose',false,0],['```helper-call\n{"v":1,"name":"read_file","arguments":{"path":"x"}}\n```',true,1]]){
+    const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+    h.setSendHandler(message=>message.type==='studio.call'?{accepted:true,toolCall}:{accepted:true});
+    h.run();h.state.generating=true;h.mutate();await h.flush();
+    h.state.generating=false;h.state.modelAfterUser=true;h.state.latestModel={text,sourceRevision:'r1',element:{}};
+    h.mutate();await h.flush();
+    assert.equal(h.collapsedCalls.length,expected,text);
+  }
+});
+
+test('explicit collapse requires current session, source revision and exact text',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1'});
+  const model={text:'current helper call',sourceRevision:'r1',element:{}};h.state.latestModel=model;
+  assert.equal((await h.send({type:'studio.collapseCall',sessionId:'s1',text:'stale',sourceRevision:'r1'})).ok,false);
+  assert.equal((await h.send({type:'studio.collapseCall',sessionId:'s1',text:model.text,sourceRevision:'stale'})).ok,false);
+  assert.equal((await h.send({type:'studio.collapseCall',sessionId:'s1',text:model.text,sourceRevision:'r1'})).ok,true);
+  assert.equal(h.collapsedCalls.length,1);
+});
+
 test('explicit capture reads only a complete selected write_file without replaying chat history',async()=>{
  const h=harness(),tool={name:'write_file',inputSchema:{type:'object',properties:{path:{type:'string'},content:{type:'string'},if_absent:{type:'boolean'}},required:['path','content','if_absent'],additionalProperties:false}};
  const content='code\n'.repeat(300000),text=JSON.stringify({v:1,name:'write_file',arguments:{path:'large.html',content,if_absent:true}});
- h.state.latestModel={text};await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
- const captured=await h.send({type:'studio.captureWrite',sessionId:'s1',tool});assert.equal(captured.ok,true);assert.equal(JSON.parse(captured.text).arguments.content,content);
+ h.state.latestModel={text,sourceRevision:'large-r'};await h.send({type:'studio.arm',sessionId:'s1',turnless:true});
+ const captured=await h.send({type:'studio.captureWrite',sessionId:'s1',tool});assert.equal(captured.ok,true);assert.equal(JSON.parse(captured.text).arguments.content,content);assert.equal(captured.sourceRevision,'large-r');
  h.mutate();await h.flush();assert.equal(h.sent.filter(m=>m.type==='studio.call').length,0);
  h.state.generating=true;assert.equal((await h.send({type:'studio.captureWrite',sessionId:'s1',tool})).ok,false);
  h.state.generating=false;h.state.latestModel={text:JSON.stringify({v:1,name:'exec_command',arguments:{}})};
@@ -745,6 +841,16 @@ test('readReply attempts unavailable v2 source recovery only once and preserves 
   assert.equal(recoveries,1);
 });
 
+test('malformed structured v2 frame triggers one local exact-source recovery',async()=>{
+  const h=harness(),marker='a'.repeat(32),broken='HELPER_'+marker+' read_file\narguments: {"path":\nEND_'+marker,exact='HELPER_'+marker+' list_allowed_roots\nEND_'+marker;
+  await h.send({type:'studio.arm',sessionId:'s1',sessionMarker:marker,turnless:true});
+  h.state.latestUser={text:'request'};h.state.modelAfterUser=true;h.state.latestModel={text:broken,sourceRevision:'r1'};
+  let recoveries=0;h.setRecoveryHandler(async()=>{recoveries++;h.state.latestModel={text:exact,sourceText:exact,sourceRevision:'r1'};return true;});
+  const reply=await h.send({type:'studio.readReply',sessionId:'s1'});
+  assert.equal(recoveries,1);assert.equal(reply.ok,true);assert.equal(reply.text,exact);assert.equal(reply.sourceText,exact);
+  assert.equal(h.sent.some(message=>/repair|format/i.test(message.text||'')),false);
+});
+
 
 test('local raw recovery preserves the rejected reply response key',async()=>{
   const h=harness(),marker='a'.repeat(32);
@@ -766,4 +872,29 @@ test('explicit capture recovers a malformed current v2 call locally',async()=>{
   h.setRecoveryHandler(async()=>{h.state.latestModel={text:raw,sourceRevision:'r1'};return true;});
   const reply=await h.send({type:'studio.captureCall',sessionId:'s1',tools:[{name:'read_file',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}]});
   assert.equal(reply.ok,true);assert.equal(reply.text,raw);assert.equal(h.sent.filter(message=>message.type==='studio.call').length,0);
+});
+
+
+test('reply editing waits without reporting unsupported UI or executing the unfinished reply',async()=>{
+  const h=harness();await h.send({type:'studio.arm',sessionId:'s1',turnless:true});h.run();
+  h.state.generating=true;h.mutate();await h.flush();
+  h.state.generating=false;h.state.modelAfterUser=true;h.state.editingReply=true;
+  h.state.latestModel={text:'HELPER_'+ 'a'.repeat(32)+' list_allowed_roots\nEND_'+ 'a'.repeat(32),sourceRevision:'r1'};
+  h.mutate();await h.flush();
+  assert.equal(h.sent.filter(message=>message.type==='studio.call').length,0);
+  const snapshot=await h.send({type:'studio.snapshot',sessionId:'s1'});
+  assert.equal(snapshot.observerStatus,'editing_reply');assert.equal(snapshot.supported,true);
+  assert.equal((await h.send({type:'studio.readReply',sessionId:'s1'})).ok,false);
+  h.state.editingReply=false;h.mutate();await h.flush();
+  assert.equal(h.sent.filter(message=>message.type==='studio.call').length,1);
+});
+
+test('literal string parameters starting with braces do not trigger JSON source recovery',async()=>{
+  const h=harness(),marker='a'.repeat(32);
+  await h.send({type:'studio.arm',sessionId:'s1',sessionMarker:marker,turnless:true,toolNames:[{name:'read_file',inputSchema:{properties:{path:{type:'string'}}}}]});
+  h.state.latestUser={text:'request'};h.state.modelAfterUser=true;
+  h.state.latestModel={text:'HELPER_'+marker+' read_file\npath: {literal}.txt\nEND_'+marker,sourceRevision:'r1'};
+  let recoveries=0;h.setRecoveryHandler(async()=>{recoveries++;return false;});
+  assert.equal((await h.send({type:'studio.readReply',sessionId:'s1'})).ok,true);
+  assert.equal(recoveries,0);
 });

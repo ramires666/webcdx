@@ -6,7 +6,7 @@
   window.__webcodexBridgeDispose?.();
   window.__webcodexBridgeLoaded = true;
   const adapter=WebCodexStudio.createAdapter(document,location);
-  const contentVersion='0.5.0';
+  const contentVersion='0.5.8';
   const pageInstance=Date.now()+'-'+Math.random();
   let sessionMarker='';
   let sessionId='', baselineText='', conversationKey='', lastText='', lastDelivered='', inFlight='', observerTimer=0, stopping=false, newChatPending=false, newChatRequestInFlight=false, attempted=new Set(), recoverTurn='', recoverTools=[], turnless=false, turnlessRecovery=false, observedUserText='', observedResultId='', observedContext='';
@@ -23,6 +23,23 @@
     catch(e){if(/Extension context invalidated/i.test(String(e.message||e))){retire();return {accepted:false};}throw e;}
   };
   delete window.__webcodexBridgeReattach;
+  adapter.collapseChat?.();
+  let chatWidth=0;
+  const restoreChatWidth=()=>adapter.setChatWidth?.(chatWidth,true);
+  const widthChanged=(changes,area)=>{
+    if(!retired&&area==='local'&&changes.chatWidth){
+      const value=changes.chatWidth.newValue;
+      if(Number.isInteger(value)&&value>=0&&value<=100&&value%10===0){chatWidth=value;adapter.setChatWidth?.(chatWidth);}
+    }
+  };
+  chrome.storage?.local?.get('chatWidth').then(saved=>{
+    if(retired)return;
+    const value=saved.chatWidth;
+    if(Number.isInteger(value)&&value>=0&&value<=100&&value%10===0){chatWidth=value;adapter.setChatWidth?.(chatWidth);}
+  }).catch(()=>{});
+  chrome.storage?.onChanged?.addListener(widthChanged);
+  window.addEventListener?.('resize',restoreChatWidth);
+
   function parsedResult(text){try{const result=JSON.parse(text||'');return WebCodexProtocol.isResult(result)&&typeof result.operation_id==='string'&&result.operation_id?result:null;}catch{return null;}}
   async function responseKeyFor(generation,resultId,userText,modelText){
     const digest=async text=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))),byte=>byte.toString(16).padStart(2,'0')).join('');
@@ -30,7 +47,7 @@
     return JSON.stringify([pageInstance,generation,resultId,userHash,modelHash]);
   }
   function visibleResultId(user){const parsed=parsedResult(user?.text)?.operation_id,id=typeof user?.operationId==='string'&&user.operationId?user.operationId:'';return id||parsed||'';}
-  function snapshot(operationId,conversationReplaced=false,expectedResultText){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser);const observerStatus=attachmentPending?'attaching_files':!s.supported?'unsupported':checkInstructions||systemStagePending?'checking':s.generating?'generating':!s.latestModel||s.modelAfterUser===false?'waiting_model':turnless&&!awaitingResponse?'waiting_request':pendingReply?'settling':'observing';return {observerStatus,supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,chatMarkers:s.chatMarkers||[],chatAddress:s.chatAddress||'',error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered:operationId?resultId===operationId||adapter.hasDelivery(operationId,expectedResultText):undefined};}
+  function snapshot(operationId,conversationReplaced=false,expectedResultText){const s=adapter.inspect(),resultId=visibleResultId(s.latestUser),delivered=operationId?resultId===operationId||adapter.hasDelivery(operationId,expectedResultText):undefined;if(delivered)adapter.collapseDelivery?.(operationId,expectedResultText);const observerStatus=attachmentPending?'attaching_files':!s.supported?'unsupported':s.editingReply?'editing_reply':checkInstructions||systemStagePending?'checking':s.generating?'generating':!s.latestModel||s.modelAfterUser===false?'waiting_model':turnless&&!awaitingResponse?'waiting_request':pendingReply?'settling':'observing';return {observerStatus,supported:s.supported,generating:s.generating,editorEmpty:s.editorEmpty,conversationKey:s.conversationKey,chatMarkers:s.chatMarkers||[],chatAddress:s.chatAddress||'',replyMarker:s.replyMarker||'',error:s.error,...(conversationReplaced?{conversationReplaced:true}:{}),deliveredOperationId:resultId,delivered};}
   function reportObserverError(error){if(!retired&&!sourceRecoveryPending&&sessionId)send('studio.observerError',{observerStatus:'error',observerError:String(error.message||error)}).catch(()=>{});}
   async function attachmentFiles(message,isCurrent){
     const files=[];
@@ -52,7 +69,7 @@
     }
     return files;
   }
-  function hello(){const s=adapter.inspect();return{pageInstance,chatMarkers:s.chatMarkers||[],chatAddress:s.chatAddress||'',supported:s.supported,editorEmpty:s.editorEmpty,generating:s.generating,hasHistory:!!s.latestModel||!!s.latestUser,blankChat:s.supported&&s.editorEmpty&&(!s.generating||s.controlsPending)&&!s.latestModel&&!s.latestUser};}
+  function hello(){const s=adapter.inspect();return{pageInstance,chatMarkers:s.chatMarkers||[],chatAddress:s.chatAddress||'',replyMarker:s.replyMarker||'',supported:s.supported,editorEmpty:s.editorEmpty,generating:s.generating,hasHistory:!!s.latestModel||!!s.latestUser,blankChat:s.supported&&s.editorEmpty&&(!s.generating||s.controlsPending)&&!s.latestModel&&!s.latestUser};}
   function resetReply(){pendingReply=null;clearTimeout(replyTimer);replyTimer=0;}
   function replySettled(s){
     // Run/Stop can switch before the last code tokens reach the DOM. Re-read the
@@ -70,7 +87,16 @@
   }
   async function recoverReplySource(s){
     const model=s.latestModel;
-    if(!turnless||!sessionMarker||!adapter.recoverReplySource||!model||!model.sourceError&&WebCodexProtocol.analyzeReply(model.text).kind!=='error')return s;
+    if(!turnless||!sessionMarker||!adapter.recoverReplySource||!model)return s;
+    const analysis=WebCodexProtocol.analyzeReply(model.text);
+    const damagedStructuredHeader=analysis.kind==='frame'&&analysis.header.split(/\r?\n/).some(line=>{
+      const field=/^[ \t]*([A-Za-z_][\w]*)[ \t]*[:=] ?([\[{].*)$/.exec(line);
+      if(!field)return false;
+      const property=recoverTools.find(tool=>tool.name===analysis.name)?.inputSchema?.properties?.[field[1]];
+      if(field[1]!=='arguments'&&!['array','object'].includes(property?.type))return false;
+      try{JSON.parse(field[2]);return false;}catch{return true;}
+    });
+    if(!model.sourceError&&analysis.kind!=='error'&&!damagedStructuredHeader)return s;
     const identity=[sessionId,generationCounter,observedContext,navigationRevision,model.element,model.sourceRevision,model.sourceText??model.text];
     if(sourceRecoveryAttempt?.every((value,index)=>value===identity[index]))return s;
     if(sourceRecoveryPending)return null;
@@ -110,7 +136,7 @@
     instructionCheckPending=true;
     const requestSession=sessionId,requestGeneration=generationCounter,requestNavigation=navigationRevision;
     try{
-      const response=await send('studio.ensureInstructions',{chatMarkers:s.chatMarkers||[],chatAddress:s.chatAddress||''});
+      const response=await send('studio.ensureInstructions',{chatMarkers:s.chatMarkers||[],chatAddress:s.chatAddress||'',replyMarker:s.replyMarker||''});
       if(response?.accepted&&sessionId===requestSession&&navigationRevision===requestNavigation){
         const current=adapter.inspect();
         const currentSignature=JSON.stringify([current.latestUser?.text||'',current.latestModel?.sourceText??current.latestModel?.text??'']);
@@ -128,7 +154,7 @@
   }
   function trackGeneration(s){if(s.generating)resetReply();if(turnless&&s.generating&&!s.controlsPending){if(!awaitingResponse){awaitingResponse=true;generationCounter++;attempted.clear();lastText='';baselineText='';baselineModelText=s.latestModel?.text||'';}generationSeen=true;}}
   function expectResponse(){const s=adapter.inspect();recoverTurn='';turnlessRecovery=false;awaitingResponse=true;generationSeen=false;generationCounter++;attempted.clear();lastText='';baselineText='';baselineModelText=s.latestModel?.text||'';}
-  async function observe(){if(retired||sourceRecoveryPending)return;let s=adapter.inspect();if(s.supported&&s.latestModel&&s.latestUser){hadConversation=true;emptyObservations=0;}const blank=s.supported&&(!s.generating||s.controlsPending)&&s.editorEmpty&&!s.latestModel&&!s.latestUser;if(!blank)emptyObservations=0;else if(hadConversation&&!newChatPending&&!awaitingResponse&&!deliveryPending&&!allowedFollowupId&&!inFlight&&!checkInstructions&&++emptyObservations>=2)newChatPending=true;const conversationReplaced=newChatPending&&blank;if(conversationReplaced){if(newChatRequestInFlight)return;newChatRequestInFlight=true;try{const transition={...snapshot(undefined,true),error:'Conversation was replaced'};if(sessionId)await send('studio.snapshot',transition);else await send('studio.hello',{pageInstance,...transition});}finally{newChatRequestInFlight=false;}return;}if(!sessionId||newChatPending)return;if(!s.supported){await send('studio.snapshot',snapshot());return;}
+  async function observe(){if(retired||sourceRecoveryPending)return;adapter.setChatWidth?.(chatWidth);adapter.collapseChat?.();let s=adapter.inspect();if(s.supported&&s.latestModel&&s.latestUser){hadConversation=true;emptyObservations=0;}const blank=s.supported&&(!s.generating||s.controlsPending)&&s.editorEmpty&&!s.latestModel&&!s.latestUser;if(!blank)emptyObservations=0;else if(hadConversation&&!newChatPending&&!awaitingResponse&&!deliveryPending&&!allowedFollowupId&&!inFlight&&!checkInstructions&&++emptyObservations>=2)newChatPending=true;const conversationReplaced=newChatPending&&blank;if(conversationReplaced){if(newChatRequestInFlight)return;newChatRequestInFlight=true;try{const transition={...snapshot(undefined,true),error:'Conversation was replaced'};if(sessionId)await send('studio.snapshot',transition);else await send('studio.hello',{pageInstance,...transition});}finally{newChatRequestInFlight=false;}return;}if(!sessionId||newChatPending||s.editingReply)return;if(!s.supported){await send('studio.snapshot',snapshot());return;}
     if(systemStagePending||await ensureSavedInstructions(s))return;
     if(turnless){const userText=s.latestUser?.text||'',resultId=visibleResultId(s.latestUser);if(resultId){observedResultId=resultId;adapter.releaseFiles?.(resultId);}observedUserText=userText;const context=JSON.stringify([observedResultId,observedUserText]);if(context!==observedContext){observedContext=context;attempted.clear();lastText='';baselineText='';}trackGeneration(s);if(resultId&&resultId===allowedFollowupId&&s.modelAfterUser===true&&!awaitingResponse){generationCounter++;awaitingResponse=true;generationSeen=true;baselineModelText='';}if(s.modelAfterUser===false)return;}
     if(s.generating){resetReply();return;}
@@ -143,7 +169,7 @@
       const contextFields=turnless?{responseKey:await responseKeyFor(callGeneration,observedResultId,observedUserText,model.responseIdentityText??model.text),precedingResultId:observedResultId}:{};
       const current=adapter.inspect();
       if(sessionId!==callSession||current.generating||current.latestModel?.sourceRevision!==model.sourceRevision||current.latestModel?.text!==model.text||(current.latestModel?.sourceText??model.text)!==(model.sourceText??model.text)||turnless&&(callGeneration!==generationCounter||callContext!==observedContext||!awaitingResponse))return;
-      const response=await send('studio.call',{text:model.text,sourceText:model.sourceText??model.text,sourceBlocks:model.sourceBlocks,sourceRemainder:model.sourceRemainder,recoveryRules:model.recoveryRules,sourceRevision:model.sourceRevision,...(model.sourceError?{sourceError:model.sourceError}:{}),conversationKey,generating:false,...contextFields});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(/^```helper-call\s/.test(model.text)&&model.element)serviceNodes.add(model.element);}}finally{if(inFlight===marker)inFlight='';}
+      const response=await send('studio.call',{text:model.text,sourceText:model.sourceText??model.text,sourceBlocks:model.sourceBlocks,sourceRemainder:model.sourceRemainder,recoveryRules:model.recoveryRules,sourceRevision:model.sourceRevision,...(model.sourceError?{sourceError:model.sourceError}:{}),conversationKey,generating:false,...contextFields});if(sessionId===callSession&&response?.accepted&&(!turnless||callGeneration===generationCounter&&callContext===observedContext)){lastText=model.text;if(turnless){awaitingResponse=false;if(observedResultId===allowedFollowupId)allowedFollowupId='';}if(recoveringTurn)recoverTurn='';attempted.add(model.text);if(response.toolCall&&model.element){serviceNodes.add(model.element);adapter.collapseCall?.(model);}}}finally{if(inFlight===marker)inFlight='';}
   }
   const schedule=()=>{if(retired||sourceRecoveryPending)return;try{if(turnless&&!checkInstructions)trackGeneration(adapter.inspect());clearTimeout(observerTimer);observerTimer=setTimeout(()=>observe().catch(reportObserverError),250);}catch(error){reportObserverError(error);}};
   document.addEventListener('click',event=>{
@@ -168,24 +194,40 @@
   },true);
   const observer=new MutationObserver(schedule);observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true});
   const tickTimer=setInterval(()=>{if(retired||sourceRecoveryPending)return;try{if(newChatPending)observe().catch(reportObserverError);else if(sessionId){send('studio.tick',snapshot()).catch(reportObserverError);observe().catch(reportObserverError);}else{send('studio.hello',hello()).catch(()=>{});}}catch(error){reportObserverError(error);}},2000);
-  function retire(){if(retired)return;retired=true;resetReply();sessionId='';clearTimeout(observerTimer);clearInterval(tickTimer);observer.disconnect();window.removeEventListener?.('popstate',requestInstructionCheck);if(window.__webcodexBridgeDispose===retire){window.__webcodexBridgeLoaded=false;delete window.__webcodexBridgeDispose;}}
+  function retire(){if(retired)return;retired=true;adapter.setChatWidth?.(0);window.removeEventListener?.('resize',restoreChatWidth);chrome.storage?.onChanged?.removeListener(widthChanged);resetReply();sessionId='';clearTimeout(observerTimer);clearInterval(tickTimer);observer.disconnect();window.removeEventListener?.('popstate',requestInstructionCheck);if(window.__webcodexBridgeDispose===retire){window.__webcodexBridgeLoaded=false;delete window.__webcodexBridgeDispose;}}
   window.__webcodexBridgeDispose=retire;
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{
     if(retired)return;
-    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup','studio.captureWrite','studio.captureCall','studio.readReply','studio.bindMarker','studio.cancelDelivery'].includes(m.type)){reply({ok:false});return;}
+    if(!m||!['studio.arm','studio.stage','studio.deliver','studio.snapshot','studio.disarm','studio.cleanup','studio.captureWrite','studio.captureCall','studio.readReply','studio.bindMarker','studio.injectMarker','studio.cancelDelivery','studio.collapseCall','studio.collapseChat','studio.chatWidth'].includes(m.type)){reply({ok:false});return;}
+    if(m.type==='studio.chatWidth'){
+      if(!Number.isInteger(m.value)||m.value<0||m.value>100||m.value%10!==0){reply({ok:false,error:'Invalid chat width'});return;}
+      chatWidth=m.value;adapter.setChatWidth?.(chatWidth);reply({ok:true});return;
+    }
+    if(m.type==='studio.collapseChat'){reply({ok:true,collapsed:adapter.collapseChat?.({force:true})||0});return;}
     if(m.type==='studio.arm'){
       const s=adapter.inspect();if(!s.supported){reply({supported:false,error:s.error||'AI Studio conversation changed',conversationKey:s.conversationKey});return;}
       if(!m.hideServiceMessages)adapter.restoreCleanup();serviceNodes.clear();
       hadConversation=!!s.latestModel&&!!s.latestUser;emptyObservations=0;
       resetReply();rememberHistory();
-      sessionId=m.sessionId;sessionMarker=m.sessionMarker||'';conversationKey=s.conversationKey;turnless=!!m.turnless;turnlessRecovery=turnless&&!!m.recover;awaitingResponse=false;generationSeen=false;generationCounter=0;allowedFollowupId='';baselineModelText=s.latestModel?.text||'';observedUserText=s.latestUser?.text||'';observedResultId='';observedContext=JSON.stringify([observedResultId,observedUserText]);recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.recover?m.toolNames||[]:[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;newChatRequestInFlight=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
+      sessionId=m.sessionId;sessionMarker=m.sessionMarker||'';conversationKey=s.conversationKey;turnless=!!m.turnless;turnlessRecovery=turnless&&!!m.recover;awaitingResponse=false;generationSeen=false;generationCounter=0;allowedFollowupId='';baselineModelText=s.latestModel?.text||'';observedUserText=s.latestUser?.text||'';observedResultId='';observedContext=JSON.stringify([observedResultId,observedUserText]);recoverTurn=m.recover?m.recoverTurn||'':'';recoverTools=m.toolNames||[];baselineText=m.recover?'':s.latestModel?.text||'';lastText=m.recover?'':baselineText;lastDelivered='';inFlight='';stopping=false;newChatPending=false;newChatRequestInFlight=false;attempted.clear();reply(snapshot());if(recoverTurn)schedule();return;
     }
     if(!sessionId||m.sessionId!==sessionId){reply({ok:false,error:'Stale session'});return;}
     if(m.type==='studio.bindMarker'){sessionMarker=m.sessionMarker||'';reply({ok:true});return;}
+    if(m.type==='studio.injectMarker'){
+      const s=adapter.inspect();
+      if(checkInstructions||systemStagePending||sourceRecoveryPending||newChatPending||deliveryPending||!s.supported||s.generating||s.editingReply||m.bindingAddress&&s.chatAddress!==m.bindingAddress){reply({ok:false,error:'Дождитесь завершения ответа и проверки текущего чата'});return;}
+      const ok=adapter.prepareSessionMessage(sessionMarker,{force:true});
+      reply({ok,error:ok?undefined:'Не удалось вставить ID: проверьте поле сообщения и текущий сеанс'});return;
+    }
+    if(m.type==='studio.collapseCall'){
+      const model=adapter.inspect().latestModel;
+      if(!model||model.sourceRevision!==m.sourceRevision||model.text!==m.text){reply({ok:false});return;}
+      reply({ok:adapter.collapseCall?.(model)===true});return;
+    }
     if(m.type==='studio.cancelDelivery'){deliveryRevision++;reply({ok:true});return;}
     if(m.type==='studio.readReply'){
       let s=adapter.inspect(),model=s.latestModel;const revision=navigationRevision;
-      if(checkInstructions||!s.supported||s.generating||!model||s.modelAfterUser===false){reply({ok:false,error:'Дождитесь полного ответа в текущем чате'});return;}
+      if(checkInstructions||!s.supported||s.generating||s.editingReply||!model||s.modelAfterUser===false){reply({ok:false,error:'Дождитесь полного ответа в текущем чате'});return;}
       (async()=>{
         s=await recoverReplySource(s);if(!s)throw Error('Ответ изменился во время чтения');model=s.latestModel;
         const responseKey=await responseKeyFor(generationCounter,observedResultId,observedUserText,model.responseIdentityText??model.text);
@@ -196,15 +238,15 @@
     }
     if(m.type==='studio.captureWrite'||m.type==='studio.captureCall'){
       let s=adapter.inspect();
-      if(checkInstructions||!s.supported||s.generating||!s.latestModel){reply({ok:false,error:'Дождитесь полного ответа модели и завершения перехода в чат'});return;}
+      if(checkInstructions||!s.supported||s.generating||s.editingReply||!s.latestModel){reply({ok:false,error:'Дождитесь полного ответа модели и завершения перехода в чат'});return;}
       (async()=>{
         s=await recoverReplySource(s);if(!s)throw Error('Ответ изменился во время чтения');
         const selected=m.type==='studio.captureWrite'?[m.tool]:m.tools||[];
         if(s.latestModel.sourceError)throw Error(s.latestModel.sourceError);
-        const call=WebCodexProtocol.parseCall(s.latestModel.text,null,selected,{...s.latestModel,sessionMarker,allowUnmarked:true});
+        const call=WebCodexProtocol.parseCall(s.latestModel.text,null,selected,{...s.latestModel,sessionMarker,allowUnmarked:true,lastFrame:true});
         if(!call||m.type==='studio.captureWrite'&&call.name!=='write_file')throw Error('В последнем ответе нет единственного корректного выбранного вызова');
         resetReply();baselineText=s.latestModel.text;lastText=baselineText;awaitingResponse=false;allowedFollowupId='';
-        reply({ok:true,text:s.latestModel.text,sourceBlocks:s.latestModel.sourceBlocks,sourceRemainder:s.latestModel.sourceRemainder,pageInstance,conversationKey:s.conversationKey});
+        reply({ok:true,text:s.latestModel.text,sourceRevision:s.latestModel.sourceRevision,sourceBlocks:s.latestModel.sourceBlocks,sourceRemainder:s.latestModel.sourceRemainder,pageInstance,conversationKey:s.conversationKey});
       })().catch(error=>reply({ok:false,error:String(error.message||error)}));return true;
     }
     if(m.type==='studio.cleanup'){if(m.final||!adapter.inspect().generating)adapter.annotateContext();if(!m.enabled)adapter.restoreCleanup();else if(m.final)adapter.cleanup({turns:[...serviceNodes],operationIds:m.operationIds||[]});reply({ok:true});return;}
@@ -228,7 +270,8 @@
     }
     if(m.type==='studio.snapshot'){const state=snapshot(m.operationId,false,m.expectedResultText);if(state.delivered&&turnless){observedResultId=m.operationId||observedResultId;}if(state.delivered&&(recoverTurn||turnlessRecovery)){const current=adapter.inspect(),model=current.latestModel;let valid=false;try{valid=!!model&&(!turnless||current.modelAfterUser!==false)&&!!WebCodexProtocol.parseCall(model.text,turnless?null:recoverTurn,recoverTools,{...model,sessionMarker,allowUnmarked:true});}catch{}if(turnless){recoverTurn='';turnlessRecovery=false;baselineText=valid?'':model?.text||'';lastText=valid?'':baselineText;if(valid){awaitingResponse=true;generationSeen=true;baselineModelText='';schedule();}}else if(valid)schedule();else{recoverTurn='';baselineText=model?.text||'';lastText=baselineText;}}reply(state);return;}
     if(m.type==='studio.deliver'){
-      const s=adapter.inspect();const state=snapshot();if(!s.supported||(!m.submit&&!s.editorEmpty)||s.generating){reply({ok:false,attempted:false,...state});return;}
+      if(newChatPending){reply({ok:false,attempted:false,...snapshot(),error:'Открыт новый чат; старый результат в него не отправляется'});return;}
+      const s=adapter.inspect();const state=snapshot();if(!s.supported||(!m.submit&&!s.editorEmpty)||s.generating&&!s.controlsPending||s.editingReply){reply({ok:false,attempted:false,...state,error:s.editingReply?'Закройте редактор ответа AI Studio и нажмите «Передать результат»':s.generating?'Дождитесь окончания ответа AI Studio и нажмите «Передать результат»':s.error||'Проверьте поле ввода AI Studio; результат сохранён в панели'});return;}
       if(checkInstructions){reply({ok:false,attempted:false,...state,error:'Переход между чатами: результат сохранён, отправка ожидает проверки'});return;}
       const wrapped=`\`\`\`helper-result\n${m.text}\n\`\`\``;
       if(!m.submit){const ok=adapter.stage(wrapped);reply({ok,attempted:false,...state});return;}
@@ -243,13 +286,13 @@
       if(m.attachments?.length){
         attachmentPending=true;
         const revision=deliveryRevision;
-        const current=()=>sessionId===deliverySession&&navigationRevision===deliveryNavigation&&deliveryRevision===revision;
+        const current=()=>sessionId===deliverySession&&navigationRevision===deliveryNavigation&&deliveryRevision===revision&&!newChatPending;
         reply({ok:true,attempted:false,pending:true,...state});
         (async()=>{
           let attempted=false;
           try{
             const files=await attachmentFiles(m,current);
-            if(!current()||!adapter.stage(wrapped))throw Error('Поле ввода изменилось; прикрепление остановлено');
+            if(!current()||!adapter.stage(wrapped,{recover:true}))throw Error('Поле ввода изменилось; прикрепление остановлено');
             const stillOwned=()=>current()&&adapter.ownsDraft(wrapped)&&!adapter.inspect().generating;
             const attached=await adapter.attachFiles(files,{key:operationId,isCurrent:stillOwned});
             if(!attached.ok)throw Error(attached.error);
@@ -257,7 +300,7 @@
             const intent=await send('studio.deliveryStarted',{operationId});
             if(!intent?.accepted||!stillOwned())throw Error('Отправка остановлена до нажатия Run');
             attempted=true;
-            const ok=await adapter.submit(wrapped,stillOwned);
+            const ok=await adapter.submit(wrapped,stillOwned,{recover:true});
             if(ok){lastDelivered=m.text;if(turnless)allowedFollowupId=operationId;}
             const proof=snapshot(operationId,false,m.text);
             if(proof.delivered)adapter.releaseFiles?.(operationId);
@@ -268,9 +311,9 @@
       }
       (async()=>{
         try{
-          const ok=await adapter.submit(wrapped,()=>sessionId===deliverySession&&navigationRevision===deliveryNavigation);
+          const ok=await adapter.submit(wrapped,()=>sessionId===deliverySession&&navigationRevision===deliveryNavigation&&!newChatPending,{recover:true});
           if(ok){lastDelivered=m.text;if(turnless)allowedFollowupId=operationId;}
-          const proof=snapshot(operationId,false,m.text);reply({ok,attempted:ok,confirmed:ok&&proof.delivered,...proof});
+          const proof=snapshot(operationId,false,m.text);reply({ok,attempted:ok,confirmed:ok&&proof.delivered,...proof,...(!ok?{error:'Результат не отправлен. Если в поле ваш текст, сохраните его и очистите поле. Если там результат Helper, оставьте его без изменений и нажмите «Передать результат». Проверьте, что кнопка Run доступна.'}:{})});
         }catch(e){reply({ok:false,attempted:true,...snapshot(),error:'Delivery outcome is unknown'});}
         finally{deliveryPending=false;}
       })();

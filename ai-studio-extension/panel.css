@@ -6,8 +6,14 @@ header h1 { margin: 0; font-size: 20px; }
 header p, .hint { margin: 2px 0 12px; color: GrayText; }
 section { border-top: 1px solid color-mix(in srgb, CanvasText 18%, transparent); margin-top: 14px; padding-top: 10px; }
 h2 { margin: 0 0 8px; font-size: 16px; }
+.session-heading-row { display: flex; align-items: center; gap: 12px; }
+.session-heading-row h2 { flex: 0 0 auto; }
+.chat-width-control { flex: 1; min-width: 0; text-align: center; }
+.chat-width-slider input { display: block; width: 100%; margin: 0; accent-color: Highlight; }
+.chat-width-labels { display: flex; justify-content: space-between; font-size: 9px; line-height: 1.2; color: GrayText; }
+#chat-width-value { display: block; min-height: 1em; font-size: 10px; color: GrayText; }
 label, section > p { display: block; margin: 8px 0 4px; font-weight: 600; }
-input:not([type=checkbox]):not([type=radio]), textarea { display: block; width: 100%; border: 1px solid GrayText; border-radius: 5px; padding: 8px; color: CanvasText; background: Canvas; font: inherit; }
+input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea { display: block; width: 100%; border: 1px solid GrayText; border-radius: 5px; padding: 8px; color: CanvasText; background: Canvas; font: inherit; }
 textarea { resize: vertical; }
 .row { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
 button { min-height: 34px; padding: 6px 10px; border: 1px solid ButtonBorder; border-radius: 5px; color: ButtonText; background: ButtonFace; font: inherit; cursor: pointer; }

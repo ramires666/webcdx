@@ -358,3 +358,17 @@ test('Gate fallback setup selects Gate when the saved local connection is discon
   assert.equal(result.state.session.phase,'idle');assert.notEqual(result.state.session.sessionId,'stale-local');
   assert.equal(h.localStore.bridgeAuth.accessToken,'new-token');assert.equal(result.state.agents[0].id,'remote');
 });
+
+
+test('reopening a saved chat restores its registered reply marker when earlier turns are virtualized',async()=>{
+  const marker='93b548f38bc24fe986e5817d27af4f43';
+  const address='/prompts/saved-chat';
+  for(const record of [{tabId:1,address},{tabId:2,address},{tabId:1,address:'/prompts/other-chat'}]){
+    const h=harness({gateEnabled:false,storage:{bridgeChatBindings:{[marker]:record}}});
+    await new Promise(resolve=>setTimeout(resolve,0));
+    h.chrome.tabs.sendMessage=async()=>({ok:true,supported:true,conversationKey:'chat',chatAddress:address,chatMarkers:[],replyMarker:marker});
+    const response=await message(h,{type:'bridge.arm',tabId:1,agentId:'local',toolNames:['read_file'],consent:true});
+    assert.equal(response.ok,true,response.error);
+    assert.equal(response.state.session.sessionMarker===marker,record.tabId===1&&record.address===address);
+  }
+});

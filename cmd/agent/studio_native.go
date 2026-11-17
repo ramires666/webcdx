@@ -115,6 +115,18 @@ type studioRPCError struct {
 
 func handleStudioRequest(ctx context.Context, e *nativeExecutor, h *studioOperations, r studioRequest) (any, *studioRPCError) {
 	switch r.Method {
+	case "session/set":
+		marker, ok := r.Params["marker"].(string)
+		decoded, err := hex.DecodeString(marker)
+		if !ok || marker != "" && (err != nil || len(decoded) != 16 || strings.ToLower(marker) != marker) {
+			return nil, &studioRPCError{-32602, "marker must be 32 lowercase hex characters or empty"}
+		}
+		if marker == "" {
+			log.Print("Сеанс завершён")
+		} else {
+			log.Printf("ID активного сеанса: %s", marker)
+		}
+		return map[string]any{"ok": true}, nil
 	case "operations/create":
 		key, _ := r.Params["key"].(string)
 		name, _ := r.Params["name"].(string)
@@ -197,6 +209,7 @@ func handleStudioRequest(ctx context.Context, e *nativeExecutor, h *studioOperat
 	if r.Method == "initialize" {
 		if result, ok := response.Result.(map[string]any); ok {
 			result["studioOperations"] = map[string]any{"lookupByKey": true, "retention": "indefinite", "newKeyMaxAgeSeconds": 86400}
+			result["studioSession"] = map[string]any{"marker": true}
 			if info, ok := result["serverInfo"].(map[string]any); ok {
 				info["version"] = buildinfo.Version
 			}
@@ -457,7 +470,9 @@ func (h *studioOperations) create(ctx context.Context, e *nativeExecutor, key, n
 	return studioOperationResult(op), nil
 }
 
-func studioToolCall(ctx context.Context, e *nativeExecutor, name string, args map[string]any, agentID string) (any, *studioRPCError) {
+func studioToolCall(ctx context.Context, e *nativeExecutor, name string, args map[string]any, agentID string) (value any, callErr *studioRPCError) {
+	log.Printf("%s — %s", compactString(name, 40), studioCallDescription(name, args))
+	defer func() { log.Printf("%s — %s", compactString(name, 40), studioCallSummary(value, callErr)) }()
 	if args == nil {
 		args = map[string]any{}
 	}

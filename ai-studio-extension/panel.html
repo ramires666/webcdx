@@ -11,7 +11,7 @@
   <main>
     <header>
       <h1>WebCodex Bridge</h1>
-      <p id="extension-version">Скрипт 0.5.0 · Агент не подключён</p>
+      <p id="extension-version">Скрипт 0.5.8 · Агент не подключён</p>
       <div class="row"><button id="arm" type="button">Запустить сеанс</button></div>
     </header>
     <p id="error" class="error" role="alert" aria-live="assertive" hidden></p>
@@ -33,10 +33,21 @@
     </section>
 
     <section aria-labelledby="session-heading">
-      <h2 id="session-heading">Сеанс</h2>
+      <div class="session-heading-row">
+        <h2 id="session-heading">Сеанс</h2>
+        <div class="chat-width-control">
+          <div class="chat-width-slider"><input id="chat-width" type="range" min="0" max="100" step="10" value="0" aria-label="Ширина чата"></div>
+          <div class="chat-width-labels" aria-hidden="true"><span>default</span><span>Max</span></div>
+          <span id="chat-width-value">Ширина чата</span>
+        </div>
+      </div>
+      <p>ID активного сеанса: <code id="session-marker" class="wrap" aria-live="polite">Нет активного сеанса</code></p>
       <p>Локальный агент</p>
       <div id="agents" class="choices" aria-label="Выбор агента"></div>
-      <button id="allow-all" type="button">Разрешить всё</button>
+      <div class="row">
+        <button id="allow-all" type="button">Разрешить всё</button>
+        <button id="collapse-chat" type="button" class="secondary">Свернуть чат хелпера</button>
+      </div>
       <p>Разрешённые инструменты</p>
       <div id="tools" class="choices" aria-label="Разрешённые инструменты"></div>
       <p id="tools-next-session" class="hint" hidden>Выбор инструментов применяется к следующему сеансу.</p>
@@ -52,8 +63,10 @@
       <p id="instructions-help" class="hint">Правила сохраняются в System instructions. Поле чата остаётся свободным для вашей задачи; Active turn и ID в запросе не нужны.</p>
       <div class="row">
         <button id="save-instructions" type="button" class="secondary">Обновить инструкции</button>
+        <button id="inject-marker" type="button" class="secondary" aria-describedby="inject-marker-help">Вставить ID чата</button>
         <button id="save-from-reply" type="button" class="secondary">Сохранить файл из ответа</button>
       </div>
+      <p id="inject-marker-help" class="hint">Вставляет ID текущего сеанса в поле сообщения, сохраняя ваш текст. Отправьте сообщение сами. Права на инструменты выбираются галочками выше.</p>
       <div class="row">
         <button id="pause" type="button" class="secondary">Пауза</button>
         <button id="resume" type="button" class="secondary">Продолжить</button>

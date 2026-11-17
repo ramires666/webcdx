@@ -46,12 +46,31 @@ test('service JSON preference reflects state and sends both checkbox values', as
   assert.deepEqual(p.messages.filter(x => x.type === 'bridge.cleanupPreference').map(x => x.enabled), [false, true]);
 });
 
+test('manual chat ID button targets the active tab and is disabled without an available session',async()=>{
+  const p=createPanel(),session={phase:'waiting_model',sessionMarker:'a'.repeat(32),tabId:1};
+  const base={connected:true,autoSettings:{consent:true},session,tools:[],agents:[]};
+  await p.update(base);assert.equal(p.get('inject-marker').disabled,false);
+  assert.equal(p.get('session-marker').textContent,session.sessionMarker);
+  await p.click('inject-marker');
+  assert.equal(p.messages.at(-1).type,'bridge.injectMarker');assert.equal(p.messages.at(-1).tabId,1);
+  for(const changes of [{connected:false},{autoSettings:{consent:false}},...[
+    {phase:'idle'},{phase:'stopped'},{paused:true},{resumeBlocked:true},{sessionMarker:''},{pendingCall:{}},{operationKey:'pending'},{operationId:'pending'},{resultText:'pending'}
+  ].map(change=>({session:{...session,...change}}))]){
+    await p.update({...base,...changes});assert.equal(p.get('inject-marker').disabled,true,JSON.stringify(changes));
+  }
+  await p.update(base);p.fail();await p.click('inject-marker');
+  assert.equal(p.get('error').textContent,'Action failed');
+  await p.update({...base,session:{...session,phase:'stopped'}});
+  assert.equal(p.get('session-marker').textContent,'Нет активного сеанса');
+});
+
 test('quick controls follow the version and local agent while allow-all persists every checkbox',async()=>{
   const html=fs.readFileSync(require.resolve('./panel.html'),'utf8');
   assert.ok(html.indexOf('id="extension-version"')<html.indexOf('id="arm"'));
   assert.ok(html.indexOf('id="arm"')<html.indexOf('id="error"'));
   for(const id of ['status','transport-info','page-script','observer-status'])assert.equal(html.includes(`id="${id}"`),false);
   assert.ok(html.indexOf('id="agents"')<html.indexOf('id="allow-all"'));
+  assert.match(html, /<div class="row">\s*<button id="allow-all"[^>]*>Разрешить всё<\/button>\s*<button id="collapse-chat"[^>]*>Свернуть чат хелпера<\/button>\s*<\/div>/);
   assert.ok(html.indexOf('id="allow-all"')<html.indexOf('id="tools"'));
   assert.equal((html.match(/id="arm"/g)||[]).length,1);
   const panel=createPanel();
@@ -69,11 +88,43 @@ test('quick controls follow the version and local agent while allow-all persists
   for(const id of ['consent','automatic','attach-files','auto-approve','hide-service'])assert.equal(panel.get(id).checked,true,id);
 });
 
+test('chat width slider is next to the session heading and sends persisted tab values', async () => {
+  const html = fs.readFileSync(require.resolve('./panel.html'), 'utf8');
+  assert.match(html, /<div class="session-heading-row">\s*<h2 id="session-heading">Сеанс<\/h2>\s*<div class="chat-width-control">/);
+  assert.match(html, /id="chat-width" type="range" min="0" max="100" step="10" value="0"/);
+  assert.ok(html.includes('<span>default</span><span>Max</span>'));
+  assert.ok(html.includes('<span id="chat-width-value">Ширина чата</span>'));
+  assert.equal((html.match(/<span>\d+%<\/span>/g) || []).length, 0);
+  const panel = createPanel();
+  panel.get('chat-width-value').textContent = 'Ширина чата';
+  await panel.update({ connected: false, chatWidth: 30, session: { phase: 'idle' }, tools: [], agents: [] });
+  assert.equal(panel.get('chat-width').value, '30');
+  assert.equal(panel.get('chat-width-value').textContent, 'Ширина чата');
+  panel.get('chat-width').value = '0'; await panel.input('chat-width', '0');
+  assert.equal(panel.get('chat-width-value').textContent, 'Ширина чата');
+  const defaultWidth = panel.messages.filter(message => message.type === 'bridge.chatWidth').at(-1);
+  assert.equal(defaultWidth.tabId, 1); assert.equal(defaultWidth.value, 0);
+  await panel.update({ connected: false, chatWidth: 0, session: { phase: 'idle' }, tools: [], agents: [] });
+  assert.equal(panel.get('chat-width-value').textContent, 'Ширина чата');
+  assert.equal(panel.get('chat-width').value, '0');
+  panel.get('chat-width').value = '100'; await panel.input('chat-width', '100');
+  assert.equal(panel.get('chat-width-value').textContent, 'Ширина чата');
+  assert.equal(panel.messages.filter(message => message.type === 'bridge.chatWidth').at(-1).value, 100);
+});
+
 test('resume identifies the currently selected tab for saved-chat recovery',async()=>{
   const panel=createPanel();
   await panel.click('resume');
   assert.equal(panel.messages.at(-1).type,'bridge.resume');
   assert.equal(panel.messages.at(-1).tabId,1);
+});
+
+test('collapse chat dispatches for the active tab while disconnected',async()=>{
+  const panel=createPanel();
+  await panel.click('collapse-chat');
+  assert.equal(panel.messages.at(-1).type,'bridge.collapseChat');
+  assert.equal(panel.messages.at(-1).tabId,1);
+  assert.equal(panel.get('error').hidden,true);
 });
 
 test('uncertain delivery offers a read-only check while execution uncertainty stays blocked',async()=>{

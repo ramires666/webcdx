@@ -3,7 +3,7 @@ package main
 import "log"
 
 func logSourcef(source, format string, args ...any) {
-	if source != "" {
+	if source != "" && source != "local" {
 		format = "[source=" + source + "] " + format
 	}
 	log.Printf(format, args...)

@@ -8,20 +8,77 @@ const WebCodexMCP=require('./mcp-client.js');
 
 function harness(stored={}, failInitialize=false, localStore={}, clientOverride=null) {
   if (!Object.hasOwn(localStore,'bridgeAutoSetupV1')) localStore.bridgeAutoSetupV1=true;
-  const listeners={};const data={...stored};const sent=[];
+  const listeners={};const data={...stored};const sent=[],tabMessages=[];
   const event=()=>({addListener:fn=>{listeners[fn.name||Math.random()]=fn;}});
   const chrome={runtime:{id:'test-id',getURL:p=>'chrome-extension://test-id/'+p,onMessage:{addListener(fn){listeners.message=fn;}}},
     storage:{session:{setAccessLevel:async x=>sent.push(['session-access',x]),get:async k=>({[k]:data[k]}),set:async x=>Object.assign(data,x)},local:{get:async k=>({[k]:localStore[k]}),set:async x=>Object.assign(localStore,x),remove:async k=>{delete localStore[k];},setAccessLevel:async x=>sent.push(['local-access',x])}},
     action:{onClicked:{addListener(fn){listeners.click=fn;}}},sidePanel:{open:async()=>{}},alarms:{create(){},onAlarm:{addListener(){}}},
-    permissions:{contains:async()=>true},tabs:{get:async()=>({url:'https://aistudio.google.com/app/prompts/abc'}),sendMessage:async()=>({supported:true,conversationKey:'c',ok:true})},
+    permissions:{contains:async()=>true},tabs:{get:async()=>({url:'https://aistudio.google.com/app/prompts/abc'}),sendMessage:async(...args)=>{tabMessages.push(args);return{supported:true,conversationKey:'c',ok:true};}},
     identity:{getRedirectURL:()=> 'https://test.chromiumapp.org/webcodex',launchWebAuthFlow:async()=>''}};
   const context={chrome,crypto:require('node:crypto').webcrypto,URL,URLSearchParams,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,JSON,Promise,Set,Map,Date,AbortSignal,Math,Error,String,Object,Number,RegExp,console,btoa:s=>Buffer.from(s,'binary').toString('base64'),fetch:async()=>{throw Error('fetch unexpected')},
     WebCodexProtocol, WebCodexSession:require('./session-state.js'), WebCodexAttachments:require('./attachments.js'),WebCodexMCP:clientOverride|| (failInitialize?{createClient:()=>({initialize:async()=>{throw Error('expired')}})}:WebCodexMCP),importScripts(){},setTimeout,clearTimeout};
   // Keep exercising the retained remote implementation while this release is local-only.
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'background.js'),'utf8').replace('const GATE_ENABLED = false;','const GATE_ENABLED = true;'),context,{filename:'background.js'});
-  return {listeners,data,sent,chrome};
+  return {listeners,data,sent,chrome,tabMessages};
 }
 function message(h,msg,sender){return new Promise(resolve=>{const async=h.listeners.message(msg,sender,resolve);if(async!==true)resolve(undefined);});}
+test('manual marker injection targets only the active session and preserves permissions and pending work',async()=>{
+  const session={phase:'waiting_model',sessionId:'s1',sessionMarker:'a'.repeat(32),tabId:7,toolNames:['read_file'],bindingAddress:'/prompts/current'};
+  const panel={url:'chrome-extension://test-id/panel.html'},inject={type:'bridge.injectMarker',tabId:7};
+  function create(changes={},consent=true){return harness({webcodexState:{connected:true,demoMode:true,session:{...session,...changes}}},false,{bridgeAuto:{consent}});}
+  const h=create(),reply=await message(h,inject,panel);
+  assert.equal(reply.ok,true);assert.deepEqual(reply.state.session.toolNames,['read_file']);
+  assert.equal(h.tabMessages.length,1);
+  assert.equal(h.tabMessages[0][0],7);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.tabMessages[0][1])),{type:'studio.injectMarker',sessionId:'s1',bindingAddress:'/prompts/current'});
+  assert.equal((await message(h,{...inject,tabId:8},panel)).ok,false);
+  h.chrome.tabs.get=async()=>({url:'https://example.com/'});
+  assert.equal((await message(h,inject,panel)).ok,false);
+  for(const changes of [{phase:'idle'},{phase:'stopped'},{paused:true},{resumeBlocked:true},{sessionMarker:''},{pendingCall:{}},{operationKey:'pending'},{operationId:'pending'},{resultText:'pending'}]){
+    const blocked=create(changes);assert.equal((await message(blocked,inject,panel)).ok,false);
+    assert.equal(blocked.tabMessages.length,0);
+  }
+  assert.equal((await message(create({},false),inject,panel)).ok,false);
+  const failed=create();failed.chrome.tabs.sendMessage=async()=>({ok:false,error:'Editor unavailable'});
+  assert.equal((await message(failed,inject,panel)).error,'Editor unavailable');
+});
+test('chat width changes work while idle and persist as validated global preference',async()=>{
+  const localStore={chatWidth:40},h=harness({},false,localStore),panel={url:'chrome-extension://test-id/panel.html'};
+  const restored=await message(h,{type:'bridge.status'},panel);assert.equal(restored.state.chatWidth,40);
+  const reply=await message(h,{type:'bridge.chatWidth',tabId:7,value:100},panel);
+  assert.equal(reply.ok,true);assert.equal(reply.state.chatWidth,100);assert.equal(localStore.chatWidth,100);
+  assert.equal(h.data.webcodexState.session.phase,'idle');assert.equal(h.data.webcodexState.connected,false);
+  assert.deepEqual(h.tabMessages.map(([,msg])=>[msg.type,msg.value]),[['studio.chatWidth',100]]);
+});
+test('chat width rejects invalid values and non-AI-Studio tabs without saving',async()=>{
+  const localStore={chatWidth:20},h=harness({},false,localStore),panel={url:'chrome-extension://test-id/panel.html'};
+  for(const value of [-10,110,15,10.5,'10']){
+    const reply=await message(h,{type:'bridge.chatWidth',tabId:7,value},panel);
+    assert.equal(reply.ok,false);assert.match(reply.error,/Ширина должна быть/);
+  }
+  h.chrome.tabs.get=async()=>({url:'https://example.com/'});
+  const wrongOrigin=await message(h,{type:'bridge.chatWidth',tabId:7,value:30},panel);
+  assert.equal(wrongOrigin.ok,false);assert.match(wrongOrigin.error,/Google AI Studio/);
+  assert.equal(localStore.chatWidth,20);assert.equal(h.tabMessages.length,0);
+});
+test('chat folding targets a selected AI Studio tab while disconnected and idle',async()=>{
+  const h=harness(),panel={url:'chrome-extension://test-id/panel.html'};
+  const reply=await message(h,{type:'bridge.collapseChat',tabId:7},panel);
+  assert.equal(reply.ok,true);
+  assert.deepEqual(h.tabMessages.map(([id,msg])=>[id,msg.type]),[[7,'studio.collapseChat']]);
+  assert.equal(h.data.webcodexState.session.phase,'idle');
+  assert.equal(h.data.webcodexState.connected,false);
+  assert.equal(h.tabMessages.some(([,msg])=>/call|arm|deliver|stage/i.test(msg.type)),false);
+});
+test('chat folding rejects non-Studio origins and malformed tab IDs',async()=>{
+  const h=harness(),panel={url:'chrome-extension://test-id/panel.html'};
+  h.chrome.tabs.get=async()=>({url:'https://example.com/'});
+  const wrongOrigin=await message(h,{type:'bridge.collapseChat',tabId:7},panel);
+  assert.equal(wrongOrigin.ok,false);assert.match(wrongOrigin.error,/Google AI Studio/);
+  const badTab=await message(h,{type:'bridge.collapseChat',tabId:'7'},panel);
+  assert.equal(badTab.ok,false);assert.match(badTab.error,/Google AI Studio/);
+  assert.equal(h.tabMessages.length,0);
+});
 test('browser restart restores only credentials, refreshes tools and never starts a chat',async()=>{
   const auto={enabled:true,agentId:'a',toolNames:['read_file'],automatic:true,autoApprove:false,consent:true};
   const localStore={bridgeAuth:{gateUrl:'https://gate.example',clientId:'client',accessToken:'saved-secret'},bridgeAuto:auto};

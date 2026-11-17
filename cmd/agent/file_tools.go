@@ -151,12 +151,12 @@ func (e *nativeExecutor) writeFile(args map[string]any, requirePrecondition bool
 	if err := verifyWrittenFile(path, data); err != nil {
 		return nil, err
 	}
-	if errors.Is(parentErr, os.ErrNotExist) {
+	if errors.Is(parentErr, os.ErrNotExist) && (e.source != "local" || e.verbose) {
 		e.logf("✓ Создана папка %s", compactString(filepath.Dir(path), 180))
 	}
 	if previewOK {
 		e.logFileChange(path, before, data, errors.Is(inspectErr, os.ErrNotExist))
-	} else {
+	} else if e.source != "local" || e.verbose {
 		e.logf("✓ Сохранён файл %s; сравнение недоступно", compactString(path, 180))
 	}
 	return map[string]any{"path": path, "bytes_written": len(data), "sha256": hashBytes(data)}, nil

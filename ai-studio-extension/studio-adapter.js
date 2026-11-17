@@ -46,8 +46,14 @@
   };
   const editors = () => {
     const isSystemEditor = el => attr(el, 'placeholder') === 'Optional tone and style instructions for the model';
-    const scoped = elements('ms-prompt-input-wrapper textarea, ms-prompt-box textarea, ms-autosize-textarea textarea, ms-prompt-input-wrapper [contenteditable="true"], ms-prompt-box [contenteditable="true"], ms-autosize-textarea [contenteditable="true"]').filter(el => !isSystemEditor(el) && !inSystemPanel(el));
-    const candidates = scoped.length ? scoped : elements('textarea, [contenteditable="true"]').filter(el => !isSystemEditor(el) && !inSystemPanel(el));
+    const inTurn = el => {
+      for(let node=el.parentElement||el.parent;node;node=node.parentElement||node.parent){
+        if(['ms-chat-turn','model-prompt-container','[data-turn-role]','.chat-turn-container.user','.chat-turn-container.model'].some(selector=>node.matches?.(selector)))return true;
+      }
+      return false;
+    };
+    const scoped = elements('ms-prompt-input-wrapper textarea, ms-prompt-box textarea, ms-autosize-textarea textarea, ms-prompt-input-wrapper [contenteditable="true"], ms-prompt-box [contenteditable="true"], ms-autosize-textarea [contenteditable="true"]').filter(el => !isSystemEditor(el) && !inSystemPanel(el) && !inTurn(el));
+    const candidates = scoped.length ? scoped : elements('textarea, [contenteditable="true"]').filter(el => !isSystemEditor(el) && !inSystemPanel(el) && !inTurn(el));
     return [...new Set(candidates)].filter((el) => !el.disabled && !el.readOnly && attr(el, 'aria-disabled') !== 'true');
   };
   const controls = () => elements('button');
@@ -73,20 +79,51 @@
   };
   const editorValue = (el) => el.isContentEditable || attr(el, 'contenteditable') === 'true' ? text(el) : String(el.value || '');
   let ownedDraft = null, pendingSubmit = null;
-  const sourceIDs=new WeakMap(),responseRevisions=new WeakMap(),recoveredReplies=new WeakMap();
+  const sourceIDs=new WeakMap(),responseRevisions=new WeakMap(),recoveredReplies=new WeakMap(),collapsedHelperSources=new WeakMap(),collapsedHelperDisplays=new WeakMap(),collapsedHelperWidgets=new WeakSet();
   let nextSourceID=0,nextRevision=0;
   const sourceID=node=>{if(!sourceIDs.has(node))sourceIDs.set(node,++nextSourceID);return sourceIDs.get(node);};
-  const answerCopy = (el) => {
+  const answerCopy = (el, preserveCollapsedCode = false) => {
     const copy=el.cloneNode?el.cloneNode(true):el;
     if(copy===el||!copy.querySelectorAll)return copy;
     const originals=[el,...el.querySelectorAll('*')],copies=[copy,...copy.querySelectorAll('*')];
+    const collapsedCodeNodes=new Set();
+    for(const widget of allElements('ms-code-block',el)){
+      const sources=collapsedHelperSources.get(widget);
+      if(!sources)continue;
+      for(const [source,raw] of sources){
+        if(codeText(source)!==raw)continue;
+        const path=[];
+        for(let node=source;node;node=node.parentElement||node.parent){
+          path.push(node);
+          if(node===widget)break;
+        }
+        if(path[path.length-1]!==widget)continue;
+        for(const node of path){
+          collapsedCodeNodes.add(node);
+          if(node===widget)break;
+        }
+      }
+    }
+    if(preserveCollapsedCode){
+      for(const widget of allElements('ms-code-block',el)){
+        if(!allElements('button',widget).some(button=>hasLabel(button,['expand code snippet'])))continue;
+        for(const code of allElements('pre, code, [role="code"]',widget)){
+          for(let node=code;node;node=node.parentElement||node.parent){
+            collapsedCodeNodes.add(node);
+            if(node===widget)break;
+          }
+        }
+      }
+    }
     for(let i=0;i<originals.length;i++)if(copies[i])copies[i].helperSourceNode=originals[i];
     for(let i=1;i<originals.length;i++){
       const source=originals[i];let style;
       try{style=document.defaultView?.getComputedStyle?.(source);}catch{}
-      if(copies[i])copies[i].helperBlockBoundary=/^(?:block|flex|grid|flow-root|table|list-item)/.test(style?.display||'');
+      if(copies[i])copies[i].helperBlockBoundary=/^(?:block|flex|grid|flow-root|table|list-item)/.test(collapsedHelperDisplays.get(source)??style?.display??'');
       const inline=attr(source,'style')||'';
-      if(source.hidden||attr(source,'hidden')!==null||attr(source,'aria-hidden')==='true'||style?.display==='none'||style?.visibility==='hidden'||/(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b/i.test(inline))copies[i]?.remove();
+      const hidden=source.hidden||attr(source,'hidden')!==null||attr(source,'aria-hidden')==='true'||style?.display==='none'||style?.visibility==='hidden'||/(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b/i.test(inline);
+      const collapsedCode=collapsedCodeNodes.has(source);
+      if(hidden&&!collapsedCode)copies[i]?.remove();
     }
     for(const node of copy.querySelectorAll('ms-thought-accordion, ms-thought-chunk, [data-thought="true"], [data-is-thought="true"], [data-role="thought"], [data-webcodex-context], button, [role="button"], mat-icon, svg, .material-icons, .material-symbols-outlined'))node.remove();
     for(const node of copy.querySelectorAll('details')){
@@ -114,15 +151,15 @@
     const value=node.childNodes?Array.from(node.childNodes,child=>modelText(child,excluded)).join(''):String(node.textContent||'');
     return blockTags.has(tag)||node.helperBlockBoundary?'\n'+value+'\n':value;
   };
-  const finalText = (el) => String(answerCopy(el).textContent||'').trim();
+  const finalText = (el) => String(answerCopy(el,true).textContent||'').trim();
   const chatMarkers = recognized => recognized.filter(el=>role(el)==='user').map(el=>{
     const body=userBody(el),chunks=allElements('ms-prompt-chunk.text-chunk',body);
     const raw=modelText(answerCopy(chunks[0]||body)).trimStart();
     const match=/^\[Helper session ([a-f0-9]{32})\]\r?\n/.exec(stripUserHeader(raw));
     return match?.[1];
   }).filter(Boolean);
-  const sourceBlocks = copy => {
-    if(!copy)return {blocks:[],remainder:''};
+  const sourceRoots = copy => {
+    if(!copy)return [];
     const candidates=allElements('pre, code, [role="code"], ms-code-block',copy);
     // PRE/CODE nesting is one source. Independent equal blocks retain their IDs.
     const roots=candidates.filter(node=>{
@@ -131,6 +168,11 @@
       }
       return String(node.tagName||node.tag||'').toLowerCase()!=='ms-code-block'||!allElements('pre, code, [role="code"]',node).length;
     });
+    return roots;
+  };
+  const sourceBlocks = copy => {
+    if(!copy)return {blocks:[],remainder:''};
+    const roots=sourceRoots(copy);
     return{blocks:roots.map(node=>({id:sourceID(node.helperSourceNode||node),text:codeText(node),kind:'code'})),remainder:modelText(copy,new Set(roots))};
   };
   const userBody = (el) => {
@@ -140,7 +182,7 @@
     return bodies.length===1?bodies[0]:el;
   };
   const resultSources = (el) => {
-    const copy=answerCopy(userBody(el));
+    const copy=answerCopy(userBody(el),true);
     for(const chunk of allElements('ms-prompt-chunk',copy))if(!chunk.matches?.('.text-chunk'))chunk.remove();
     for(const asset of allElements('ms-prompt-attachment, ms-file-preview, ms-attachment, .attachment, .file-preview, .file-chip, [data-file-name], [data-attachment-id]',copy))asset.remove();
     const code=sourceBlocks(copy).blocks.map(block=>block.text);
@@ -190,6 +232,7 @@
       return { conversationKey: '', generating: false, editorEmpty: false, supported: false, error: 'unsupported site', latestModel: null, latestUser: null };
     const candidateEditors = editors();
     const recognized = turns();
+    const editingReply = recognized.some(turn => ['user','model'].includes(role(turn)) && elements('textarea, [contenteditable="true"]',turn).some(el=>!el.disabled&&!el.readOnly&&attr(el,'aria-disabled')!=='true'));
     const roles = recognized.map(role);
     const unsupportedRole = recognized.some((el, i) => !roles[i] && roleMarkers(el).length > 0 || new Set(roleMarkers(el)).size > 1);
     const runs = submitButtons(), run = runs.length === 1 ? runs[0] : null;
@@ -247,7 +290,8 @@
     const userSources=user?resultSources(user):[];
     const latestUserOperationId = userSources.length===1?parseResultOperationId(userSources[0]):'';
     return {
-      conversationKey: conversationKey(), chatMarkers:chatMarkers(recognized), chatAddress:/^\/(?:app\/)?prompts\/(?!new_chat\b|new\b)[^/]+\/?$/.test(location.pathname||'')?location.pathname:'', generating, controlsPending,
+      conversationKey: conversationKey(), chatMarkers:chatMarkers(recognized), replyMarker:parsedModel?.kind==='frame'?parsedModel.marker:'', chatAddress:/^\/(?:app\/)?prompts\/(?!new_chat\b|new\b)[^/]+\/?$/.test(location.pathname||'')?location.pathname:'', generating, controlsPending,
+      editingReply,
       editorEmpty: candidateEditors.length === 1 && editorValue(candidateEditors[0]) === '',
       supported: !error, error, modelError, latestModel: model ? { element: model, sourceError, sourceText:modelSource, sourceBlocks:blocks, sourceRemainder:remainder, recoveryRules:parsedModel?.recoveryRules||[], ...(recoveredReplies.has(model)?{responseIdentityText:recoveredReplies.get(model).identityText}:{}), renderedSource, sourceRevision:responseRevisions.get(model).revision, text:parsedModel.kind==='call'?'```helper-call\n'+parsedModel.raw+'\n```':modelSource } : null,
       latestUser: user ? { element: user, text: latestUserText, operationId: latestUserOperationId } : null,
@@ -297,38 +341,42 @@
     if (editor.dispatchEvent && EventCtor) editor.dispatchEvent(new EventCtor('input', { bubbles: true, inputType: 'insertText', data: String(value) }));
     return editorValue(editor) === String(value);
   };
-  const stage = (value) => {
+  const stage = (value,{recover=false}={}) => {
     const state = inspect();
     const candidateEditors = editors();
-    if (!state.supported || (state.generating && !(state.controlsPending && !state.latestModel)) || candidateEditors.length !== 1) return false;
-    if (!state.editorEmpty) return ownedDraft?.value === String(value) && editorValue(candidateEditors[0]) === String(value);
+    if (!state.supported || state.editingReply || (state.generating && !(state.controlsPending && (recover || !state.latestModel))) || candidateEditors.length !== 1) return false;
+    if (!state.editorEmpty) {
+      if (editorValue(candidateEditors[0]) !== String(value) || !recover && ownedDraft?.value !== String(value)) return false;
+      ownedDraft = { value: String(value) };
+      return true;
+    }
     const staged = setEditorValue(candidateEditors[0],value);
     if (staged) ownedDraft = { value: String(value) };
     return staged;
   };
-  const prepareSessionMessage = marker => {
+  const prepareSessionMessage = (marker,{force=false}={}) => {
     if(!/^[a-f0-9]{32}$/.test(marker))return false;
     const state=inspect(),current=editors();
-    if(!state.supported||state.generating&&!state.controlsPending||current.length!==1)return false;
-    if(state.chatMarkers.includes(marker))return true;
+    if(!state.supported||state.editingReply||state.generating&&!state.controlsPending||current.length!==1)return false;
+    if(!force&&state.chatMarkers.includes(marker))return true;
     const value=editorValue(current[0]);
-    if(!value)return false;
-    if(ownedDraft?.value===value)return true;
+    if(!value&&!force)return false;
+    if(ownedDraft?.value===value)return !force;
     const prefix='[Helper session '+marker+']\nSession marker for this chat is '+marker+'. Follow the Helper system instructions.\n[/Helper session]\n\n';
     if(value.startsWith(prefix))return true;
     return setEditorValue(current[0],prefix+value);
   };
-  const submit = (value, isCurrent = () => true) => {
+  const submit = (value, isCurrent = () => true, {recover=false}={}) => {
     if (pendingSubmit) return Promise.resolve(false);
     const draft = String(value);
     if (!isCurrent()) return Promise.resolve(false);
     const editor = editors()[0];
     const ownsDraft = ownedDraft?.value === draft && editor && editorValue(editor) === draft;
-    if (!ownsDraft && !stage(draft)) return Promise.resolve(false);
+    if (!ownsDraft && !stage(draft,{recover})) return Promise.resolve(false);
     const promise = (async () => {
       for (let attempt = 0; attempt <= 60; attempt++) {
         const state = inspect(), currentEditors = editors();
-        if (!isCurrent() || !state.supported || (state.generating && !state.controlsPending) || currentEditors.length !== 1 || editorValue(currentEditors[0]) !== draft) return false;
+        if (!isCurrent() || !state.supported || state.editingReply || (state.generating && !state.controlsPending) || currentEditors.length !== 1 || editorValue(currentEditors[0]) !== draft) return false;
         const button = submitButton();
         if (button && !button.disabled && attr(button, 'aria-disabled') !== 'true') {
           if (!isCurrent() || ownedDraft?.value !== draft) return false;
@@ -407,8 +455,6 @@
   const stageSystemInstructions = async (value) => {
     systemStageError = '';
     const fail = reason => (systemStageError = reason, false);
-    const exactLabel = (el, choices) => [attr(el, 'aria-label'), attr(el, 'title'), text(el)]
-      .some(label => choices.includes(String(label || '').trim().toLowerCase()));
     const panels = () => {
       const known = elements('ms-system-instructions, [role="dialog"]').filter(panel =>
         panel.matches?.('ms-system-instructions') ||
@@ -430,8 +476,19 @@
     const alreadyOpen = panels();
     if (alreadyOpen.length === 1) panel = alreadyOpen[0];
     else if (!alreadyOpen.length) {
-      const openers = elements('button').filter(el => exactLabel(el, ['system instructions']));
-      if (openers.length !== 1) return fail(`System instructions opener not unique (count=${openers.length})`);
+      let openers = elements('button, [role="button"]').filter(el => hasLabel(el, ['system instructions']));
+      if(!openers.length){
+        const toggles=elements('button, [role="button"]').filter(el=>hasLabel(el,['toggle run settings panel']));
+        if(toggles.length===1){
+          toggles[0].click();
+          for(let attempt=0;attempt<60&&!openers.length;attempt++){
+            await wait();
+            openers=elements('button, [role="button"]').filter(el=>hasLabel(el,['system instructions']));
+          }
+        }
+      }
+      if (!openers.length) return fail('Не найдена кнопка System instructions. Откройте System instructions вручную в Run settings и повторите запуск сеанса (count=0)');
+      if (openers.length !== 1) return fail(`Найдено несколько кнопок System instructions. Оставьте открытым один редактор системных инструкций и повторите запуск сеанса (count=${openers.length})`);
       const before = new Set(alreadyOpen);
       openers[0].click();
       for (let attempt = 0; attempt <= 60; attempt++) {
@@ -536,7 +593,7 @@
     if (valueNow() !== next) { setValue(editor, current); return fail('System instruction write mismatch'); }
     if (!unchanged||titleChanged) {
       for (let attempt = 0; attempt <= 60; attempt++) {
-        const save = controls(panel).filter(el => exactLabel(el, ['save', 'done']));
+        const save = controls(panel).filter(el => hasLabel(el, ['save', 'done']));
         if (!save.length) break;
         if (save.length !== 1) { setValue(editor, current); return fail(`System Save ambiguous (count=${save.length})`); }
         if (!save[0].disabled && attr(save[0], 'aria-disabled') !== 'true') { save[0].click(); break; }
@@ -566,6 +623,131 @@
     });
   };
   const hasDelivery = (operationId, expectedText) => deliveryTurns(operationId, expectedText).length > 0;
+  const collapseModelSources = (model,force=false) => {
+    let accepted=protocol.analyzeReply(model.sourceText??model.text);
+    if(accepted.kind!=='call'&&accepted.kind!=='frame'){
+      const recovered=[];
+      for(let i=0;i<model.sourceBlocks.length;i++){
+        for(let j=i+1;j<model.sourceBlocks.length;j++){
+          const parsed=protocol.analyzeReply(model.sourceBlocks[i].text+'\n'+model.sourceBlocks[j].text);
+          if(parsed.kind==='call')recovered.push(parsed);
+        }
+      }
+      const unique=[...new Map(recovered.map(parsed=>[JSON.stringify([parsed.call,parsed.fileSource]),parsed])).values()];
+      if(unique.length!==1)return 0;
+      accepted=unique[0];
+    }
+    const matchesAccepted=raw=>{
+      const parsed=protocol.analyzeReply(raw);
+      if(accepted.kind==='call')return parsed.kind==='call'&&JSON.stringify(parsed.call)===JSON.stringify(accepted.call);
+      return parsed.kind==='frame'&&parsed.name===accepted.name&&parsed.marker===accepted.marker&&parsed.header===accepted.header&&parsed.body===accepted.body;
+    };
+    const matchingBlocks=model.sourceBlocks.filter(block=>matchesAccepted(block.text));
+    if(accepted.kind==='call'&&accepted.fileSource){
+      for(const metadata of model.sourceBlocks){
+        for(const file of model.sourceBlocks){
+          if(metadata.id===file.id||matchingBlocks.some(block=>block.id===metadata.id||block.id===file.id))continue;
+          const parsed=protocol.analyzeReply(metadata.text+'\n'+file.text);
+          if(parsed.kind==='call'&&parsed.fileSource===accepted.fileSource&&JSON.stringify(parsed.call)===JSON.stringify(accepted.call))matchingBlocks.push(metadata,file);
+        }
+      }
+    }
+    if(accepted.kind==='frame'){
+      const fileId=/^(?:[ \t]*content_source[ \t]*[:=][ \t]*([A-Za-z0-9_-]+)[ \t]*\r?\n)/m.exec(accepted.header)?.[1];
+      if(fileId){
+        const begin='<<<HELPER_FILE_BEGIN:'+fileId+'>>>',end='<<<HELPER_FILE_END:'+fileId+'>>>';
+        const fileBlocks=model.sourceBlocks.filter(block=>block.text.startsWith(begin+'\n')||block.text.startsWith(begin+'\r\n'));
+        for(const block of fileBlocks){
+          const raw=block.text,tail=raw.endsWith('\r\n')?raw.slice(0,-2):raw.endsWith('\n')?raw.slice(0,-1):raw;
+          if(tail.endsWith(end)&&!matchingBlocks.some(match=>match.id===block.id))matchingBlocks.push(block);
+        }
+      }
+    }
+    if(!matchingBlocks.length)return 0;
+    const matches=[];
+    for(const widget of allElements('ms-code-block',model.element)){
+      if(!force&&collapsedHelperWidgets.has(widget))continue;
+      const buttons=elements('button',widget).filter(button=>hasLabel(button,['collapse code snippet']));
+      if(buttons.length!==1)continue;
+      for(const root of sourceRoots(answerCopy(widget))){
+        const id=sourceID(root.helperSourceNode||root);
+        const raw=codeText(root);
+        if(!matchingBlocks.some(block=>block.id===id&&block.text===raw))continue;
+        matches.push({widget,button:buttons[0],source:root.helperSourceNode||root});
+      }
+    }
+    const widgets=new Map(matches.map(match=>[match.widget,match]));
+    if(widgets.size!==matchingBlocks.length)return 0;
+    for(const {widget,button,source} of widgets.values()){
+      collapsedHelperSources.set(widget,new Map([[source,codeText(source)]]));
+      for(let node=source;node;node=node.parentElement||node.parent){
+        try{
+          collapsedHelperDisplays.set(node,document.defaultView?.getComputedStyle?.(node)?.display||'');
+        }catch{
+          collapsedHelperDisplays.set(node,'');
+        }
+        if(node===widget)break;
+      }
+      try{
+        button.click();
+      }catch(error){
+        collapsedHelperSources.delete(widget);
+        throw error;
+      }
+      collapsedHelperWidgets.add(widget);
+    }
+    return widgets.size;
+  };
+  const collapseCall = expected => {
+    const model=inspect().latestModel;
+    if(!model||model.element!==expected?.element||model.sourceRevision!==expected.sourceRevision||model.text!==expected.text)return false;
+    return collapseModelSources(model)>0;
+  };
+  const collapsedDeliveries=new WeakSet();
+  const collapseDelivery = (operationId, expectedText) => {
+    let count=0;
+    for(const turn of deliveryTurns(operationId,expectedText)){
+      if(collapsedDeliveries.has(turn))continue;
+      const buttons=elements('button',turn).filter(button=>hasLabel(button,['collapse code snippet']));
+      if(buttons.length!==1)continue;
+      buttons[0].click();collapsedDeliveries.add(turn);count++;
+    }
+    return count;
+  };
+  const collapsedHistory=new WeakMap();
+  const collapseChat = ({force=false}={}) => {
+    const recognized=turns();
+    const resultFor=turn=>{
+      if(!turn||role(turn)!=='user')return null;
+      const sources=resultSources(turn);
+      if(sources.length!==1)return null;
+      try{
+        const result=JSON.parse(stripUserHeader(sources[0]));
+        return protocol.isResult(result)&&typeof result.operation_id==='string'&&result.operation_id?result:null;
+      }catch{return null;}
+    };
+    const helperChat=force&&(chatMarkers(recognized).length>0||recognized.some(turn=>resultFor(turn)));
+    let count=0;
+    for(let index=0;index<recognized.length;index++){
+      const turn=recognized[index];
+      const following=role(turn)==='model'?recognized[index+1]:null;
+      const buttons=allElements('button',turn).map(button=>[sourceID(button),attr(button,'aria-label'),attr(button,'title'),button.textContent]);
+      const signature=JSON.stringify([role(turn),turn.textContent||'',following?.textContent||'',allElements('ms-code-block',turn).map(sourceID),buttons]);
+      if(!force&&collapsedHistory.get(turn)===signature)continue;
+      const result=resultFor(turn);
+      if(result){
+        if(force)collapsedDeliveries.delete(turn);
+        count+=collapseDelivery(result.operation_id);
+      }else if(role(turn)==='model'&&(force?helperChat:!!resultFor(recognized[index+1]))){
+        const {blocks}=sourceBlocks(answerCopy(turn));
+        for(const block of blocks){
+          count+=collapseModelSources({element:turn,sourceBlocks:blocks,sourceText:block.text},force);
+        }
+      }
+      collapsedHistory.set(turn,signature);
+    }
+    return count;
+  };
   const hiddenByUs = new Map();
   const cleanup = ({ turns: requestedTurns = [], operationIds = [] } = {}) => {
     const recognized = new Set(turns());
@@ -591,6 +773,50 @@
     }
     hiddenByUs.clear();
   };
+  let chatWidth=0;
+  const widthOverrides=new Map();
+  const widthProperties=['width','max-width','box-sizing','margin-left','margin-right'];
+  const setChatWidth = (value,refresh=false) => {
+    if(!Number.isInteger(value)||value<0||value>100||value%10!==0)return false;
+    const changed=value!==chatWidth||refresh;
+    for(const [node,properties] of widthOverrides){
+      if(!changed&&node.isConnected!==false)continue;
+      for(const [name,original,priority] of properties){
+        if(original)node.style.setProperty(name,original,priority);
+        else node.style.removeProperty(name);
+      }
+      widthOverrides.delete(node);
+    }
+    chatWidth=value;
+    if(value===0)return true;
+    const candidates=new Set(),visited=new Set();
+    const anchors=[...turns(),...allElements('ms-prompt-input-wrapper'),...editors()];
+    for(const anchor of anchors){
+      for(let node=anchor;node&&node!==document.body&&node!==document.documentElement;node=node.parentElement||node.parent){
+        if(visited.has(node))break;
+        visited.add(node);
+        if(widthOverrides.has(node)||!node.style||!node.getBoundingClientRect)continue;
+        const parent=node.parentElement||node.parent;
+        if(!parent?.getBoundingClientRect)continue;
+        const style=document.defaultView?.getComputedStyle?.(node);
+        if(!style)continue;
+        const box=node.getBoundingClientRect(),outer=parent.getBoundingClientRect();
+        const left=box.left-outer.left,right=outer.right-box.right;
+        const centered=left>2&&right>2&&Math.abs(left-right)<2;
+        const limited=style.maxWidth&&style.maxWidth!=='none'&&style.maxWidth!=='100%';
+        if(box.width>0&&(limited||centered))candidates.add(node);
+      }
+    }
+    const widths=[...candidates].map(node=>[node,node.getBoundingClientRect().width]);
+    for(const [node,width] of widths){
+      widthOverrides.set(node,widthProperties.map(name=>[name,node.style.getPropertyValue(name),node.style.getPropertyPriority(name)]));
+      const expanded=value===100?'100%':`calc(${width*(1-value/100)}px + ${value}%)`;
+      for(const name of ['width','max-width'])node.style.setProperty(name,expanded,'important');
+      node.style.setProperty('box-sizing','border-box','important');
+      for(const name of ['margin-left','margin-right'])node.style.setProperty(name,'auto','important');
+    }
+    return true;
+  };
   const annotateContext = () => {
     const recognized = turns();
     const chars = recognized.reduce((total, turn) => {
@@ -613,5 +839,5 @@
     return count;
   };
   if(document.querySelectorAll?.('[data-webcodex-context]').length)annotateContext();
-  return { inspect, recoverReplySource, stage, submit, isSubmitControl, prepareSessionMessage, attachFiles, ownsDraft, releaseFiles, stageSystemInstructions, getSystemStageError: () => systemStageError, hasDelivery, deliveryTurns, cleanup, restoreCleanup, annotateContext };
+  return { inspect, recoverReplySource, stage, submit, isSubmitControl, prepareSessionMessage, attachFiles, ownsDraft, releaseFiles, stageSystemInstructions, getSystemStageError: () => systemStageError, hasDelivery, deliveryTurns, collapseDelivery, collapseCall, collapseChat, setChatWidth, cleanup, restoreCleanup, annotateContext };
 });

@@ -142,6 +142,9 @@ func formatFileDiff(before, after string) string {
 }
 
 func (e *nativeExecutor) logFileChange(path string, before, after []byte, created bool) {
+	if e.source == "local" && !e.verbose {
+		return
+	}
 	action := "Сохранён файл"
 	if created {
 		action = "Создан файл (ранее не существовал)"

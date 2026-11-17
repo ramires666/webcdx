@@ -76,6 +76,7 @@ test('one compiled agent handles local and Gate requests separately and survives
   assert.equal((await localCall('read_file', { path: path.join(localRoot, 'fixture.txt') })).isError, false);
   await waitFor(() => connections >= 2);
   assert.equal((await gateCall('exec_command', gateArgs)).structuredContent.session_id, gateCommand.structuredContent.session_id);
-  assert.match(logs, /\[source=local\].*tool="read_file"/); assert.match(logs, /\[source=gate\].*tool="read_file"/);
+  assert.match(logs, /read_file — Читаю файл/);assert.equal(logs.includes('[source=local]'),false);
+  assert.match(logs, /\[source=gate\].*tool="read_file"/);
   assert.ok(logs.includes('agent version='+agentVersion+' gate version=fixture-gate-version'));
 });

@@ -73,6 +73,11 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   }
   userChunk.append(paragraph);user.append(userHeader,userChunk);
   if(adapter.inspect().chatMarkers.join(',')!==liveMarker)throw Error('rendered user header or BR hid the session marker');cases++;
+  const manualEditor=document.querySelector('textarea');manualEditor.value='My next request';
+  if(!adapter.prepareSessionMessage(liveMarker,{force:true})||!manualEditor.value.startsWith('[Helper session '+liveMarker+']')||!manualEditor.value.endsWith('My next request'))throw Error('manual marker did not preserve the request in an existing chat');
+  const manualDraft=manualEditor.value;
+  if(!adapter.prepareSessionMessage(liveMarker,{force:true})||manualEditor.value!==manualDraft)throw Error('manual marker was duplicated');
+  manualEditor.value='';cases++;
   for(const tag of ['pre','code','div'])for(const br of [false,true])for(const body of ['','line\\n','line\\r\\n']){
     answer.replaceChildren();
     const source=document.createElement(tag);if(tag==='div')source.setAttribute('role','code');
@@ -160,6 +165,22 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   systemBody.append(systemHeading,systemEditor);systemDialog.append(closeSystem,systemBody);document.body.append(systemDialog);
   if(!await adapter.stageSystemInstructions('Helper test rules')||systemDialog.isConnected||!systemEditor.value.includes('Preserve my rules.')||!systemEditor.value.includes('Helper test rules'))throw Error('system instructions dialog stayed open or lost user rules');cases++;
   }
+  for(const roleButton of [false,true]){
+    const opener=document.createElement(roleButton?'div':'button');
+    if(roleButton)opener.setAttribute('role','button');
+    const icon=document.createElement('mat-icon');icon.textContent='edit_note';
+    const caption=document.createElement('span');caption.textContent='System instructions';
+    const arrow=document.createElement('span');arrow.className='material-symbols-outlined';arrow.textContent='chevron_right';
+    opener.append(icon,caption,arrow);document.body.append(opener);
+    const systemDialog=document.createElement('ms-system-instructions'),systemEditor=document.createElement('textarea');
+    systemEditor.placeholder='Optional tone and style instructions for the model';systemEditor.value='Keep personal rules.';
+    const close=document.createElement('button');close.setAttribute('aria-label','Close');close.addEventListener('click',()=>systemDialog.remove());
+    systemDialog.append(systemEditor,close);opener.addEventListener('click',()=>document.body.append(systemDialog));
+    const draft=document.querySelector('ms-prompt-input-wrapper textarea').value;
+    if(!await adapter.stageSystemInstructions('Helper icon test')||systemDialog.isConnected||!systemEditor.value.includes('Keep personal rules.')||!systemEditor.value.includes('Helper icon test'))throw Error('system instructions opener with icons was not recognized: '+adapter.getSystemStageError());
+    if(document.querySelector('ms-prompt-input-wrapper textarea').value!==draft)throw Error('system instruction staging changed the chat draft');
+    opener.remove();cases++;
+  }
   const restoredUser=document.createElement('ms-chat-turn');restoredUser.setAttribute('data-turn-role','User');
   const fileCard=document.createElement('ms-prompt-chunk');fileCard.className='file-chunk';fileCard.textContent='Generated File [November 14].plain';
   const filePreview=document.createElement('pre');filePreview.textContent=JSON.stringify({type:'helper-result',operation_id:'file-preview'});fileCard.append(filePreview);
@@ -171,6 +192,22 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   textChunk.append(resultCode.cloneNode(true));
   if(adapter.inspect().latestUser.operationId||adapter.hasDelivery('restored-result',expectedResult))throw Error('duplicate user control sources were accepted');cases++;
   restoredUser.remove();
+  const collapsedUser=document.createElement('ms-chat-turn');collapsedUser.setAttribute('data-turn-role','User');
+  const collapsedWidget=document.createElement('ms-code-block'),nativeButton=document.createElement('button'),collapsedRegion=document.createElement('div');
+  const collapsedExpected=JSON.stringify({type:'helper-result',operation_id:'collapsed-result',result:{ok:true}});
+  nativeButton.setAttribute('aria-label','Collapse code snippet');
+  const collapsedSource=document.createElement('pre');collapsedSource.textContent=collapsedExpected;collapsedRegion.append(collapsedSource);
+  const unrelatedHidden=document.createElement('span');unrelatedHidden.style.display='none';unrelatedHidden.textContent='unrelated hidden text';
+  collapsedWidget.append(nativeButton,collapsedRegion,unrelatedHidden);collapsedUser.append(collapsedWidget);document.body.append(collapsedUser);
+  let nativeClicks=0;nativeButton.addEventListener('click',()=>{nativeClicks++;if(nativeButton.getAttribute('aria-label')==='Collapse code snippet'){nativeButton.setAttribute('aria-label','Expand code snippet');collapsedRegion.setAttribute('aria-hidden','true');collapsedRegion.style.display='none';}else{nativeButton.setAttribute('aria-label','Collapse code snippet');collapsedRegion.removeAttribute('aria-hidden');collapsedRegion.style.display='';}});
+  if(adapter.inspect().latestUser.operationId!=='collapsed-result'||adapter.collapseDelivery('collapsed-result',collapsedExpected)!==1)throw Error('native result did not collapse after exact delivery proof');
+  let collapsedSnapshot=adapter.inspect();
+  if(collapsedSnapshot.latestUser.operationId!=='collapsed-result'||!collapsedSnapshot.latestUser.text.includes('collapsed-result')||!adapter.hasDelivery('collapsed-result',collapsedExpected)||collapsedSnapshot.latestUser.text.includes('unrelated hidden text'))throw Error('native collapse hid result proof or preserved unrelated hidden text');
+  nativeButton.click();
+  if(adapter.collapseDelivery('collapsed-result',collapsedExpected)!==0||nativeClicks!==2||nativeButton.getAttribute('aria-label')!=='Collapse code snippet')throw Error('manual re-expansion was automatically collapsed again');
+  collapsedSnapshot=adapter.inspect();
+  if(collapsedSnapshot.latestUser.operationId!=='collapsed-result'||!adapter.hasDelivery('collapsed-result',collapsedExpected))throw Error('manual re-expansion changed result proof');cases++;
+  collapsedUser.remove();
   for(const width of [360,768,1200]){
     document.body.style.width=width+'px';document.body.style.maxWidth='100%';
     answer.replaceChildren();answer.style.display='flex';
@@ -181,6 +218,67 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
     if(!note||note.previousElementSibling!==answer||answer.innerHTML!==original||Math.abs(before.width-after.width)>0.1||note.getBoundingClientRect().top<answer.getBoundingClientRect().bottom||note.scrollWidth>note.clientWidth)throw Error('context note changed the answer layout at width '+width);
     adapter.annotateContext();if(document.querySelectorAll('[data-webcodex-context]').length!==1)throw Error('context note duplicated');cases++;
   }
+  answer.replaceChildren();
+  const dialogue=document.createElement('p');dialogue.textContent='I will check this carefully.';
+  const helperWidget=document.createElement('ms-code-block'),helperButton=document.createElement('button'),helperRegion=document.createElement('div'),helperCode=document.createElement('pre');
+  const helperMarker='b'.repeat(32),helperRaw='HELPER_'+helperMarker+' read_file\\npath: notes.txt\\nEND_'+helperMarker;
+  helperButton.setAttribute('aria-label','Collapse code snippet');helperCode.textContent=helperRaw;helperRegion.append(helperCode);helperWidget.append(helperButton,helperRegion);
+  const exampleWidget=document.createElement('ms-code-block'),exampleButton=document.createElement('button'),exampleCode=document.createElement('pre');
+  exampleButton.setAttribute('aria-label','Collapse code snippet');exampleCode.textContent='Example only: '+helperRaw;exampleWidget.append(exampleButton,exampleCode);
+  answer.append(dialogue,helperWidget,exampleWidget);
+  helperButton.addEventListener('click',()=>{helperButton.setAttribute('aria-label','Expand code snippet');helperRegion.setAttribute('aria-hidden','true');helperRegion.style.display='none';});
+  const helperBefore=adapter.inspect().latestModel;
+  if(!adapter.collapseCall(helperBefore))throw Error('accepted Helper frame did not collapse');
+  const helperAfter=adapter.inspect().latestModel;
+  if(helperAfter.sourceRevision!==helperBefore.sourceRevision||helperAfter.text!==helperBefore.text||helperAfter.renderedSource!==helperBefore.renderedSource||!helperAfter.sourceBlocks.some(block=>block.text===helperRaw)||exampleButton.getAttribute('aria-label')!=='Collapse code snippet')throw Error('Helper collapse changed identity or touched an unrelated example');
+  if(adapter.collapseCall(helperBefore))throw Error('Helper source was clicked twice after native collapse');
+  helperButton.click();helperButton.setAttribute('aria-label','Collapse code snippet');helperRegion.removeAttribute('aria-hidden');helperRegion.style.display='';
+  if(adapter.collapseCall(helperBefore)||helperButton.getAttribute('aria-label')!=='Collapse code snippet')throw Error('manual Helper expansion was automatically collapsed');cases++;
+  const historyResult=document.createElement('ms-chat-turn');historyResult.setAttribute('data-turn-role','User');
+  const historyWidget=document.createElement('ms-code-block'),historyButton=document.createElement('button'),historyRegion=document.createElement('div');
+  historyButton.setAttribute('aria-label','Collapse code snippet');
+  const historyCode=document.createElement('pre');historyCode.textContent=JSON.stringify({type:'helper-result',operation_id:'saved-history',name:'read_file',result:'saved bytes'});
+  historyRegion.append(historyCode);historyWidget.append(historyButton,historyRegion);historyResult.append(historyWidget);document.body.append(historyResult);
+  historyButton.addEventListener('click',()=>{historyButton.setAttribute('aria-label','Expand code snippet');historyRegion.style.display='none';});
+  const refreshedAdapter=WebCodexStudio.createAdapter(document,{hostname:'aistudio.google.com'});
+  if(refreshedAdapter.collapseChat()!==2||helperButton.getAttribute('aria-label')!=='Expand code snippet'||historyButton.getAttribute('aria-label')!=='Expand code snippet')throw Error('saved chat did not fold in both directions after reload');
+  if(refreshedAdapter.inspect().latestUser.operationId!=='saved-history'||exampleButton.getAttribute('aria-label')!=='Collapse code snippet')throw Error('history folding changed delivery proof or ordinary code');
+  helperButton.setAttribute('aria-label','Collapse code snippet');helperRegion.removeAttribute('aria-hidden');helperRegion.style.display='';
+  historyButton.setAttribute('aria-label','Collapse code snippet');historyRegion.style.display='';
+  if(refreshedAdapter.collapseChat()!==0||refreshedAdapter.collapseChat({force:true})!==2)throw Error('manual history folding failed or automatic scan undid manual expansion');cases++;
+  historyResult.remove();
+  const widthPane=document.createElement('div');widthPane.style.width='1000px';
+  const widthTurn=document.createElement('ms-chat-turn');widthTurn.setAttribute('data-turn-role','Model');widthTurn.style.cssText='display:block;width:100%;max-width:600px;margin:0 auto';widthTurn.textContent='Width geometry';
+  const widthComposer=document.createElement('ms-prompt-input-wrapper');widthComposer.style.cssText='display:block;width:100%;max-width:600px;margin:0 auto';
+  const innerComposer=document.createElement('div');innerComposer.style.cssText='max-width:500px;width:100%;margin:0 auto';
+  const innerEditor=document.createElement('textarea');innerComposer.append(innerEditor);widthComposer.append(innerComposer);
+  widthPane.append(widthTurn,widthComposer);document.body.append(widthPane);
+  for(const value of [0,10,50,100]){
+    adapter.setChatWidth(value);
+    const expected=600+4*value;
+    if(Math.abs(widthTurn.getBoundingClientRect().width-expected)>1||Math.abs(widthComposer.getBoundingClientRect().width-expected)>1)throw Error('chat width geometry failed at '+value);
+  }
+  if(Math.abs(innerComposer.getBoundingClientRect().width-1000)>1)throw Error('inner composer width remained constrained at Max');
+  widthPane.style.width='320px';adapter.setChatWidth(100,true);
+  if(widthTurn.getBoundingClientRect().width>321||widthComposer.getBoundingClientRect().width>321)throw Error('chat width overflowed a narrow pane');
+  adapter.setChatWidth(0);widthPane.style.width='1000px';
+  if(Math.abs(widthTurn.getBoundingClientRect().width-600)>1||widthTurn.style.maxWidth!=='600px'||widthTurn.textContent!=='Width geometry')throw Error('default chat width or text was not restored');
+  widthPane.remove();cases++;
+  const rawInputPayload=(String.fromCharCode(34,39,92,10)+'Unicode Привет raw document').repeat(2000);
+  const rawInputMarker='c'.repeat(32);
+  const rawInputFrame=['HELPER_'+rawInputMarker+' exec_command','cwd: W:/work','argv: ["python","-"]','---',rawInputPayload,'END_'+rawInputMarker].join(String.fromCharCode(10));
+  const rawInputPre=document.createElement('pre');rawInputPre.textContent=rawInputFrame;answer.replaceChildren(rawInputPre);
+  const rawInputTools=[{name:'exec_command',inputSchema:{type:'object',properties:{cwd:{type:'string'},argv:{type:'array',items:{type:'string'}},stdin:{type:'string'}},required:['cwd','argv'],additionalProperties:false}}];
+  const rawInputModel=adapter.inspect().latestModel;
+  const rawInputCall=WebCodexProtocol.parseCall(rawInputModel.text,null,rawInputTools,rawInputModel);
+  if(rawInputCall.arguments.stdin!==rawInputPayload||rawInputCall.arguments.argv.join('|')!=='python|-')throw Error('large raw stdin source was changed in rendered DOM');cases++;
+  const editingWrapper=document.createElement('ms-autosize-textarea'),editingSource=document.createElement('textarea');editingSource.value=rawInputFrame;editingWrapper.append(editingSource);answer.append(editingWrapper);
+  const editingDraft=document.querySelector('ms-prompt-input-wrapper textarea').value;
+  const editingSnapshot=adapter.inspect();
+  if(!editingSnapshot.supported||!editingSnapshot.editingReply||editingSnapshot.generating||adapter.stage('must wait'))throw Error('reply editor was confused with composer or generation');
+  if(document.querySelector('ms-prompt-input-wrapper textarea').value!==editingDraft)throw Error('reply editing changed composer draft');
+  editingSource.hidden=true;if(adapter.inspect().editingReply)throw Error('hidden reply editor blocked conversation');
+  editingWrapper.remove();if(adapter.inspect().editingReply)throw Error('closed reply editor blocked conversation');cases++;
   const ownDraft=document.querySelector('textarea').value;let preserved=false;
   document.addEventListener('click',event=>{if(event.target===run){adapter.prepareSessionMessage(liveMarker);preserved=document.querySelector('textarea').value===ownDraft;}},true);
   if(!await adapter.submit(ownDraft)||!preserved)throw Error('Run capture modified the owned result');cases++;
@@ -188,6 +286,9 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
 } catch(error) {document.getElementById('check').textContent='FAIL:'+error.message;}
 })();
 </script>`,'utf8');
+  const inline=/<script>([\s\S]*?)<\/script>/.exec(fs.readFileSync(fixture,'utf8'))?.[1];
+  assert.ok(inline,'browser fixture script is required');
+  new (require('node:vm').Script)(inline);
   const child=spawn(executable,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--virtual-time-budget=3000','--user-data-dir='+path.join(temp,'profile'),'--dump-dom',pathToFileURL(fixture).href],{windowsHide:true,stdio:['ignore','pipe','ignore']});
   t.after(()=>{
     if(child.exitCode===null&&child.signalCode===null)child.kill();
@@ -198,5 +299,5 @@ test('real Chrome DOM preserves raw attachments across rendered code widget boun
   const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});
   assert.equal(code,0);
   const result=/<output id="check">([^<]*)<\/output>/.exec(output)?.[1];
-  assert.equal(result,'PASS:97');t.diagnostic('97 scenarios passed in installed Chrome, including context-note geometry, exact edit-source recovery, delivery sources, owned Run capture, upload resumption, scoped acknowledgement and nested dialog close');
+  assert.equal(result,'PASS:106',output.slice(-3000));t.diagnostic('106 scenarios passed in installed Chrome, including manual marker reinsertion, system instruction buttons with icons and ARIA roles, accepted Helper-call collapse with stable source identity and manual re-expansion, collapsed-result proof retention, context-note geometry, exact edit-source recovery, delivery sources, owned Run capture, upload resumption, scoped acknowledgement and nested dialog close');
 });

@@ -238,7 +238,7 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 			e.logf("[session=%s] ARGV %q cwd=%q", id, cmd.Args, cwd)
 		}
 	}
-	if !e.verbose {
+	if !e.verbose && e.source != "local" {
 		label := command
 		if !hasCommand {
 			label = strings.Join(cmd.Args, " ")
@@ -248,7 +248,7 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 	if err := cmd.Start(); err != nil {
 		if e.verbose {
 			e.logf("[session=%s] START_FAILED error=%q", id, err.Error())
-		} else {
+		} else if e.source != "local" {
 			e.logf("⚠ Не удалось запустить команду: %s", compactString(err.Error(), 180))
 		}
 		stdoutFile.Close()
@@ -362,13 +362,15 @@ func (e *nativeExecutor) waitProcess(session *processSession) {
 	session.finishedAt = time.Now().UTC()
 	if e.verbose {
 		e.logf("[session=%s] EXIT status=%s exit_code=%v elapsed=%s error=%v", session.id, session.status, exitCodeValue(session.exitCode), session.finishedAt.Sub(session.startedAt).Round(time.Millisecond), err)
+	} else if e.source == "local" {
+		e.logf("exec_command — %s", commandOutcome(session.status, session.exitCode))
 	} else {
 		e.logf("%s — %s", commandOutcome(session.status, session.exitCode), commandLabel(session))
 	}
 	e.mu.Unlock()
 	_ = e.persistSession(session)
 	e.commandEvent(session, "finished")
-	if !e.verbose && err != nil {
+	if !e.verbose && e.source != "local" && err != nil {
 		if file, openErr := os.Open(session.stderrPath); openErr == nil {
 			detail, _ := io.ReadAll(io.LimitReader(file, 1024))
 			file.Close()
@@ -506,7 +508,7 @@ func (e *nativeExecutor) stopSession(id, status string) error {
 	session.status = status
 	if e.verbose {
 		e.logf("[session=%s] STOP requested status=%s pid=%d", id, status, pid)
-	} else {
+	} else if e.source != "local" {
 		e.logf("Останавливаю команду: %s", commandLabel(session))
 	}
 	e.mu.Unlock()

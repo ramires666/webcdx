@@ -228,7 +228,7 @@ func (e *nativeExecutor) call(ctx context.Context, request json.RawMessage) (res
 	if err := json.Unmarshal(request, &message); err != nil {
 		return rpcError(nil, -32700, "invalid JSON"), nil
 	}
-	if e.source != "" && message.Method == "tools/call" {
+	if e.source != "" && (e.source != "local" || e.verbose) && message.Method == "tools/call" {
 		var tool struct {
 			Name string `json:"name"`
 		}

@@ -134,9 +134,7 @@ func TestLocalAndGateKeepRootsCommandsAndRetryKeysSeparate(t *testing.T) {
 		}
 		restored.Close()
 	}
-	for _, source := range []string{"local", "gate"} {
-		if !strings.Contains(console.String(), "[source="+source+"] request") || !strings.Contains(console.String(), "[source="+source+"] ▶ Команда") {
-			t.Fatalf("%s console source missing: %s", source, console.String())
-		}
+	if strings.Contains(console.String(), "[source=local]") || !strings.Contains(console.String(), "[source=gate] request") || !strings.Contains(console.String(), "[source=gate] ▶ Команда") {
+		t.Fatalf("local console must stay concise while Gate keeps its source: %s", console.String())
 	}
 }

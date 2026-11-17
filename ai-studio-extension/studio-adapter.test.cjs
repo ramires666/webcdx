@@ -43,6 +43,30 @@ test('session context stays isolated across tabs and preserves extension-owned r
   assert.equal(result.editor.value,'```helper-result\n{}\n```');
 });
 
+test('manual session context can be reinserted into an empty draft or an existing request without sending',()=>{
+  const marker='a'.repeat(32),state=setup({empty:true});
+  state.root.add(new Node('ms-chat-turn',{'data-turn-role':'User'},'[Helper session '+marker+']\nEarlier request'));
+  for(const request of ['', '  Повтори задачу\r\nбез изменений  ']){
+    state.editor.value=request;
+    assert.equal(state.adapter.prepareSessionMessage(marker,{force:true}),true);
+    const staged=state.editor.value;
+    assert.ok(staged.startsWith('[Helper session '+marker+']\n'));
+    assert.ok(staged.endsWith('\n\n'+request));
+    assert.equal(state.adapter.prepareSessionMessage(marker,{force:true}),true);
+    assert.equal(state.editor.value,staged);
+  }
+  assert.equal(state.run.clicked,undefined);
+  const owned=setup({empty:true});owned.adapter.stage('```helper-result\n{}\n```');
+  assert.equal(owned.adapter.prepareSessionMessage(marker,{force:true}),false);
+  assert.equal(owned.editor.value,'```helper-result\n{}\n```');
+  for(const options of [{generating:true},{extraEditors:1},{hostname:'example.com'}]){
+    const blocked=setup({...options,draft:'keep'});
+    assert.equal(blocked.adapter.prepareSessionMessage(marker,{force:true}),false);
+    assert.equal(blocked.editor.value,'keep');
+  }
+  assert.equal(state.adapter.prepareSessionMessage('invalid',{force:true}),false);
+});
+
 test('source blocks preserve exact raw bytes, provenance and stable revisions',()=>{
   const state=setup();state.chunk.remove();
   const widget=state.model.children[0].add(new Node('ms-code-block'));
@@ -696,6 +720,108 @@ test('confirms only an exact result envelope in the submitted user turn', () => 
   assert.equal(setup().adapter.hasDelivery('op-1'), true, 'legacy exact marker remains supported');
 });
 
+test('collapses only a proven result once and keeps its operation ID and text readable', () => {
+  const payload='{"type":"helper-result","operation_id":"collapse-me","result":42}';
+  const state=setup();state.user.children=[];state.user._text='';
+  const role=state.user.add(new Node('div',{'data-turn-role':'User'}));
+  const block=role.add(new Node('ms-code-block'));
+  const collapse=block.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  const region=block.add(new Node('div'));
+  const code=region.add(new Node('pre')).add(new Node('code',{},payload));
+  const hiddenSibling=block.add(new Node('div',{style:'display:none'},'unrelated hidden source'));
+  collapse.click=()=>{collapse.attrs['aria-label']='Expand code snippet';region.attrs.style='display:none';region.attrs['aria-hidden']='true';};
+  const unrelated=state.model.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  const expected=JSON.stringify({type:'helper-result',operation_id:'collapse-me',result:42});
+  assert.equal(state.adapter.collapseDelivery('wrong-id',expected),0);
+  assert.equal(collapse.clicked,undefined);
+  assert.equal(state.adapter.collapseDelivery('collapse-me',expected),1);
+  assert.equal(state.adapter.collapseDelivery('collapse-me',expected),0);
+  const snapshot=state.adapter.inspect();
+  assert.equal(snapshot.latestUser.operationId,'collapse-me');
+  assert.match(snapshot.latestUser.text,/collapse-me/);
+  assert.doesNotMatch(snapshot.latestUser.text,/unrelated hidden source/);
+  assert.equal(hiddenSibling.attrs.style,'display:none');
+  assert.equal(state.adapter.hasDelivery('collapse-me',expected),true);
+  assert.equal(unrelated.clicked,undefined);
+});
+
+test('a result acknowledged after an earlier poll can be collapsed then',()=>{
+  const state=setup();
+  assert.equal(state.adapter.collapseDelivery('late-result'),0);
+  state.user.children=[];state.user._text='';
+  const role=state.user.add(new Node('div',{'data-turn-role':'User'}));
+  const block=role.add(new Node('ms-code-block'));
+  const button=block.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  const payload='{"type":"helper-result","operation_id":"late-result"}';
+  block.add(new Node('code',{},payload));
+  button.click=()=>{button.attrs['aria-label']='Expand code snippet';};
+  assert.equal(state.adapter.collapseDelivery('late-result'),1);
+  assert.equal(state.adapter.hasDelivery('late-result'),true);
+});
+
+test('collapses only the exact accepted Helper source and keeps parsing stable after collapse',()=>{
+  const state=setup();state.chunk.remove();state.model.children=[];
+  const body=state.model.add(new Node('div',{class:'chat-turn-container model'}));
+  body.add(new Node('p',{},'I will read that file.'));
+  const widget=body.add(new Node('ms-code-block'));
+  const button=widget.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  const region=widget.add(new Node('div'));
+  const marker='a'.repeat(32),raw='HELPER_'+marker+' read_file\npath: notes.txt\nEND_'+marker;
+  const code=region.add(new Node('pre',{},raw));
+  const example=body.add(new Node('ms-code-block'));
+  const exampleButton=example.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  example.add(new Node('pre',{},'Example only: HELPER_'+ 'a'.repeat(32)+' read_file'));
+  button.click=()=>{button.clicked=true;button.attrs['aria-label']='Expand code snippet';region.attrs.style='display:none';region.attrs['aria-hidden']='true';};
+  const model=state.adapter.inspect().latestModel;
+  assert.equal(model.sourceBlocks.length,2);
+  assert.equal(state.adapter.collapseCall({...model,element:{}}),false,'model identity must match');
+  const exact={...model,element:model.element};
+  assert.equal(state.adapter.collapseCall(exact),true);
+  assert.equal(button.clicked,true);
+  assert.equal(exampleButton.clicked,undefined);
+  const after=state.adapter.inspect().latestModel;
+  assert.equal(after.sourceRevision,model.sourceRevision);
+  assert.equal(after.text,model.text);
+  assert.ok(after.sourceBlocks.some(block=>block.text===code.textContent));
+  assert.equal(state.adapter.collapseCall(exact),false,'already collapsed source must not be clicked again');
+  button.attrs['aria-label']='Collapse code snippet';delete region.attrs.style;delete region.attrs['aria-hidden'];
+  assert.equal(state.adapter.collapseCall(exact),false,'manual expansion must remain expanded');
+});
+
+test('ordinary model prose with no Helper call is never collapsed',()=>{
+  const state=setup();
+  const button=state.model.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  const model=state.adapter.inspect().latestModel;
+  assert.equal(state.adapter.collapseCall(model),false);
+  assert.equal(button.clicked,undefined);
+});
+
+test('collapses paired legacy metadata and Helper-file source blocks from the accepted call',()=>{
+  const state=setup();state.chunk.remove();state.model.children=[];
+  const body=state.model.add(new Node('div',{class:'chat-turn-container model'}));
+  const metadataWidget=body.add(new Node('ms-code-block'));
+  const metadataButton=metadataWidget.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  const metadataRegion=metadataWidget.add(new Node('div'));
+  const metadata=JSON.stringify({v:1,name:'write_file',arguments:{path:'notes.txt',if_absent:true},content_source:'file_1'});
+  metadataRegion.add(new Node('pre',{},metadata));
+  const fileWidget=body.add(new Node('ms-code-block'));
+  const fileButton=fileWidget.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  const fileRegion=fileWidget.add(new Node('div'));
+  const fileRaw='<<<HELPER_FILE_BEGIN:file_1>>>\nfile bytes\n<<<HELPER_FILE_END:file_1>>>';
+  fileRegion.add(new Node('pre',{},fileRaw));
+  metadataButton.click=()=>{metadataButton.attrs['aria-label']='Expand code snippet';metadataRegion.attrs.style='display:none';};
+  fileButton.click=()=>{fileButton.attrs['aria-label']='Expand code snippet';fileRegion.attrs.style='display:none';};
+  const model=state.adapter.inspect().latestModel;
+  const combined=require('./protocol.js').analyzeReply(metadata+'\n'+fileRaw);
+  assert.equal(combined.kind,'call',JSON.stringify(combined));
+  assert.equal(state.adapter.collapseCall(model),true,JSON.stringify({text:model.sourceText,blocks:model.sourceBlocks.map(block=>block.text)}));
+  assert.equal(metadataButton.attrs['aria-label'],'Expand code snippet');
+  assert.equal(fileButton.attrs['aria-label'],'Expand code snippet');
+  const after=state.adapter.inspect().latestModel;
+  assert.equal(after.text,model.text);
+  assert.equal(after.sourceRevision,model.sourceRevision);
+});
+
 test('proves legacy Markdown-rendered delivery against the exact expected envelope', () => {
   const payload = JSON.stringify({
     type: 'helper-result', v: 1, operation_id: 'op-legacy', name: 'browser',
@@ -860,6 +986,21 @@ test('aborts if the staged draft changes or the caller disarms while waiting', a
   assert.equal(disarmed.run.clicked, undefined);
 });
 
+test('delivery waits for Run to return after a completed reply and recovers only an identical saved draft',async()=>{
+  const value='```helper-result\n{"operation_id":"saved"}\n```';
+  const state=setup();state.run.hidden=true;
+  assert.equal(state.adapter.inspect().controlsPending,true);
+  const pending=state.adapter.submit(value,()=>true,{recover:true});
+  await new Promise(resolve=>setTimeout(resolve,80));state.run.hidden=false;
+  assert.equal(await pending,true);assert.equal(state.editor.value,value);
+  const restored=setup({draft:value});
+  assert.equal(restored.adapter.stage(value),false,'ordinary staging never adopts a user draft');
+  assert.equal(await restored.adapter.submit(value,()=>true,{recover:true}),true);
+  const edited=setup({draft:value+' user edits'});
+  assert.equal(await edited.adapter.submit(value,()=>true,{recover:true}),false);
+  assert.equal(edited.editor.value,value+' user edits');assert.equal(edited.run.clicked,undefined);
+});
+
 test('waits through transient Run removal and rejects competing or stale submits', async () => {
   const state = setup({ empty: true });
   assert.equal(state.adapter.stage('one draft'), true);
@@ -873,4 +1014,152 @@ test('waits through transient Run removal and rejects competing or stale submits
   const stale = setup({ empty: true });
   assert.equal(await stale.adapter.submit('never stage', () => false), false);
   assert.equal(stale.editor.value, '');
+});
+
+
+test('saved Helper history folds in both directions and manual collapse can fold reopened blocks',()=>{
+  const state=setup();state.chunk.remove();state.model.children=[];state.model.attrs['data-turn-role']='Model';
+  const widget=state.model.add(new Node('ms-code-block'));
+  const callButton=widget.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  const callRegion=widget.add(new Node('div'));
+  callRegion.add(new Node('pre',{},'HELPER_history read_file\npath: notes.txt\nEND_history'));
+  callButton.click=()=>{callButton.attrs['aria-label']='Expand code snippet';callRegion.attrs.style='display:none';};
+  const plain=state.model.add(new Node('p',{},'Обычное пояснение остаётся видно'));
+  assert.equal(state.adapter.collapseChat(),0,'a pending call is handled only after acceptance');
+  const result=state.root.add(new Node('ms-chat-turn',{'data-turn-role':'User'}));
+  const resultWidget=result.add(new Node('ms-code-block'));
+  const resultButton=resultWidget.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  const resultRegion=resultWidget.add(new Node('div'));
+  resultRegion.add(new Node('pre',{},JSON.stringify({type:'helper-result',operation_id:'old-result',name:'read_file',result:'bytes'})));
+  resultButton.click=()=>{resultButton.attrs['aria-label']='Expand code snippet';resultRegion.attrs.style='display:none';};
+  callButton.attrs['aria-label']='';resultButton.attrs['aria-label']='';
+  assert.equal(state.adapter.collapseChat(),0,'waits for native controls to hydrate');
+  callButton.attrs['aria-label']='Collapse code snippet';resultButton.attrs['aria-label']='Collapse code snippet';
+  assert.equal(state.adapter.collapseChat(),2);
+  assert.equal(callButton.attrs['aria-label'],'Expand code snippet');
+  assert.equal(resultButton.attrs['aria-label'],'Expand code snippet');
+  assert.notEqual(plain.hidden,true);
+  assert.equal(state.adapter.inspect().latestUser.operationId,'old-result');
+  assert.equal(state.adapter.collapseChat(),0);
+  callButton.attrs['aria-label']='Collapse code snippet';delete callRegion.attrs.style;
+  resultButton.attrs['aria-label']='Collapse code snippet';delete resultRegion.attrs.style;
+  assert.equal(state.adapter.collapseChat(),0,'automatic scan respects manual expansion');
+  assert.equal(state.adapter.collapseChat({force:true}),2,'button deliberately folds reopened service blocks');
+});
+
+test('manual history collapse leaves ordinary dialogue and Helper examples without agent context expanded',()=>{
+  const state=setup();state.chunk.remove();state.model.children=[];state.model.attrs['data-turn-role']='Model';
+  const widget=state.model.add(new Node('ms-code-block'));
+  const button=widget.add(new Node('button',{'aria-label':'Collapse code snippet'}));
+  widget.add(new Node('pre',{},JSON.stringify({v:1,name:'read_file',arguments:{path:'example.txt'}})));
+  assert.equal(state.adapter.collapseChat({force:true}),0);
+  assert.equal(button.clicked,undefined);
+});
+
+test('model reply editor is excluded from composer detection and blocks staging until closed',()=>{
+  const state=setup({draft:'keep composer draft'});
+  const editing=state.model.add(new Node('ms-autosize-textarea')).add(new Textarea('edited reply'));
+  let snapshot=state.adapter.inspect();
+  assert.equal(snapshot.supported,true);
+  assert.equal(snapshot.editingReply,true);
+  assert.equal(snapshot.editorEmpty,false);
+  assert.equal(state.adapter.stage('replacement'),false);
+  assert.equal(state.editor.value,'keep composer draft');
+  assert.equal(editing.value,'edited reply');
+  state.model.children=state.model.children.filter(node=>node!==editing.parent);
+  snapshot=state.adapter.inspect();
+  assert.equal(snapshot.editingReply,false);
+  assert.equal(snapshot.supported,true);
+  assert.equal(snapshot.editorEmpty,false);
+  assert.equal(state.editor.value,'keep composer draft');
+});
+
+test('reply editor does not hide two genuine composers',()=>{
+  const state=setup({extraEditors:1});
+  state.model.add(new Node('ms-autosize-textarea')).add(new Textarea('edited reply'));
+  const snapshot=state.adapter.inspect();
+  assert.equal(snapshot.editingReply,true);
+  assert.equal(snapshot.supported,false);
+  assert.match(snapshot.error,/ambiguous or missing editor/);
+});
+
+
+test('chat width expands constrained chat ancestors and restores exact default styles',()=>{
+  const state=setup();let base=600;
+  state.root.getBoundingClientRect=()=>({left:0,right:1000,width:1000});
+  state.model.getBoundingClientRect=()=>({left:(1000-base)/2,right:(1000+base)/2,width:base});
+  state.document.defaultView.getComputedStyle=node=>({maxWidth:node===state.model?'600px':'none'});
+  state.model.style.setProperty('width','70%','important');
+  state.model.style.setProperty('max-width','600px');
+  const original=state.model.textContent;
+  assert.equal(state.adapter.setChatWidth(10),true);
+  assert.equal(state.model.style.getPropertyValue('max-width'),'calc(540px + 10%)');
+  assert.equal(state.model.style.getPropertyPriority('width'),'important');
+  state.adapter.setChatWidth(100);
+  assert.equal(state.model.style.getPropertyValue('width'),'100%');
+  assert.equal(state.model.style.getPropertyValue('max-width'),'100%');
+  assert.equal(state.adapter.setChatWidth(15),false);
+  assert.equal(state.adapter.setChatWidth(110),false);
+  assert.equal(state.model.style.getPropertyValue('width'),'100%');
+  base=400;state.adapter.setChatWidth(10,true);
+  assert.equal(state.model.style.getPropertyValue('width'),'calc(360px + 10%)');
+  state.adapter.setChatWidth(0);
+  assert.equal(state.model.style.getPropertyValue('width'),'70%');
+  assert.equal(state.model.style.getPropertyPriority('width'),'important');
+  assert.equal(state.model.style.getPropertyValue('max-width'),'600px');
+  assert.equal(state.model.style.getPropertyValue('box-sizing'),'');
+  assert.equal(state.model.textContent,original);
+});
+
+
+test('opens a collapsed run settings panel before staging system instructions',async()=>{
+  const state=systemSetup();state.opener.hidden=true;
+  const toggle=state.root.add(new Node('button',{'aria-label':'Toggle run settings panel'}));
+  toggle.click=()=>{toggle.clicked=true;state.opener.hidden=false;};
+  assert.equal(await state.system('Helper tools'),true,state.adapter.getSystemStageError());
+  assert.equal(toggle.clicked,true);
+  assert.ok(state.dialogs[0].editor.value.includes('Helper tools'));
+});
+
+test('finds system instruction controls by their text without decorative icon names',async()=>{
+  for(const roleButton of [false,true]){
+    const state=systemSetup();delete state.opener.attrs['aria-label'];
+    if(roleButton){state.opener.tag='div';state.opener.attrs.role='button';}
+    state.opener.add(new Node('mat-icon',{},'edit_note'));
+    state.opener.add(new Node('span',{},'System instructions'));
+    state.opener.add(new Node('span',{class:'material-symbols-outlined'},'chevron_right'));
+    if(roleButton){
+      state.opener.hidden=true;
+      const toggle=state.root.add(new Node('div',{role:'button'}));
+      toggle.add(new Node('mat-icon',{},'settings'));
+      toggle.add(new Node('span',{},'Toggle run settings panel'));
+      toggle.click=()=>{state.opener.hidden=false;};
+    }
+    assert.equal(await state.system('Helper tools'),true,state.adapter.getSystemStageError());
+    assert.ok(state.dialogs[0].editor.value.includes('Helper tools'));
+    assert.equal(state.editor.value,'chat draft');
+    assert.equal(state.run.clicked,undefined);
+  }
+});
+
+test('missing or duplicate system instruction controls fail safely with recovery guidance',async()=>{
+  const missing=setup({draft:'keep my task'});
+  assert.equal(await missing.adapter.stageSystemInstructions('Helper tools'),false);
+  assert.match(missing.adapter.getSystemStageError(),/Run settings/);
+  assert.match(missing.adapter.getSystemStageError(),/count=0/);
+  assert.equal(missing.editor.value,'keep my task');
+  assert.equal(missing.run.clicked,undefined);
+  const panel=missing.root.add(new Node('ms-system-instructions'));
+  const editor=panel.add(new Textarea('Keep my rules.'));
+  editor.attrs.placeholder='Optional tone and style instructions for the model';
+  assert.equal(await missing.adapter.stageSystemInstructions('Helper tools'),true);
+  assert.equal(editor.value,'Keep my rules.\n<!-- HELPER BEGIN -->\nHelper tools\n<!-- HELPER END -->');
+  assert.equal(missing.editor.value,'keep my task');
+
+  const duplicate=systemSetup();
+  duplicate.root.add(new Node('button',{'aria-label':'System instructions'}));
+  assert.equal(await duplicate.system('Helper tools'),false);
+  assert.match(duplicate.adapter.getSystemStageError(),/count=2/);
+  assert.equal(duplicate.dialogs.length,0);
+  assert.equal(duplicate.editor.value,'chat draft');
 });

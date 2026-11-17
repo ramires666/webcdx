@@ -37,6 +37,12 @@ test('compiled local agent discovers, executes once and reconnects without Gate 
   assert.equal(init.serverInfo.version, release.webcodexRelease.agent);
   const endpoint = client.endpoint, agentIdentity = client.agentIdentity;
   assert.equal(init.studioOperations.lookupByKey,true);
+  assert.equal(init.studioSession.marker,true);
+  const marker='a'.repeat(32);
+  await client.setSessionMarker(marker);
+  await client.initialize();await client.setSessionMarker(marker);
+  assert.equal(logs.split('ID активного сеанса: '+marker).length-1,2);
+  await client.setSessionMarker('');
   assert.equal((await client.getOperationByKey('never-sent')).status,'not_found');
   const tools = await client.listTools();
   assert.ok(tools.some(tool => tool.name === 'exec_command'));
@@ -72,6 +78,10 @@ test('compiled local agent discovers, executes once and reconnects without Gate 
   lossy.close();
   const read = await client.createOperation({ key: 'local-read', name: 'read_file', arguments: { path: file }, agentId: 'local' });
   assert.match(JSON.stringify(read), /local works/);
+  await new Promise(resolve=>setTimeout(resolve,50));
+  assert.ok(logs.includes('read_file — Читаю файл'));
+  assert.ok(logs.includes('read_file — Прочитано строк: 1'));
+  assert.equal(logs.includes('[source=local]'),false);
   assert.equal((await fetch(endpoint + '/studio/rpc', { method: 'POST', headers: { Origin: 'https://aistudio.google.com', 'Content-Type': 'application/json', 'X-WebCodex-Extension': 'lgiihodklblifecheadnfjkaokmmfikk' }, body: '{}' })).status, 403);
   const content='<!doctype html>\n'+('const x = `code "Courier New" \\path \u044f \ud83d\ude00`;\n'.repeat(600000))+'<!-- end -->';
   assert.ok(Buffer.byteLength(content)>10*1024*1024);
@@ -80,6 +90,15 @@ test('compiled local agent discovers, executes once and reconnects without Gate 
   const rawWindowsRead=parseCall('{"v":1,"name":"read_file","arguments":{"path":"'+file+'"}}',null,tools);
   const recoveredRead=await client.createOperation({key:'raw-windows-path-read',...rawWindowsRead,agentId:'local'});
   assert.equal(recoveredRead.status,'completed');assert.equal(recoveredRead.result.structuredContent.content,'local works\n');
+  const stdin='line\n'.repeat(10000),stdinKey='large-command-stdin';
+  assert.ok(Buffer.byteLength(stdin)>32768);
+  const stdinArgv=['find.exe','/c','/v',''];
+  const stdinCall=parseCall('HELPER_large_stdin exec_command\ncwd: '+root.replaceAll('\\','/')+'\nyield_time_ms: 3000\nargv: '+JSON.stringify(stdinArgv)+'\n---\n'+stdin+'\nEND_large_stdin',null,tools);
+  const stdinResult=await client.createOperation({key:stdinKey,name:stdinCall.name,arguments:{...stdinCall.arguments,request_key:stdinKey},agentId:'local'});
+  assert.equal(stdinResult.status,'completed',JSON.stringify(stdinResult));
+  assert.equal(stdinResult.result.isError,false,JSON.stringify(stdinResult));
+  assert.equal(stdinResult.result.structuredContent.exit_code,0,JSON.stringify(stdinResult));
+  assert.match(stdinResult.result.structuredContent.stdout,/10000/,JSON.stringify(stdinResult));
   const largeCall=parseCall(JSON.stringify({v:1,name:'write_file',arguments:{path:largePath,if_absent:true},content_source:'large_file'})+'\n<<<HELPER_FILE_BEGIN:large_file>>>\n'+content+'\n<<<HELPER_FILE_END:large_file>>>',null,tools);
   const largeWrite=await client.createOperation({key:'large-write-once',...largeCall,agentId:'local'});
   assert.equal(largeWrite.status,'completed');assert.ok(fs.readFileSync(largePath,'utf8')===content,'large write must preserve exact UTF-8');
@@ -108,4 +127,43 @@ test('compiled local agent discovers, executes once and reconnects without Gate 
   assert.doesNotMatch(logs, /connected to Gate|Не удалось получить настройки/);
   assert.equal(fs.existsSync(path.join(appdata, 'webcodex', 'studio', 'native-host.json')), false);
   assert.equal(fs.existsSync(path.join(appdata, 'webcodex', 'studio', 'settings.json')), false);
+});
+
+
+test('Windows local launcher starts the repository EXE from a path containing spaces', { skip: process.env.WEBCODEX_LOCAL_REAL_TEST !== '1' || process.platform !== 'win32', timeout: 20000 }, async t => {
+  const tempParent = path.resolve(__dirname, '..', 'tmp');
+  fs.mkdirSync(tempParent, { recursive: true });
+  const temp = fs.mkdtempSync(path.join(tempParent, 'launcher smoke '));
+  let child;
+  t.after(async () => {
+    if (child?.pid && child.exitCode === null && child.signalCode === null) {
+      await new Promise((resolve, reject) => {
+        const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+        killer.once('error', reject);
+        killer.once('exit', resolve);
+      });
+    }
+    fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  const executable = process.env.WEBCODEX_TEST_AGENT_PATH || path.resolve(__dirname, '..', 'bin', 'ai-studio-bridge', 'webcodex-agent.exe');
+  const agentDirectory = path.join(temp, 'bin', 'aix');
+  const launchDirectory = path.join(temp, 'working directory');
+  fs.mkdirSync(agentDirectory, { recursive: true });
+  fs.mkdirSync(launchDirectory);
+  fs.copyFileSync(executable, path.join(agentDirectory, 'webcodex-agent.exe'));
+  fs.copyFileSync(path.resolve(__dirname, '..', 'start-local-agent.cmd'), path.join(temp, 'start-local-agent.cmd'));
+  const env = { ...process.env, APPDATA: path.join(temp, 'appdata'), LOCALAPPDATA: path.join(temp, 'localappdata'), WEBCODEX_ALLOWED_ROOTS: temp, WEBCODEX_GATE_URL: 'http://127.0.0.1:1', WEBCODEX_AGENT_TOKEN: 'unused-test-token' };
+  child = spawn('cmd.exe', ['/d', '/c', '..\\start-local-agent.cmd'], { cwd: launchDirectory, windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  let launchError;
+  child.once('error', error => { launchError = error; });
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  const deadline = Date.now() + 10000;
+  while (!output.includes('Studio local ready:') && !launchError && child.exitCode === null && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  if (launchError) throw launchError;
+  assert.match(output, /Studio local ready:/);
+  assert.doesNotMatch(output, /connected to Gate|Не удалось получить настройки/);
 });
