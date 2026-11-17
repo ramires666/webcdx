@@ -1,5 +1,5 @@
 importScripts('vendor/json-tools.js', 'protocol.js', 'session-state.js', 'attachments.js', 'mcp-client.js', 'local-client.js');
-const KEY = 'webcodexState', LARGE_KEY='webcodexLargeSessionState', DURABLE_KEY='webcodexDurableState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands']);
+const KEY = 'webcodexState', LARGE_KEY='webcodexLargeSessionState', DURABLE_KEY='webcodexDurableState', SAFE = new Set(['list_agents','list_allowed_roots','list_directory','read_file','search_files','find_files','poll_command','list_commands','task_capabilities','get_tasks','list_tasks','wait_tasks','task_result','task_patch']);
 const GATE_ENABLED = false;
 let state = {chatWidth:0,connected:false,transport:'',localError:'',gateUrl:'',clientId:'',agents:[],tools:[],session:{phase:'idle',transport:'',agentId:'',toolNames:[],automatic:false,paused:false,turn:'',instructions:'',pendingCall:null,resultText:'',error:'',count:0,tabId:null}};
 let token = '', client = null, localClient = null, gateClient = null, serial = Promise.resolve(), demo = false, connecting = false, lastAutoRefresh = 0, lastAutoRefreshOK = false, autoToolsAvailable = true;
@@ -243,6 +243,7 @@ async function command(m) {
       await chrome.storage.local.set({hideServiceMessages:state.hideServiceMessages});
       if(state.session.tabId!==null)await chrome.tabs.sendMessage(state.session.tabId,{type:'studio.cleanup',sessionId:state.session.sessionId,enabled:state.hideServiceMessages,operationIds:state.session.completedOperationIds||[],final:state.session.phase==='ready'}).catch(()=>{});
       break;
+    case 'bridge.taskRefresh': await refreshTaskBatch(); break;
     case 'bridge.connect': await connect(m); break;
     case 'bridge.disconnect': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');try{localClient?.close?.();}catch{}token='';client=null;localClient=null;gateClient=null;demo=false;state.accessToken='';state.demoMode=false;state.connected=false;state.transport='';state.gateUrl='';state.clientId='';state.agents=[];state.tools=[];break;
     case 'bridge.demo': await disableAuto();await clearSession();await chrome.storage.local.remove('bridgeAuth');try{localClient?.close?.();}catch{}demo=true;state.demoMode=true;token='';client=null;localClient=null;state.accessToken='';state.connected=true;state.transport='demo';state.gateUrl='Demo mode';state.clientId='demo';state.agents=[{id:'demo',name:'Demo agent',online:true}];state.tools=[{name:'read_file',description:'Demo only: return fixed sample text.',inputSchema:{type:'object',additionalProperties:false,properties:{path:{type:'string'}},required:['path']}}];break;
@@ -657,7 +658,41 @@ async function recover(){if(restoreError)return;const revision=authorizationRevi
     await finishResult(result,revision,deliveryPermission);
   }catch(e){if(await expireAuth(e))return;s.error=String(e.message||e);if(e?.code==='NATIVE_DISCONNECTED'||e?.code==='NATIVE_CLOSED')localClient=null;await save();}
 }
-async function finishResult(result,revision=authorizationRevision,deliveryPermission=automaticRevision){const s=state.session;if(result?.status==='expired'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.reasonCode='operation_expired';s.error='Срок отправки сохранённого ключа истёк. Проверьте историю операции.';await save();return;}const status=transitionSession({type:'operation_status',operationKey:s.operationKey,operationId:result?.operation_id||result?.id,status:result?.status||'completed'});if(!status.accepted){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.reasonCode='operation_identity_conflict';s.error='Operation identity changed during recovery';await save();return;}if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.reasonCode='outcome_unknown';s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;let prepared;try{prepared=await WebCodexAttachments.prepare({name:s.pendingCall.name,result:toolResult,enabled:s.attachmentDelivery??(state.autoSettings?.attachFiles!==false)});}catch(error){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='File received but attachment verification failed: '+String(error.message||error);await save();return;}s.attachments=prepared.attachments;const deliveredResult=prepared.result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:deliveredResult,error:transportError});transitionSession({type:'result_ready',operationKey:s.operationKey,status:result?.status||(toolResult?.isError?'failed':'completed')});await save();if(s.automatic&&!s.paused&&revision===authorizationRevision&&deliveryPermission===automaticRevision)try{await deliver(true,{automatic:true,revision:deliveryPermission});}catch(e){s.error=String(e.message||e);await save();}}
+const taskBatchTools=new Set(['start_tasks','get_tasks','wait_tasks','cancel_tasks']);
+const taskBatchStatuses=new Set(['queued','waiting','running','cancelling','completed','failed','blocked','cancelled','timed_out','interrupted','outcome_unknown']);
+
+function rememberTaskBatch(session, result, expected='') {
+  if (result?.isError!==false) return false;
+  const batch=result.structuredContent;
+  if (!/^[a-f0-9]{64}$/.test(batch?.batch_id||'') || (expected&&expected!==batch.batch_id) ||
+      !Array.isArray(batch.tasks) || batch.tasks.length<1 || batch.tasks.length>100) return false;
+  const tasks=[];
+  for (const task of batch.tasks) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$/.test(task?.key||'') || !taskBatchStatuses.has(task?.status)) return false;
+    tasks.push({key:task.key,status:task.status});
+  }
+  session.taskBatch={id:batch.batch_id,tasks};
+  return true;
+}
+
+async function refreshTaskBatch() {
+  const session=state.session, batch=session.taskBatch, revision=authorizationRevision;
+  if (!state.connected || state.autoSettings?.consent!==true || !session.toolNames?.includes('get_tasks') ||
+      !/^[a-f0-9]{64}$/.test(batch?.id||'')) throw Error('Выберите get_tasks и подключите агент текущего сеанса');
+  const current=()=>state.session===session&&session.taskBatch===batch&&authorizationRevision===revision;
+  try {
+    const pinned=await usePinnedClient(session);
+    if (!current()) return;
+    const args={batch_id:batch.id};
+    if (session.transport==='gate') args.agent_id=session.agentId;
+    const result=await pinned.rpc('tools/call',{name:'get_tasks',arguments:args});
+    if (current()&&!rememberTaskBatch(session,result,batch.id)) batch.error='Агент не подтвердил статус группы';
+  } catch {
+    if (current()) batch.error='Не удалось получить статус группы с её агента';
+  }
+}
+
+async function finishResult(result,revision=authorizationRevision,deliveryPermission=automaticRevision){const s=state.session;if(result?.status==='expired'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.reasonCode='operation_expired';s.error='Срок отправки сохранённого ключа истёк. Проверьте историю операции.';await save();return;}const status=transitionSession({type:'operation_status',operationKey:s.operationKey,operationId:result?.operation_id||result?.id,status:result?.status||'completed'});if(!status.accepted){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.reasonCode='operation_identity_conflict';s.error='Operation identity changed during recovery';await save();return;}if(['accepted','dispatching','starting','running'].includes(result?.status)){await save();return;}if(result?.status&& !['completed','failed','outcome_unknown'].includes(result.status)){s.error='Unexpected operation status; waiting for a terminal result.';await save();return;}if(result?.status==='outcome_unknown'){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.reasonCode='outcome_unknown';s.error='Operation outcome is unknown; do not retry it.';await save();return;}const hasResult=!!result&&Object.prototype.hasOwnProperty.call(result,'result'),toolResult=hasResult?result.result:result;if(taskBatchTools.has(s.pendingCall.name))rememberTaskBatch(s,toolResult,s.pendingCall.name==='start_tasks'?'':s.pendingCall.arguments?.batch_id);let prepared;try{prepared=await WebCodexAttachments.prepare({name:s.pendingCall.name,result:toolResult,enabled:s.attachmentDelivery??(state.autoSettings?.attachFiles!==false)});}catch(error){s.phase='paused';s.paused=true;s.resumeBlocked=true;s.error='File received but attachment verification failed: '+String(error.message||error);await save();return;}s.attachments=prepared.attachments;const deliveredResult=prepared.result;let commandSessionId=toolResult?.structuredContent?.session_id||toolResult?.session_id;for(const item of toolResult?.content||[])if(item.type==='text'&&typeof item.text==='string')try{const parsed=JSON.parse(item.text);commandSessionId=parsed.session_id||parsed.structuredContent?.session_id||commandSessionId;}catch{}if(commandSessionId)s.commandSessionId=commandSessionId;const transportError=result?.transport_error||(result?.status==='failed'&&!hasResult?(result.error||result.message||'Operation failed'):undefined);s.nextTurn=uuid();s.resultText=WebCodexProtocol.buildResult({turn:s.turn,nextTurn:s.nextTurn,turnless:!!s.turnless,operationId:s.operationId||s.operationKey,name:s.pendingCall.name,result:deliveredResult,error:transportError});transitionSession({type:'result_ready',operationKey:s.operationKey,status:result?.status||(toolResult?.isError?'failed':'completed')});await save();if(s.automatic&&!s.paused&&revision===authorizationRevision&&deliveryPermission===automaticRevision)try{await deliver(true,{automatic:true,revision:deliveryPermission});}catch(e){s.error=String(e.message||e);await save();}}
 async function deliver(submit,{automatic=false,revision:deliveryPermission=automaticRevision}={}){
   const revision=authorizationRevision,s=state.session,deliveryOperationId=s.operationId||s.operationKey;if(!s.resultText)throw Error('No result to deliver');if(s.paused)throw Error(s.error||'Session is paused');
   let envelope;try{envelope=JSON.parse(s.resultText);}catch{throw Error('Only a helper-result can be delivered');}

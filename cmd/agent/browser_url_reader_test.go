@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -40,7 +41,11 @@ func TestBrowserBridgeURLCheckDoesNotBlockCommandReader(t *testing.T) {
 		urlChecks:   checks,
 	}
 	t.Cleanup(manager.Close)
-	listener, endpoint, err := browserListenIPC(filepath.Join(root, "url-reader-ipc"))
+	ipcDir := filepath.Join(root, "url-reader-ipc")
+	if err := os.MkdirAll(ipcDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, endpoint, err := browserListenIPC(ipcDir)
 	if err != nil {
 		t.Fatal(err)
 	}

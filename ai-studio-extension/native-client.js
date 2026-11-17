@@ -8,7 +8,7 @@
   class NativeClientError extends Error {
     constructor(message, code) { super(message); this.name = 'NativeClientError'; this.code = code; }
   }
-  function createClient({ runtime = chrome.runtime, version = '0.5.8' } = {}) {
+  function createClient({ runtime = chrome.runtime, version = '0.5.9' } = {}) {
     const port = runtime.connectNative(HOST), pending = new Map(), issued = new Set();
     let nextId = 0, closed = false;
     function failAll(error) {

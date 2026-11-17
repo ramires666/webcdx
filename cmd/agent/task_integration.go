@@ -55,12 +55,9 @@ func parseTaskPatchSelection(raw any) ([]taskPatchSelection, error) {
 func (s *taskService) ownedTaskViews(owner, id string) ([]taskView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	batch, err := s.load(id)
-	if errors.Is(err, os.ErrNotExist) || err == nil && batch.Owner != owner {
-		return nil, toolErr("unknown_task_batch", "task batch not found")
-	}
+	batch, err := s.ownedTaskBatch(owner, id)
 	if err != nil {
-		return nil, toolErr("task_store_unavailable", "could not read task batch")
+		return nil, err
 	}
 	return slices.Clone(batch.Jobs), nil
 }

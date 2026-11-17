@@ -1,10 +1,10 @@
 {
   "name": "helper-ai-studio-bridge",
   "private": true,
-  "version": "0.5.8",
+  "version": "0.5.9",
   "webcodexRelease": {
-    "agent": "1.5.0-ai-studio-alpha.12",
-    "gate": "1.5.0-ai-studio-alpha.8",
+    "agent": "1.5.0-ai-studio-alpha.13",
+    "gate": "1.5.0-ai-studio-alpha.9",
     "replyProtocols": [1, 2]
   },
   "scripts": {

@@ -74,6 +74,7 @@ type taskService struct {
 	queue       []taskWork
 	active      map[string]context.CancelFunc
 	batches     map[string]*taskBatch
+	watchers    map[string]*taskGroupWatch
 	workers     sync.WaitGroup
 	stopping    bool
 	storeFailed bool
@@ -91,18 +92,9 @@ func taskServiceFromEnvironment() (*taskService, error) {
 	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(exe), ".exe") {
 		return nil, errors.New("WEBCODEX_OPENCODE_PATH must point to a Windows .exe")
 	}
-	keyPath := strings.TrimSpace(os.Getenv("WEBCODEX_TASK_KEY_FILE"))
-	if !filepath.IsAbs(keyPath) {
-		return nil, errors.New("WEBCODEX_TASK_KEY_FILE must be an absolute path to a file containing the OpenCode Go key")
-	}
-	keyInfo, err := os.Stat(keyPath)
-	if err != nil || !keyInfo.Mode().IsRegular() || keyInfo.Size() > 4096 {
-		return nil, errors.New("WEBCODEX_TASK_KEY_FILE must be a readable key file of at most 4096 bytes")
-	}
-	data, err := os.ReadFile(keyPath)
-	key := strings.TrimSpace(string(data))
-	if err != nil || key == "" || len(key) > 4096 || strings.ContainsAny(key, "\r\n\x00") {
-		return nil, errors.New("WEBCODEX_TASK_KEY_FILE must contain one nonempty line")
+	key, err := configuredTaskProviderKey()
+	if err != nil {
+		return nil, err
 	}
 	model := strings.TrimSpace(env("WEBCODEX_TASK_MODEL", "opencode-go/hy4-flash-free"))
 	if !taskModelPattern.MatchString(model) {
@@ -158,12 +150,23 @@ func (s *taskService) load(id string) (*taskBatch, error) {
 	if b := s.batches[id]; b != nil {
 		return b, nil
 	}
-	data, err := os.ReadFile(s.batchPath(id))
+	return readTaskBatch(s.batchPath(id), id)
+}
+
+func readTaskBatch(path, id string) (*taskBatch, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("task batch journal is not a regular file")
+	}
+	data, err := readTaskFile(path, taskBatchFileMax)
 	if err != nil {
 		return nil, err
 	}
 	var b taskBatch
-	if json.Unmarshal(data, &b) != nil || b.ID != id {
+	if json.Unmarshal(data, &b) != nil || b.ID != id || b.Owner == "" || len(b.Jobs) == 0 || len(b.Jobs) > taskBatchMax {
 		return nil, errors.New("task batch state is invalid")
 	}
 	for i, job := range b.Jobs {
@@ -188,6 +191,7 @@ func (s *taskService) load(id string) (*taskBatch, error) {
 }
 
 func (s *taskService) save(b *taskBatch, create bool) error {
+	defer s.notifyTaskGroup(b.ID)
 	data, err := json.Marshal(b)
 	if err == nil {
 		if create {
@@ -202,20 +206,23 @@ func (s *taskService) save(b *taskBatch, create bool) error {
 			job := &work.batch.Jobs[work.index]
 			job.Status = "interrupted"
 			job.Error = "The task store could not save the queue"
+			s.notifyTaskGroup(work.batch.ID)
 		}
 		s.queue = nil
 	}
 	return err
 }
 
-func taskBatchStatus(b *taskBatch) any {
+func taskBatchStatus(b *taskBatch) map[string]any {
 	jobs := make([]taskView, len(b.Jobs))
 	for i, job := range b.Jobs {
 		job.Output = ""
 		job.Patch = nil
 		jobs[i] = job
 	}
-	return map[string]any{"batch_id": b.ID, "tasks": jobs}
+	status := map[string]any{"batch_id": b.ID, "tasks": jobs}
+	status["revision"] = commandHash(status)
+	return status
 }
 
 func (s *taskService) start(owner, requestKey string, specs []taskSpec) (any, error) {
@@ -391,13 +398,8 @@ func (s *taskService) execute(ctx context.Context, work taskWork) {
 }
 
 func (s *taskService) releaseIfFinished(batch *taskBatch) {
-	if s.storeFailed {
+	if s.storeFailed || taskGroupHasPendingJobs(batch) {
 		return
-	}
-	for _, job := range batch.Jobs {
-		if job.Status == "waiting" || job.Status == "queued" || job.Status == "running" || job.Status == "cancelling" {
-			return
-		}
 	}
 	delete(s.batches, batch.ID)
 }
@@ -405,12 +407,9 @@ func (s *taskService) releaseIfFinished(batch *taskBatch) {
 func (s *taskService) lookup(owner, id, name, key string) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	batch, err := s.load(id)
-	if errors.Is(err, os.ErrNotExist) || err == nil && batch.Owner != owner {
-		return nil, toolErr("unknown_task_batch", "task batch not found")
-	}
+	batch, err := s.ownedTaskBatch(owner, id)
 	if err != nil {
-		return nil, toolErr("task_store_unavailable", "could not read task batch")
+		return nil, err
 	}
 	switch name {
 	case "get_tasks":

@@ -11,7 +11,7 @@
   <main>
     <header>
       <h1>WebCodex Bridge</h1>
-      <p id="extension-version">Скрипт 0.5.8 · Агент не подключён</p>
+      <p id="extension-version">Скрипт 0.5.9 · Агент не подключён</p>
       <div class="row"><button id="arm" type="button">Запустить сеанс</button></div>
     </header>
     <p id="error" class="error" role="alert" aria-live="assertive" hidden></p>
@@ -30,6 +30,17 @@
         <button id="disconnect" type="button" class="secondary">Отключить</button>
         <button id="demo" type="button" class="secondary">Демо</button>
       </div>
+    </section>
+
+    <section id="task-batch" aria-labelledby="task-batch-heading" hidden>
+      <div class="task-batch-heading">
+        <h2 id="task-batch-heading">Пакет задач</h2>
+        <button id="task-refresh" type="button" class="secondary">Обновить статусы</button>
+      </div>
+      <p>ID пакета <code id="task-batch-id" class="wrap"></code></p>
+      <p id="task-summary" role="status"></p>
+      <p id="task-batch-error" class="error" role="status" hidden></p>
+      <ul id="task-rows" class="task-rows" aria-label="Задачи пакета"></ul>
     </section>
 
     <section aria-labelledby="session-heading">

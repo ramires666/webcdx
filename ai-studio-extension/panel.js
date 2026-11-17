@@ -5,7 +5,20 @@
   $('gate-connection').hidden = true;
   const installedVersion = chrome.runtime.getManifest?.().version || '';
   let state = null, toolSignature = '', agentSignature = '', toolsInitialized = false, chatWidthEditing = false;
-  let connecting = false, sessionChanging = false;
+  let connecting = false, sessionChanging = false, refreshingTasks = false, taskSignature = '';
+  const taskStatusLabels = new Map([
+    ['waiting', ['Ждут зависимостей', 'ждёт зависимости']],
+    ['queued', ['В очереди', 'в очереди']],
+    ['running', ['В работе', 'в работе']],
+    ['cancelling', ['Отменяются', 'отменяется']],
+    ['completed', ['Выполнены', 'выполнена']],
+    ['failed', ['С ошибкой', 'с ошибкой']],
+    ['blocked', ['Заблокированы', 'заблокирована']],
+    ['cancelled', ['Отменены', 'отменена']],
+    ['timed_out', ['Истёк тайм-аут', 'истёк тайм-аут']],
+    ['interrupted', ['Прерваны', 'прервана']],
+    ['outcome_unknown', ['Исход неизвестен', 'исход неизвестен']]
+  ]);
   const permissionFields = {consent: 'consent', automatic: 'automatic', attachFiles: 'attach-files', autoApprove: 'auto-approve'};
   function allPermissionsSelected() {
     return [...$('tools').querySelectorAll('input'), ...Object.values(permissionFields).map($), $('hide-service')].every(input => input.checked);
@@ -52,6 +65,35 @@
     }
     if (kind === 'tool') { toolSignature = signature; if (items.length) toolsInitialized = true; } else agentSignature = signature;
   }
+  function canRefreshTasks(next) {
+    return next?.connected && next.session?.taskBatch?.id && next.session?.toolNames?.includes('get_tasks');
+  }
+  function renderTaskBatch(next) {
+    const section = $('task-batch');
+    if (!section) return;
+    const batch = next?.session?.taskBatch;
+    section.hidden = !batch?.id;
+    $('task-refresh').disabled = refreshingTasks || !canRefreshTasks(next);
+    const tasks = batch?.tasks || [];
+    const signature = JSON.stringify([batch?.id, batch?.error, tasks.map(({ key, status }) => [key, status])]);
+    if (signature === taskSignature) return;
+    taskSignature = signature;
+    $('task-batch-id').textContent = batch?.id || '';
+    const error = $('task-batch-error');
+    error.textContent = batch?.error || '';
+    error.hidden = !batch?.error;
+    const rows = $('task-rows');
+    rows.replaceChildren();
+    const counts = new Map();
+    for (const task of tasks) {
+      const [label, detail] = taskStatusLabels.get(task.status) || ['Неизвестный статус', 'неизвестный статус'];
+      counts.set(label, (counts.get(label) || 0) + 1);
+      const row = document.createElement('li');
+      row.textContent = `${task.key} · ${detail}`;
+      rows.append(row);
+    }
+    $('task-summary').textContent = [...counts].map(([label, count]) => `${label}: ${count}`).join(' · ');
+  }
   function render(next) {
     if (!next) return;
     if(Number.isInteger(next.autoSettings?.revision)&&Number.isInteger(state?.autoSettings?.revision)&&next.autoSettings.revision<state.autoSettings.revision)next={...next,autoSettings:state.autoSettings};
@@ -59,6 +101,7 @@
     state = next;
     if (Number.isInteger(next.chatWidth) && !chatWidthEditing && document.activeElement !== $('chat-width')) $('chat-width').value = String(next.chatWidth);
     const session = next.session || {};
+    renderTaskBatch(next);
     const page = next.pageScript;
     const agentVersion = next.connected && next.transport !== 'gate' ? next.agentVersion || 'версия не передана' : 'не подключён';
     $('extension-version').textContent = `Скрипт ${page?.version || installedVersion || 'версия не передана'} · Агент ${agentVersion}`;
@@ -123,6 +166,20 @@
     try { const next = await send(type, payload); if (next) render(next); }
     catch (error) { showError(error); }
   }
+  $('task-refresh')?.addEventListener('click', async () => {
+    if (refreshingTasks || !canRefreshTasks(state)) return;
+    const batchId = state.session.taskBatch.id;
+    refreshingTasks = true;
+    renderTaskBatch(state);
+    showError(null);
+    try {
+      const next = await send('bridge.taskRefresh');
+      if (state.session?.taskBatch?.id === batchId && next?.session?.taskBatch?.id === batchId) render(next);
+    } catch (error) {
+      if (state.session?.taskBatch?.id === batchId) showError(error);
+    }
+    finally { refreshingTasks = false; renderTaskBatch(state); }
+  });
   $('redirect-uri').textContent = `${chrome.identity?.getRedirectURL('webcodex') || ''}  ·  Extension ID: ${chrome.runtime.id}`;
   $('connect').addEventListener('click', async () => {
     if (connecting || state?.connecting) return;

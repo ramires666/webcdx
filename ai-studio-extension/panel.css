@@ -30,6 +30,10 @@ button.danger { color: #b42318; }
 .wrap { display: block; overflow-wrap: anywhere; font-size: 12px; }
 .output { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; border-radius: 5px; background: color-mix(in srgb, CanvasText 7%, Canvas); }
 .error { color: #b42318; }
+.task-batch-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 7px; }
+.task-batch-heading h2 { margin: 0; }
+.task-rows { margin: 8px 0 0; padding-inline-start: 20px; overflow-wrap: anywhere; }
+.task-rows li + li { margin-top: 3px; }
 
 #arm { white-space: pre-line; }
 #arm.session-connected { background: #dcfce7; border-color: #86b89a; color: #14532d; }

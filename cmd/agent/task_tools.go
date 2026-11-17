@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"time"
 )
 
 type taskOwnerContext struct{}
@@ -62,6 +63,14 @@ func taskToolSchemas() []mcpToolDefinition {
 				"timeout_seconds": map[string]any{"type": "integer", "minimum": 10, "maximum": 1800, "default": 180},
 			}, "key", "prompt")},
 		}, "request_key", "tasks"), false),
+		tool("list_tasks", "List batches owned by this connection and their status counts. Use next_cursor to continue.", object(map[string]any{
+			"cursor": str("Opaque next_cursor from the preceding list_tasks page.", 64),
+			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 25, "default": 10},
+		}), true),
+		tool("wait_tasks", "Wait briefly for a batch change. Pass the revision from get_tasks or the preceding wait_tasks call.", object(map[string]any{
+			"batch_id": batch, "revision": str("Revision of your last batch status.", 64),
+			"timeout_ms": map[string]any{"type": "integer", "minimum": 0, "maximum": 5000, "default": 5000},
+		}, "batch_id"), true),
 		tool("get_tasks", "Get status for all jobs in a batch. Fetch individual output with task_result.", object(map[string]any{"batch_id": batch}, "batch_id"), true),
 		tool("task_result", "Get text output or error for one job in a batch.", object(map[string]any{
 			"batch_id": batch, "key": str("Task key within this batch.", 48),
@@ -83,7 +92,7 @@ func taskToolSchemas() []mcpToolDefinition {
 
 func isTaskTool(name string) bool {
 	switch name {
-	case "task_capabilities", "start_tasks", "get_tasks", "task_result", "cancel_tasks", "task_patch", "task_integrate":
+	case "task_capabilities", "start_tasks", "get_tasks", "task_result", "cancel_tasks", "task_patch", "task_integrate", "list_tasks", "wait_tasks":
 		return true
 	}
 	return false
@@ -106,6 +115,19 @@ func (e *nativeExecutor) executeTaskTool(ctx context.Context, name string, args 
 		}
 		return map[string]any{"runner": "opencode", "model": s.model, "reasoning": "none", "mode": "text_only", "workspace_modes": modes,
 			"dependencies": true, "max_parallel": s.parallel, "max_batch_size": taskBatchMax, "max_pending": taskPendingMax}, nil
+	case "list_tasks":
+		if err := onlyArgs(args, "cursor", "limit"); err != nil {
+			return nil, err
+		}
+		cursor, err := optionalString(args, "cursor")
+		if err != nil || cursor != "" && !taskIDPattern.MatchString(cursor) {
+			return nil, toolErr("invalid_arguments", "invalid task history cursor")
+		}
+		limit, err := optionalInt(args, "limit", 10, 1, 25)
+		if err != nil {
+			return nil, err
+		}
+		return s.listTaskGroups(owner, cursor, limit)
 	case "start_tasks":
 		if err := onlyArgs(args, "request_key", "tasks", "project_root"); err != nil {
 			return nil, err
@@ -126,6 +148,8 @@ func (e *nativeExecutor) executeTaskTool(ctx context.Context, name string, args 
 	}
 	fields := []string{"batch_id"}
 	switch name {
+	case "wait_tasks":
+		fields = append(fields, "revision", "timeout_ms")
 	case "task_result":
 		fields = append(fields, "key")
 	case "task_patch":
@@ -139,6 +163,17 @@ func (e *nativeExecutor) executeTaskTool(ctx context.Context, name string, args 
 	id, _ := args["batch_id"].(string)
 	if !taskIDPattern.MatchString(id) {
 		return nil, toolErr("invalid_arguments", "invalid batch_id")
+	}
+	if name == "wait_tasks" {
+		revision, err := optionalString(args, "revision")
+		if err != nil || revision != "" && !taskIDPattern.MatchString(revision) {
+			return nil, toolErr("invalid_arguments", "invalid task revision")
+		}
+		ms, err := optionalInt(args, "timeout_ms", 5000, 0, 5000)
+		if err != nil {
+			return nil, err
+		}
+		return s.waitTaskGroup(ctx, owner, id, revision, time.Duration(ms)*time.Millisecond)
 	}
 	if name == "task_integrate" {
 		selection, err := parseTaskPatchSelection(args["patches"])

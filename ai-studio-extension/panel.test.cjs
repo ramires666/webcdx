@@ -28,6 +28,7 @@ function createPanel(store = {}, options = {}) {
     if (msg.type === 'bridge.preferences') { store.autoSettings = msg; snapshot.autoSettings = msg; return cb({ ok: true, state: snapshot }); }
     if (msg.type === 'bridge.connect') connectCount++;
     if (msg.type === 'bridge.connect' && options.connectReply) return options.connectReply.promise.then(reply => cb(reply));
+    if (msg.type === 'bridge.taskRefresh' && options.taskRefreshReply) return options.taskRefreshReply.promise.then(reply => cb(reply));
     if (failAction) { failAction = false; return cb({ ok: false, error: 'Action failed' }); }
     cb({ ok: true, state: snapshot });
   } }, storage: { local: { async get() { if (options.storageRead) await options.storageRead.promise; return { bridgeConnection: store.bridgeConnection }; }, async set(values) { Object.assign(store, values); } } }, tabs: { query: async () => [{ id: 1 }] }, permissions: { request: () => options.permission?.promise || Promise.resolve(true) }, identity: { getRedirectURL: () => 'https://redirect/' } };
@@ -36,6 +37,65 @@ function createPanel(store = {}, options = {}) {
   vm.runInContext(fs.readFileSync(require.resolve('./panel.js'), 'utf8'), context);
   return { get: id => document.getElementById(id), messages, async ready() { if (options.storageRead) await options.storageRead.promise; await Promise.resolve(); await poll(); }, async update(value) { snapshot = value; await poll(); }, fail() { failAction = true; }, click(id) { return document.getElementById(id).listeners.click(); }, change(id, checked) { const el = document.getElementById(id); el.checked = checked; return el.listeners.change(); }, select(group, value, checked = true) { const container = document.getElementById(group), input = container.querySelectorAll('input').find(x => x.value === value); for (const item of container.querySelectorAll('input')) item.checked = item === input && checked; return container.listeners.change(); }, input(id, value) { const el = document.getElementById(id); el.value = value; return el.listeners.input(); }, get connectCount() { return connectCount; } };
 }
+
+test('task batch shows the active session counts and refreshes only on click', async () => {
+  const taskRefreshReply = deferred();
+  const panel = createPanel({}, { taskRefreshReply });
+  const session = { phase: 'waiting_model', toolNames: ['get_tasks'] };
+  const base = { connected: true, session };
+  await panel.update(base);
+  assert.equal(panel.get('task-batch').hidden, true);
+  const taskBatch = { id: 'batch-id', tasks: [
+    { key: 'first', status: 'running' },
+    { key: 'second', status: 'waiting' },
+    { key: 'third', status: 'waiting' },
+  ] };
+  const active = { ...base, session: { ...session, taskBatch } };
+  await panel.update(active);
+  assert.equal(panel.get('task-batch').hidden, false);
+  assert.equal(panel.get('task-batch-id').textContent, taskBatch.id);
+  assert.equal(panel.get('task-summary').textContent, 'В работе: 1 · Ждут зависимостей: 2');
+  assert.deepEqual(panel.get('task-rows').children.map(row => row.textContent), [
+    'first · в работе', 'second · ждёт зависимости', 'third · ждёт зависимости',
+  ]);
+  assert.equal(panel.get('task-refresh').disabled, false);
+  assert.equal(panel.messages.some(message => message.type === 'bridge.taskRefresh'), false);
+
+  const refresh = panel.click('task-refresh');
+  assert.equal(panel.get('task-refresh').disabled, true);
+  await panel.update(active);
+  await panel.click('task-refresh');
+  const refreshes = panel.messages.filter(message => message.type === 'bridge.taskRefresh');
+  assert.equal(refreshes.length, 1);
+  assert.deepEqual(Object.keys(refreshes[0]), ['type']);
+  taskRefreshReply.resolve({ ok: true, state: { ...base, session: { ...session, taskBatch: {
+    ...taskBatch, tasks: [{ key: 'first', status: 'completed' }], error: 'Update unavailable',
+  } } } });
+  await refresh;
+  assert.equal(panel.get('task-refresh').disabled, false);
+  assert.equal(panel.get('task-summary').textContent, 'Выполнены: 1');
+  assert.equal(panel.get('task-batch-error').textContent, 'Update unavailable');
+  assert.equal(panel.get('task-batch-error').hidden, false);
+  await panel.update({ ...active, session: { ...active.session, toolNames: [] } });
+  assert.equal(panel.get('task-refresh').disabled, true);
+  await panel.update(base);
+  assert.equal(panel.get('task-batch').hidden, true);
+  assert.equal(panel.get('task-batch-id').textContent, '');
+  assert.equal(panel.get('task-rows').children.length, 0);
+});
+
+test('a late task refresh cannot restore the previous conversation batch', async () => {
+  const taskRefreshReply = deferred();
+  const panel = createPanel({}, { taskRefreshReply });
+  const active = { connected: true, session: { toolNames: ['get_tasks'], taskBatch: { id: 'old', tasks: [] } } };
+  await panel.update(active);
+  const refresh = panel.click('task-refresh');
+  await panel.update({ ...active, session: { ...active.session, taskBatch: { id: 'new', tasks: [] } } });
+  taskRefreshReply.resolve({ ok: true, state: active });
+  await refresh;
+  assert.equal(panel.get('task-batch-id').textContent, 'new');
+  assert.equal(panel.get('task-refresh').disabled, false);
+});
 
 test('service JSON preference reflects state and sends both checkbox values', async () => {
   const p = createPanel();
