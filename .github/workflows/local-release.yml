@@ -18,6 +18,9 @@ jobs:
         with:
           node-version: '24.11.1'
           package-manager-cache: false
+      - name: Verify local OpenCode subagent workflow
+        shell: pwsh
+        run: ./tools/test-subagents.ps1
       - name: Verify compiled local bundle and existing Gate compatibility
         shell: pwsh
         run: ./ai-studio-extension/verify-release.ps1
@@ -31,6 +34,3 @@ jobs:
           $env:WEBCODEX_LOCAL_REAL_TEST = '1'
           node --test ai-studio-extension/real-local.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Local-only bundle test failed' }
-      - name: Verify local OpenCode subagent workflow
-        shell: pwsh
-        run: ./tools/test-subagents.ps1
