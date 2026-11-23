@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"slices"
 	"strings"
 	"time"
 )
@@ -56,6 +57,7 @@ func taskToolSchemas() []mcpToolDefinition {
 			"project_root": str("Absolute configured Git repository root for tasks with files or context_files.", 4096),
 			"tasks": map[string]any{"type": "array", "minItems": 1, "maxItems": taskBatchMax, "items": object(map[string]any{
 				"key":             str("Unique task key within the batch (letters, digits, underscore, or hyphen).", 48),
+				"agent":           map[string]any{"type": "string", "enum": taskAgents, "description": "OpenCode agent. Defaults to build for writable files and general otherwise."},
 				"prompt":          str("Task instructions and input context; up to 16 KiB of UTF-8.", taskPromptMax),
 				"depends_on":      list("A task key from this batch to wait for.", taskBatchMax-1, 48),
 				"files":           list("Exact project-relative writable file path using forward slashes.", taskFileLimit, 1024),
@@ -113,7 +115,7 @@ func (e *nativeExecutor) executeTaskTool(ctx context.Context, name string, args 
 		if s.workspaces != nil {
 			modes = append(modes, "git_worktree")
 		}
-		return map[string]any{"runner": "opencode", "model": s.model, "reasoning": "none", "mode": "text_only", "workspace_modes": modes,
+		return map[string]any{"runner": "opencode", "model": taskModel, "reasoning": taskVariant, "agents": taskAgents, "mode": "text_only", "workspace_modes": modes,
 			"dependencies": true, "max_parallel": s.parallel, "max_batch_size": taskBatchMax, "max_pending": taskPendingMax}, nil
 	case "list_tasks":
 		if err := onlyArgs(args, "cursor", "limit"); err != nil {
@@ -221,7 +223,7 @@ func parseTaskSpecs(input any) ([]taskSpec, error) {
 		if !ok {
 			return nil, toolErr("invalid_arguments", "each task must be an object")
 		}
-		if err := onlyArgs(args, "key", "prompt", "timeout_seconds", "depends_on", "files", "context_files"); err != nil {
+		if err := onlyArgs(args, "key", "agent", "prompt", "timeout_seconds", "depends_on", "files", "context_files"); err != nil {
 			return nil, err
 		}
 		key, _ := args["key"].(string)
@@ -250,7 +252,12 @@ func parseTaskSpecs(input any) ([]taskSpec, error) {
 		if err != nil {
 			return nil, err
 		}
-		spec := taskSpec{Key: key, Prompt: prompt, Timeout: timeout, DependsOn: deps}
+		agent, err := optionalString(args, "agent")
+		_, hasAgent := args["agent"]
+		if err != nil || hasAgent && !slices.Contains(taskAgents, agent) {
+			return nil, toolErr("invalid_arguments", "agent must be build, general, or explore")
+		}
+		spec := taskSpec{Key: key, Agent: agent, Prompt: prompt, Timeout: timeout, DependsOn: deps}
 		if len(writePaths)+len(readPaths) > 0 {
 			spec.Workspace = &taskWorkspaceSpec{Files: writePaths, ContextFiles: readPaths}
 		}

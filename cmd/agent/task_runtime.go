@@ -26,10 +26,10 @@ const (
 
 var taskIDPattern = regexp.MustCompile("^[a-f0-9]{64}$")
 var taskNamePattern = regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")
-var taskModelPattern = regexp.MustCompile("^opencode-go/[a-zA-Z0-9._-]+$")
 
 type taskSpec struct {
 	Key               string
+	Agent             string `json:",omitempty"`
 	Prompt            string
 	Timeout           int
 	DependsOn         []string           `json:",omitempty"`
@@ -38,6 +38,7 @@ type taskSpec struct {
 }
 
 type taskView struct {
+	Agent     string         `json:"agent,omitempty"`
 	Key       string         `json:"key"`
 	Status    string         `json:"status"`
 	DependsOn []string       `json:"depends_on,omitempty"`
@@ -65,7 +66,6 @@ type taskRun func(context.Context, string, taskSpec) taskView
 type taskService struct {
 	mu          sync.Mutex
 	root        string
-	model       string
 	workspaces  *taskWorkspaces
 	parallel    int
 	gate        bool
@@ -92,13 +92,12 @@ func taskServiceFromEnvironment() (*taskService, error) {
 	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(exe), ".exe") {
 		return nil, errors.New("WEBCODEX_OPENCODE_PATH must point to a Windows .exe")
 	}
-	key, err := configuredTaskProviderKey()
+	auth, err := configuredTaskProviderAuth()
 	if err != nil {
 		return nil, err
 	}
-	model := strings.TrimSpace(env("WEBCODEX_TASK_MODEL", "opencode-go/hy4-flash-free"))
-	if !taskModelPattern.MatchString(model) {
-		return nil, errors.New("WEBCODEX_TASK_MODEL must name an opencode-go model")
+	if model := strings.TrimSpace(os.Getenv("WEBCODEX_TASK_MODEL")); model != "" && model != taskModel {
+		return nil, errors.New("WEBCODEX_TASK_MODEL must be " + taskModel)
 	}
 	parallel, err := strconv.Atoi(env("WEBCODEX_TASK_PARALLEL", "4"))
 	if err != nil || parallel < 1 || parallel > 32 {
@@ -112,12 +111,11 @@ func taskServiceFromEnvironment() (*taskService, error) {
 	if err != nil {
 		return nil, err
 	}
-	runner := openCodeTaskRunner{executable: exe, model: model, key: key, workspaces: workspaces}
+	runner := openCodeTaskRunner{executable: exe, auth: auth, workspaces: workspaces}
 	service, err := newTaskService(filepath.Join(dir, "webcodex", "task-queue"), parallel, runner.run)
 	if err != nil {
 		return nil, err
 	}
-	service.model = model
 	service.workspaces = workspaces
 	service.gate = os.Getenv("WEBCODEX_TASKS_GATE") == "1"
 	return service, nil
@@ -249,7 +247,7 @@ func (s *taskService) start(owner, requestKey string, specs []taskSpec) (any, er
 		if len(spec.DependsOn) > 0 {
 			status = "waiting"
 		}
-		b.Jobs[i] = taskView{Key: spec.Key, Status: status, DependsOn: slices.Clone(spec.DependsOn)}
+		b.Jobs[i] = taskView{Key: spec.Key, Agent: spec.agentName(), Status: status, DependsOn: slices.Clone(spec.DependsOn)}
 	}
 	if err := s.save(b, true); err != nil {
 		return nil, toolErr("task_store_unavailable", "could not persist task batch")
@@ -384,6 +382,7 @@ func (s *taskService) execute(ctx context.Context, work taskWork) {
 	defer s.workers.Done()
 	result := s.run(ctx, filepath.Join(s.root, work.id()), work.spec)
 	result.Key = work.spec.Key
+	result.Agent = work.spec.agentName()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.active[work.id()]()
