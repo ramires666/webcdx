@@ -71,6 +71,7 @@ func localTools(version string) []mcpToolDefinition {
 		"stderr": stringField("Standard error bytes."), "stdout_next_offset": integerField("Next standard output offset.", 0),
 		"stderr_next_offset": integerField("Next standard error offset.", 0), "stdout_truncated": booleanField("Whether standard output was omitted."),
 		"stderr_truncated": booleanField("Whether standard error was omitted."),
+		"opencode":         openCodeProgressSchema(),
 	}
 	v4SessionRequired := []string{"session_id", "cwd", "status", "started_at", "finished_at", "exit_code", "duration_ms", "stdout_log_path", "stderr_log_path", "stdout", "stderr", "stdout_next_offset", "stderr_next_offset", "stdout_truncated", "stderr_truncated"}
 	v4SessionOutput := object(v4SessionProperties, v4SessionRequired...)
@@ -150,6 +151,7 @@ func localTools(version string) []mcpToolDefinition {
 	tools[1].InputSchema = v4WriteInput
 	tools[4].InputSchema, tools[4].OutputSchema = v4ExecInput, v4SessionOutput
 	tools[5].InputSchema, tools[5].OutputSchema = v4PollInput, v4SessionOutput
+	tools[5].Description += " For OpenCode sessions, use opencode for the agent, job title, last action, time without output and timeout deadline. Poll with the latest log offsets. Cancel an individual running process tree with cancel_command and its session_id."
 	tools[6].OutputSchema = v4CancelOutput
 
 	editItem := object(map[string]any{

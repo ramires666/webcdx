@@ -64,10 +64,11 @@ type nativeExecutor struct {
 	gateOperationDir string
 	gateOperations   sync.Map
 
-	mu       sync.Mutex
-	sessions map[string]*processSession
-	stop     chan struct{}
-	closed   sync.Once
+	mu             sync.Mutex
+	openCodeNumber int
+	sessions       map[string]*processSession
+	stop           chan struct{}
+	closed         sync.Once
 }
 
 type codedError struct {

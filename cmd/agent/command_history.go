@@ -140,11 +140,15 @@ func (e *nativeExecutor) listCommands(args map[string]any) (any, error) {
 		if !session.finishedAt.IsZero() {
 			end = session.finishedAt
 		}
-		result = append(result, map[string]any{
+		row := map[string]any{
 			"session_id": session.id, "cwd": session.cwd, "pid": session.pid, "status": session.status,
 			"started_at": session.startedAt.Format(timeFormat), "exit_code": exitCodeValue(session.exitCode),
 			"duration_ms": max(int64(0), end.Sub(session.startedAt).Milliseconds()),
-		})
+		}
+		if session.openCode != nil {
+			row["opencode"] = *session.openCode
+		}
+		result = append(result, row)
 	}
 	return map[string]any{"sessions": result, "truncated": len(sessions) > limit}, nil
 }

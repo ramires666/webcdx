@@ -1,5 +1,21 @@
 package main
 
+func openCodeProgressSchema() map[string]any {
+	return map[string]any{"type": "object", "additionalProperties": false,
+		"properties": map[string]any{
+			"number":         map[string]any{"type": "integer"},
+			"agent":          map[string]any{"type": "string"},
+			"title":          map[string]any{"type": "string"},
+			"last_action":    map[string]any{"type": "string"},
+			"last_output_at": map[string]any{"type": "string"},
+			"quiet_ms":       map[string]any{"type": "integer"},
+			"deadline":       map[string]any{"type": "string"},
+			"stdout_bytes":   map[string]any{"type": "integer"},
+			"stderr_bytes":   map[string]any{"type": "integer"},
+		}, "required": []string{"number", "agent", "title"},
+	}
+}
+
 func commandToolsV5(tools []mcpToolDefinition) []mcpToolDefinition {
 	properties := tools[4].InputSchema["properties"].(map[string]any)
 	properties["request_key"] = map[string]any{"type": "string", "minLength": 1, "maxLength": 128, "description": "Unique key for this launch. Reuse the same key and arguments after Retry; never generate a new key for a lost response."}
@@ -23,6 +39,7 @@ func commandToolsV5(tools []mcpToolDefinition) []mcpToolDefinition {
 		"pid": map[string]any{"type": "integer"}, "status": map[string]any{"type": "string"},
 		"started_at": map[string]any{"type": "string"}, "exit_code": map[string]any{"type": []string{"integer", "null"}},
 		"duration_ms": map[string]any{"type": "integer"},
+		"opencode":    openCodeProgressSchema(),
 	}, "required": []string{"session_id", "cwd", "pid", "status", "started_at", "exit_code", "duration_ms"}}
 	return append(tools, mcpToolDefinition{
 		Name: "list_commands", Description: "Find active and recent command sessions after Retry. Never relaunch a command solely because its original response was lost.",

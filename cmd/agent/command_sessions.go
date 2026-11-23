@@ -23,6 +23,7 @@ type processSession struct {
 	requestID       string
 	id              string
 	command         string
+	openCode        *openCodeCommand
 	cwd             string
 	status          string
 	startedAt       time.Time
@@ -47,26 +48,28 @@ type processSession struct {
 }
 
 type sessionMetadata struct {
-	Source          string     `json:"source,omitempty"`
-	RequestKeyHash  string     `json:"request_key_hash,omitempty"`
-	RequestHash     string     `json:"request_hash,omitempty"`
-	RequestID       string     `json:"request_id,omitempty"`
-	ID              string     `json:"session_id"`
-	CWD             string     `json:"cwd"`
-	PID             int        `json:"pid"`
-	ProcessIdentity string     `json:"process_identity"`
-	Status          string     `json:"status"`
-	StartedAt       time.Time  `json:"started_at"`
-	FinishedAt      *time.Time `json:"finished_at"`
-	ExitCode        *int       `json:"exit_code"`
-	TimeoutDeadline time.Time  `json:"timeout_deadline"`
-	StdoutTruncated bool       `json:"stdout_truncated"`
-	StderrTruncated bool       `json:"stderr_truncated"`
+	Source          string           `json:"source,omitempty"`
+	OpenCode        *openCodeCommand `json:"opencode,omitempty"`
+	RequestKeyHash  string           `json:"request_key_hash,omitempty"`
+	RequestHash     string           `json:"request_hash,omitempty"`
+	RequestID       string           `json:"request_id,omitempty"`
+	ID              string           `json:"session_id"`
+	CWD             string           `json:"cwd"`
+	PID             int              `json:"pid"`
+	ProcessIdentity string           `json:"process_identity"`
+	Status          string           `json:"status"`
+	StartedAt       time.Time        `json:"started_at"`
+	FinishedAt      *time.Time       `json:"finished_at"`
+	ExitCode        *int             `json:"exit_code"`
+	TimeoutDeadline time.Time        `json:"timeout_deadline"`
+	StdoutTruncated bool             `json:"stdout_truncated"`
+	StderrTruncated bool             `json:"stderr_truncated"`
 }
 
 type logBudget struct {
 	mu              sync.Mutex
 	remaining       int64
+	lastOutput      time.Time
 	stdoutTruncated bool
 	stderrTruncated bool
 }
@@ -83,6 +86,9 @@ type cappedStreamWriter struct {
 func (w *cappedStreamWriter) Write(data []byte) (int, error) {
 	w.budget.mu.Lock()
 	defer w.budget.mu.Unlock()
+	if len(data) > 0 {
+		w.budget.lastOutput = time.Now()
+	}
 	part := data
 	if w.budget.remaining >= 0 && int64(len(part)) > w.budget.remaining {
 		if !w.budget.stdoutTruncated && !w.budget.stderrTruncated {
@@ -216,6 +222,13 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 		metadataPath: filepath.Join(sessionDir, "metadata.json"), stdoutPath: stdoutPath, stderrPath: stderrPath,
 		cmd: cmd, stdoutFile: stdoutFile, stderrFile: stderrFile, budget: budget, done: make(chan struct{}),
 	}
+	session.openCode = detectOpenCodeCommand(command, cmd.Args)
+	if session.openCode != nil {
+		e.mu.Lock()
+		e.openCodeNumber++
+		session.openCode.Number = e.openCodeNumber
+		e.mu.Unlock()
+	}
 	if identity, ok := ctx.Value(commandIdentity{}).(commandIdentity); ok {
 		session.requestKeyHash, session.requestHash = identity.key, identity.hash
 	}
@@ -238,7 +251,9 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 			e.logf("[session=%s] ARGV %q cwd=%q", id, cmd.Args, cwd)
 		}
 	}
-	if !e.verbose && e.source != "local" {
+	if !e.verbose && session.openCode != nil {
+		e.logf("▶ %s", session.openCode.label())
+	} else if !e.verbose && e.source != "local" {
 		label := command
 		if !hasCommand {
 			label = strings.Join(cmd.Args, " ")
@@ -248,6 +263,8 @@ func (e *nativeExecutor) execCommand(ctx context.Context, args map[string]any, v
 	if err := cmd.Start(); err != nil {
 		if e.verbose {
 			e.logf("[session=%s] START_FAILED error=%q", id, err.Error())
+		} else if session.openCode != nil {
+			e.logf("⚠ %s — запуск не удался: %s", session.openCode.label(), compactString(err.Error(), 180))
 		} else if e.source != "local" {
 			e.logf("⚠ Не удалось запустить команду: %s", compactString(err.Error(), 180))
 		}
@@ -342,6 +359,11 @@ func (e *nativeExecutor) waitProcess(session *processSession) {
 	err := session.cmd.Wait()
 	_ = session.stdoutFile.Close()
 	_ = session.stderrFile.Close()
+	var lastAction string
+	if session.openCode != nil && !e.verbose {
+		progress, _, _ := session.openCodeSnapshot(time.Now(), true)
+		lastAction = progress.LastAction
+	}
 	e.mu.Lock()
 	if session.status == "running" {
 		session.status = "exited"
@@ -362,6 +384,8 @@ func (e *nativeExecutor) waitProcess(session *processSession) {
 	session.finishedAt = time.Now().UTC()
 	if e.verbose {
 		e.logf("[session=%s] EXIT status=%s exit_code=%v elapsed=%s error=%v", session.id, session.status, exitCodeValue(session.exitCode), session.finishedAt.Sub(session.startedAt).Round(time.Millisecond), err)
+	} else if session.openCode != nil {
+		e.logOpenCodeOutcome(session, lastAction)
 	} else if e.source == "local" {
 		e.logf("exec_command — %s", commandOutcome(session.status, session.exitCode))
 	} else {
@@ -370,7 +394,7 @@ func (e *nativeExecutor) waitProcess(session *processSession) {
 	e.mu.Unlock()
 	_ = e.persistSession(session)
 	e.commandEvent(session, "finished")
-	if !e.verbose && e.source != "local" && err != nil {
+	if !e.verbose && e.source != "local" && session.openCode == nil && err != nil {
 		if file, openErr := os.Open(session.stderrPath); openErr == nil {
 			detail, _ := io.ReadAll(io.LimitReader(file, 1024))
 			file.Close()
@@ -392,9 +416,24 @@ func exitCodeValue(code *int) any {
 func (e *nativeExecutor) commandHeartbeat(session *processSession) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+	var action string
+	var position int64
+	var stderr bool
 	for {
 		select {
 		case <-ticker.C:
+			if session.openCode != nil && !e.verbose {
+				progress, next, onStderr := session.openCodeSnapshot(time.Now(), true)
+				if progress.LastAction != "" && (progress.LastAction != action || next != position || onStderr != stderr) {
+					action, position, stderr = progress.LastAction, next, onStderr
+					e.mu.Lock()
+					if session.status == "running" {
+						e.logf("… %s — %s", session.openCode.label(), action)
+					}
+					e.mu.Unlock()
+				}
+				continue
+			}
 			e.mu.Lock()
 			if session.status == "running" {
 				if e.verbose {
@@ -575,6 +614,10 @@ func (e *nativeExecutor) sessionResult(id string, stdoutOffset, stderrOffset *in
 			"stdout_next_offset": stdoutNext, "stderr_next_offset": stderrNext,
 			"stdout_truncated": stdoutCapped || stdoutMore, "stderr_truncated": stderrCapped || stderrMore,
 		}
+		if session.openCode != nil {
+			progress, _, _ := session.openCodeSnapshot(durationEnd, true)
+			result["opencode"] = progress
+		}
 		return result, nil
 	}
 	offset := 0
@@ -719,6 +762,7 @@ func (e *nativeExecutor) persistSession(session *processSession) error {
 	e.mu.Lock()
 	metadata := sessionMetadata{
 		Source:         e.source,
+		OpenCode:       session.openCode,
 		RequestKeyHash: session.requestKeyHash, RequestHash: session.requestHash, RequestID: session.requestID,
 		ID: session.id, CWD: session.cwd, PID: session.pid, ProcessIdentity: session.processIdentity,
 		Status: session.status, StartedAt: session.startedAt, ExitCode: session.exitCode, TimeoutDeadline: session.deadline,
@@ -769,11 +813,14 @@ func (e *nativeExecutor) restoreSessions() error {
 		}
 		session := &processSession{
 			requestKeyHash: metadata.RequestKeyHash, requestHash: metadata.RequestHash, requestID: metadata.RequestID,
-			id: metadata.ID, cwd: metadata.CWD, pid: metadata.PID, processIdentity: metadata.ProcessIdentity,
+			id: metadata.ID, cwd: metadata.CWD, pid: metadata.PID, processIdentity: metadata.ProcessIdentity, openCode: metadata.OpenCode,
 			status: metadata.Status, startedAt: metadata.StartedAt, exitCode: metadata.ExitCode, deadline: metadata.TimeoutDeadline,
 			sessionDir: sessionDir, metadataPath: metadataPath, stdoutPath: filepath.Join(sessionDir, "stdout.log"),
 			stderrPath: filepath.Join(sessionDir, "stderr.log"), stdoutTruncated: metadata.StdoutTruncated,
 			stderrTruncated: metadata.StderrTruncated, done: make(chan struct{}),
+		}
+		if session.openCode != nil {
+			e.openCodeNumber = max(e.openCodeNumber, session.openCode.Number)
 		}
 		if metadata.FinishedAt != nil {
 			session.finishedAt = *metadata.FinishedAt
@@ -813,6 +860,11 @@ func (e *nativeExecutor) monitorRestored(session *processSession) {
 				_ = e.stopSession(session.id, "timed_out")
 			}
 			if !processAliveWithIdentity(session.pid, session.processIdentity) {
+				var lastAction string
+				if session.openCode != nil && !e.verbose {
+					progress, _, _ := session.openCodeSnapshot(time.Now(), true)
+					lastAction = progress.LastAction
+				}
 				e.mu.Lock()
 				if session.status == "running" {
 					session.status = "exited"
@@ -820,6 +872,8 @@ func (e *nativeExecutor) monitorRestored(session *processSession) {
 				session.finishedAt = time.Now().UTC()
 				if e.verbose {
 					e.logf("[session=%s] EXIT status=%s exit_code=unknown (restored process)", session.id, session.status)
+				} else if session.openCode != nil {
+					e.logOpenCodeOutcome(session, lastAction)
 				} else {
 					e.logf("%s — %s", commandOutcome(session.status, nil), commandLabel(session))
 				}

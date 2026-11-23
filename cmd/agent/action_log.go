@@ -183,6 +183,9 @@ func readableError(detail map[string]any) string {
 }
 
 func commandLabel(session *processSession) string {
+	if session.openCode != nil {
+		return session.openCode.label()
+	}
 	if session.command != "" {
 		return compactString(session.command, 100)
 	}
